@@ -1,0 +1,5 @@
+# Python sidecar 依赖（优化器 + .numbers 导入）
+numbers_parser>=4.0
+numpy>=2.0
+scipy>=1.14
+futu-api>=10.10
