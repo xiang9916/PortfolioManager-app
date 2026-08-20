@@ -2,6 +2,8 @@
 .swiftpm-cache/
 .tmp/
 .cache/
+Optimizer/.venv/
+tmp/
 .DS_Store
 xcuserdata/
 *.xcodeproj
