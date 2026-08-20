@@ -136,7 +136,7 @@ public final class Database {
 
     public func upsertHoldings(_ holdings: [Holding]) throws {
         try exec("BEGIN TRANSACTION")
-        let sql = "INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, value_cny, as_of_date) VALUES(?,?,?,?,?)"
+        let sql = "INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, value, currency, as_of_date) VALUES(?,?,?,?,?,?)"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
@@ -146,8 +146,9 @@ public final class Database {
             bindText(stmt, 1, h.assetKey)
             sqlite3_bind_double(stmt, 2, h.quantity)
             sqlite3_bind_double(stmt, 3, h.costBasis)
-            sqlite3_bind_double(stmt, 4, h.valueCny)
-            bindText(stmt, 5, h.asOfDate)
+            sqlite3_bind_double(stmt, 4, h.value)
+            bindText(stmt, 5, h.currency)
+            bindText(stmt, 6, h.asOfDate)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
             }
@@ -158,8 +159,8 @@ public final class Database {
     }
 
     /// Update the editable fields of a holding (资产透视 editing).
-    public func updateHolding(assetKey: String, quantity: Double, costBasis: Double, valueCny: Double) throws {
-        let sql = "UPDATE holdings SET quantity = ?, cost_basis = ?, value_cny = ? WHERE asset_key = ?"
+    public func updateHolding(assetKey: String, quantity: Double, costBasis: Double, value: Double, currency: String) throws {
+        let sql = "UPDATE holdings SET quantity = ?, cost_basis = ?, value = ?, currency = ? WHERE asset_key = ?"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
@@ -167,11 +168,78 @@ public final class Database {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_double(stmt, 1, quantity)
         sqlite3_bind_double(stmt, 2, costBasis)
-        sqlite3_bind_double(stmt, 3, valueCny)
-        assetKey.withCString { sqlite3_bind_text(stmt, 4, $0, -1, SQLITE_TRANSIENT) }
+        sqlite3_bind_double(stmt, 3, value)
+        currency.withCString { sqlite3_bind_text(stmt, 4, $0, -1, SQLITE_TRANSIENT) }
+        assetKey.withCString { sqlite3_bind_text(stmt, 5, $0, -1, SQLITE_TRANSIENT) }
         if sqlite3_step(stmt) != SQLITE_DONE {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
         }
+    }
+
+    // MARK: 能力2 — asset add/delete + FX rates
+
+    /// Insert (or replace) a single asset target.
+    public func insertAsset(_ a: Asset) throws {
+        try upsertAssets([a])
+    }
+
+    /// Delete an asset target and its holdings / prices / financials (资产透视 删除标的).
+    public func deleteAsset(key: String) throws {
+        try exec("BEGIN TRANSACTION")
+        for table in ["holdings", "prices", "financials", "assets"] {
+            let col = (table == "assets") ? "key" : "asset_key"
+            let sql = "DELETE FROM " + table + " WHERE " + col + " = ?"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            key.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+        try exec("COMMIT")
+    }
+
+    public func upsertFxRates(_ rates: [FxRate]) throws {
+        try exec("BEGIN TRANSACTION")
+        let sql = "INSERT OR REPLACE INTO fx_rates(currency, rate_to_cny, as_of_date, source) VALUES(?,?,?,?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for r in rates {
+            bindText(stmt, 1, r.currency)
+            sqlite3_bind_double(stmt, 2, r.rateToCny)
+            bindText(stmt, 3, r.asOfDate)
+            bindText(stmt, 4, r.source)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+            }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+        }
+        try exec("COMMIT")
+    }
+
+    public func fetchFxRates() throws -> [FxRate] {
+        let sql = "SELECT currency, rate_to_cny, as_of_date, source FROM fx_rates ORDER BY currency"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var out: [FxRate] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(FxRate(
+                currency: String(cString: sqlite3_column_text(stmt, 0)),
+                rateToCny: sqlite3_column_double(stmt, 1),
+                asOfDate: String(cString: sqlite3_column_text(stmt, 2)),
+                source: sqlite3_column_type(stmt, 3) != SQLITE_NULL ? String(cString: sqlite3_column_text(stmt, 3)) : nil))
+        }
+        return out
     }
 
     public func fetchPrices(assetKey: String) throws -> [PricePoint] {
@@ -240,7 +308,7 @@ public final class Database {
     }
 
     public func fetchHoldings(asOfDate: String? = nil) throws -> [Holding] {
-        var sql = "SELECT id, asset_key, quantity, cost_basis, value_cny, as_of_date FROM holdings"
+        var sql = "SELECT id, asset_key, quantity, cost_basis, value, currency, as_of_date FROM holdings"
         if let d = asOfDate { sql += " WHERE as_of_date = '" + d + "'" }
         sql += " ORDER BY asset_key"
         var stmt: OpaquePointer?
@@ -255,8 +323,9 @@ public final class Database {
                 assetKey: String(cString: sqlite3_column_text(stmt, 1)),
                 quantity: sqlite3_column_double(stmt, 2),
                 costBasis: sqlite3_column_double(stmt, 3),
-                valueCny: sqlite3_column_double(stmt, 4),
-                asOfDate: String(cString: sqlite3_column_text(stmt, 5))))
+                value: sqlite3_column_double(stmt, 4),
+                currency: String(cString: sqlite3_column_text(stmt, 5)),
+                asOfDate: String(cString: sqlite3_column_text(stmt, 6))))
         }
         return out
     }

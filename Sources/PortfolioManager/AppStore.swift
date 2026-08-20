@@ -73,11 +73,13 @@ public enum AppPaths {
 public struct HoldingDraft: Hashable {
     public var quantity: Double
     public var costBasis: Double
-    public var valueCny: Double
-    public init(quantity: Double = 0, costBasis: Double = 0, valueCny: Double = 0) {
+    public var value: Double
+    public var currency: String
+    public init(quantity: Double = 0, costBasis: Double = 0, value: Double = 0, currency: String = "CNY") {
         self.quantity = quantity
         self.costBasis = costBasis
-        self.valueCny = valueCny
+        self.value = value
+        self.currency = currency
     }
 }
 
@@ -102,6 +104,9 @@ public final class AppStore {
 
     // 能力4
     public var financials: [Financial] = []
+
+    // 能力2 汇率 (币种→人民币), 自动抓取 + 手动可覆盖
+    public var fxRates: [FxRate] = []
 
     // 能力2 optimizer state
     public var targetReturn: Double = 0.10
@@ -173,8 +178,10 @@ public final class AppStore {
             performanceSummary = perf.summary
             perspectives = try repository.fetchAssetPerspectives()
             holdingDrafts = Dictionary(uniqueKeysWithValues: perspectives.map {
-                ($0.assetKey, HoldingDraft(quantity: $0.quantity, costBasis: $0.costBasis, valueCny: $0.valueCny))
+                ($0.assetKey, HoldingDraft(quantity: $0.quantity, costBasis: $0.costBasis,
+                                           value: $0.value, currency: $0.currency))
             })
+            fxRates = try db.fetchFxRates()
             financials = try repository.fetchFinancialComparison()
             lastUpdated = ISO8601DateFormatter().string(from: Date())
             statusMessage = nil
@@ -188,7 +195,7 @@ public final class AppStore {
     public var hasUnsavedChanges: Bool {
         for (key, draft) in holdingDrafts {
             guard let row = perspectives.first(where: { $0.assetKey == key }) else { continue }
-            if draft.valueCny != row.valueCny || draft.quantity != row.quantity || draft.costBasis != row.costBasis {
+            if draft.value != row.value || draft.quantity != row.quantity || draft.costBasis != row.costBasis || draft.currency != row.currency {
                 return true
             }
         }
@@ -200,7 +207,7 @@ public final class AppStore {
         do {
             for (key, draft) in holdingDrafts {
                 try db.updateHolding(assetKey: key, quantity: draft.quantity,
-                                     costBasis: draft.costBasis, valueCny: draft.valueCny)
+                                     costBasis: draft.costBasis, value: draft.value, currency: draft.currency)
             }
             loadAll()
             statusMessage = "已保存"
@@ -243,18 +250,128 @@ public final class AppStore {
         }
     }
 
+    // MARK: 能力2 — 标的增删 + 联网校验 + 汇率
+
+    /// Currencies offered in the pickers.
+    public static let currencyOptions = ["CNY", "USD", "HKD", "JPY", "SGD", "EUR", "GBP", "AUD", "CAD", "CHF"]
+
+    private static func todayString() -> String {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: Date())
+    }
+
+    /// Validate a ticker online (Yahoo Finance); returns resolved currency/name or a failure message.
+    public func lookupSymbol(_ symbol: String) async -> (valid: Bool, currency: String, name: String?, message: String) {
+        let src = YahooFinanceSource()
+        do {
+            let info = try await src.lookup(symbol: symbol)
+            let nameText = info.name ?? ""
+            return (true, info.currency, info.name,
+                    "校验通过" + (nameText.isEmpty ? "" : "：" + nameText))
+        } catch {
+            return (false, "USD", nil, "校验失败：\(error)")
+        }
+    }
+
+    /// Add a new asset target (with a zero holding so it shows up in 资产透视).
+    public func addAsset(key: String, name: String, ticker: String?, market: String?,
+                         assetClass: String, pool: Pool, currency: String) {
+        do {
+            let asset = Asset(key: key, name: name, ticker: ticker, market: market,
+                              assetClass: assetClass, pool: pool, currency: currency, source: "manual")
+            try db.insertAsset(asset)
+            try db.upsertHoldings([Holding(assetKey: key, quantity: 0, costBasis: 0,
+                                           value: 0, currency: currency,
+                                           asOfDate: Self.todayString())])
+            loadAll()
+            statusMessage = "已添加 \(name)"
+        } catch {
+            statusMessage = "添加失败: \(error)"
+        }
+    }
+
+    /// Delete an asset target (and its holding / prices / financials).
+    public func deleteAsset(key: String) {
+        do {
+            try db.deleteAsset(key: key)
+            loadAll()
+            statusMessage = "已删除标的"
+        } catch {
+            statusMessage = "删除失败: \(error)"
+        }
+    }
+
+    /// Two-way Binding into a holding draft's currency (String).
+    public func holdingCurrencyBinding(_ key: String) -> Binding<String> {
+        Binding(
+            get: { self.holdingDrafts[key]?.currency ?? "CNY" },
+            set: { v in
+                var d = self.holdingDrafts[key] ?? HoldingDraft()
+                d.currency = v
+                var copy = self.holdingDrafts
+                copy[key] = d
+                self.holdingDrafts = copy
+            }
+        )
+    }
+
+    /// Auto-fetch CNY rates for every non-CNY currency in the portfolio (能力1).
+    public func refreshFxRates() async {
+        statusMessage = "正在更新汇率…"
+        var currencies = Set(perspectives.map { $0.currency }).filter { $0 != "CNY" }
+        if currencies.isEmpty { currencies = ["USD", "HKD", "JPY", "SGD"] }
+        let src = YahooFinanceSource()
+        var newRates: [FxRate] = []
+        var failed: [String] = []
+        for ccy in currencies.sorted() {
+            do {
+                let info = try await src.lookup(symbol: ccy + "CNY=X")
+                guard let price = info.price, price > 0 else { failed.append(ccy); continue }
+                newRates.append(FxRate(currency: ccy, rateToCny: price,
+                                       asOfDate: Self.todayString(), source: "yahoo"))
+            } catch { failed.append(ccy) }
+        }
+        if !newRates.isEmpty { try? db.upsertFxRates(newRates) }
+        loadAll()
+        statusMessage = "汇率更新完成" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个币种")
+    }
+
+    /// Manual override of a single FX rate.
+    public func setFxRate(currency: String, rateToCny: Double) {
+        do {
+            try db.upsertFxRates([FxRate(currency: currency, rateToCny: rateToCny,
+                                         asOfDate: Self.todayString(), source: "manual")])
+            loadAll()
+            statusMessage = "已保存汇率"
+        } catch {
+            statusMessage = "保存汇率失败: \(error)"
+        }
+    }
+
     // MARK: 能力1 — data refresh (auto-fetch public quotes)
 
     public func refreshPrices() async {
         statusMessage = "正在更新行情…"
         var updated = 0
         var failed: [String] = []
+        let assets = (try? db.fetchAssets()) ?? []
+        let assetByKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         for row in perspectives {
-            guard let ref = AssetCatalog.ref(for: row.assetKey) else { continue }
-            let source: any DataSource = ref.source == .fund ? EastmoneySource() : YahooFinanceSource()
+            let ref = AssetCatalog.ref(for: row.assetKey)
+            let source: any DataSource
+            let symbol: String
+            if let ref, ref.source == .fund {
+                source = EastmoneySource(); symbol = ref.symbol
+            } else if let ref {
+                source = YahooFinanceSource(); symbol = ref.symbol
+            } else if let a = assetByKey[row.assetKey], let t = a.ticker, !t.isEmpty {
+                source = YahooFinanceSource(); symbol = t
+            } else {
+                continue
+            }
             do {
-                let hist = try await source.fetchHistory(symbol: ref.symbol)
-                let points = hist.map { PricePoint(assetKey: ref.key, date: $0.date, close: $0.close, currency: $0.currency) }
+                let hist = try await source.fetchHistory(symbol: symbol)
+                let points = hist.map { PricePoint(assetKey: row.assetKey, date: $0.date, close: $0.close, currency: $0.currency) }
                 try db.upsertPrices(points)
                 updated += points.count
             } catch {

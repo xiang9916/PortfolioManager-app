@@ -56,6 +56,25 @@ public enum AssetClassStyle {
     }
 }
 
+/// Currency symbol helper (币种显示).
+public enum CurrencyStyle {
+    public static func symbol(_ code: String) -> String {
+        switch code {
+        case "USD": return "$"
+        case "HKD": return "HK$"
+        case "JPY": return "¥"
+        case "CNY": return "¥"
+        case "SGD": return "S$"
+        case "EUR": return "€"
+        case "GBP": return "£"
+        case "AUD": return "A$"
+        case "CAD": return "C$"
+        case "CHF": return "CHF "
+        default: return code + " "
+        }
+    }
+}
+
 /// A chart-friendly plottable point (Date x-axis).
 public struct ChartPoint: Identifiable {
     public let date: Date

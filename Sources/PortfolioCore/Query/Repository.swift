@@ -43,7 +43,11 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let name: String
     public let assetClass: String
     public let pool: Pool
+    /// Holding currency (the currency `value` / `costBasis` are entered in).
     public let currency: String
+    /// Market value in the holding currency (e.g. USD).
+    public let value: Double
+    /// Market value converted to CNY (value × FX rate) — basis for weight.
     public let valueCny: Double
     public let quantity: Double
     public let costBasis: Double
@@ -62,20 +66,35 @@ public final class Repository {
         self.db = db
     }
 
+    // MARK: FX — 能力2 权重统一成人民币
+
+    /// Load currency→CNY rates; CNY is always 1.0.
+    private func fxRates() -> [String: Double] {
+        var map = Dictionary(uniqueKeysWithValues: (try? db.fetchFxRates())?.map { ($0.currency, $0.rateToCny) } ?? [])
+        map["CNY"] = 1.0
+        return map
+    }
+
+    /// A holding's value converted to CNY (missing rate falls back to 1.0).
+    private func cny(_ h: Holding, fx: [String: Double]) -> Double {
+        h.value * (fx[h.currency] ?? 1.0)
+    }
+
     // MARK: 模块1 — asset allocation
 
     public func fetchAllocation() throws -> AllocationSnapshot {
         let assets = try db.fetchAssets()
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let holdings = try db.fetchHoldings()
+        let fx = fxRates()
 
-        let total = holdings.reduce(0.0) { $0 + $1.valueCny }
+        let total = holdings.reduce(0.0) { $0 + cny($1, fx: fx) }
         var groups: [String: (value: Double, pool: Pool)] = [:]
         for h in holdings {
             let cls = byKey[h.assetKey]?.assetClass ?? "其他"
             let pool = byKey[h.assetKey]?.pool ?? .overseas
             let cur = groups[cls] ?? (0, pool)
-            groups[cls] = (cur.value + h.valueCny, pool)
+            groups[cls] = (cur.value + cny(h, fx: fx), pool)
         }
         let slices = groups.map { (cls, v) in
             AllocationSlice(assetClass: cls, value: v.value,
@@ -102,12 +121,13 @@ public final class Repository {
     /// (FX is not embedded), so the series reflects relative weighted performance.
     public func fetchPerformance(lookbackYears: Double = 3.0) throws -> (points: [PerformancePoint], summary: PerformanceSummary) {
         let holdings = try db.fetchHoldings()
-        let total = holdings.reduce(0.0) { $0 + $1.valueCny }
+        let fx = fxRates()
+        let total = holdings.reduce(0.0) { $0 + cny($1, fx: fx) }
         guard total > 0, !holdings.isEmpty else {
             return ([], PerformanceSummary(startDate: nil, endDate: nil, totalReturn: 0,
                                            annualizedVolatility: 0, maxDrawdown: 0, pointCount: 0))
         }
-        let weights = Dictionary(uniqueKeysWithValues: holdings.map { ($0.assetKey, $0.valueCny / total) })
+        let weights = Dictionary(uniqueKeysWithValues: holdings.map { ($0.assetKey, cny($0, fx: fx) / total) })
 
         // window end = latest price date across holdings; start = end - lookback
         var latestDate = ""
@@ -190,10 +210,12 @@ public final class Repository {
         let assets = try db.fetchAssets()
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let holdings = try db.fetchHoldings()
-        let total = holdings.reduce(0.0) { $0 + $1.valueCny }
+        let fx = fxRates()
+        let total = holdings.reduce(0.0) { $0 + cny($1, fx: fx) }
 
         return holdings.compactMap { h -> AssetPerspectiveRow? in
             guard let a = byKey[h.assetKey] else { return nil }
+            let valueCny = cny(h, fx: fx)
             var latestPrice: Double? = nil
             var latestDate: String? = nil
             if let pts = try? db.fetchPrices(assetKey: h.assetKey), let last = pts.last {
@@ -205,11 +227,12 @@ public final class Repository {
                 name: a.name,
                 assetClass: a.assetClass ?? "其他",
                 pool: a.pool,
-                currency: a.currency,
-                valueCny: h.valueCny,
+                currency: h.currency,
+                value: h.value,
+                valueCny: valueCny,
                 quantity: h.quantity,
                 costBasis: h.costBasis,
-                weight: total > 0 ? h.valueCny / total : 0,
+                weight: total > 0 ? valueCny / total : 0,
                 latestPrice: latestPrice,
                 latestDate: latestDate)
         }.sorted { $0.valueCny > $1.valueCny }

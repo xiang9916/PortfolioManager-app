@@ -2,7 +2,7 @@ import Foundation
 
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 1
+    public static let version: Int = 2
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -105,6 +105,39 @@ public enum Schema {
             schema_version INTEGER NOT NULL
         );
         """,
+        ]),
+        (2, [
+        // 能力2 币种化: holdings 重建为 value(标的币种) + currency 列,
+        // 新增 fx_rates(币种→人民币) 表,权重统一成人民币后计算。
+        // 现有 value_cny 已是人民币 → value 原样搬运,currency 默认 CNY。
+        "BEGIN TRANSACTION;",
+        """
+        CREATE TABLE holdings_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_key TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            cost_basis REAL NOT NULL,
+            value REAL NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'CNY',
+            as_of_date TEXT NOT NULL,
+            FOREIGN KEY(asset_key) REFERENCES assets(key)
+        );
+        """,
+        """
+        INSERT INTO holdings_v2(id, asset_key, quantity, cost_basis, value, currency, as_of_date)
+            SELECT id, asset_key, quantity, cost_basis, value_cny, 'CNY', as_of_date FROM holdings;
+        """,
+        "DROP TABLE holdings;",
+        "ALTER TABLE holdings_v2 RENAME TO holdings;",
+        """
+        CREATE TABLE IF NOT EXISTS fx_rates (
+            currency TEXT PRIMARY KEY,
+            rate_to_cny REAL NOT NULL,
+            as_of_date TEXT NOT NULL,
+            source TEXT
+        );
+        """,
+        "COMMIT;",
         ]),
     ]
 }

@@ -30,13 +30,31 @@ public struct Holding: Codable, Identifiable, Hashable {
     public let assetKey: String
     public let quantity: Double
     public let costBasis: Double
-    public let valueCny: Double
+    /// Market value denominated in `currency` (the asset's own currency, e.g. USD).
+    public let value: Double
+    /// ISO currency code of `value` and `costBasis` (e.g. "USD", "HKD", "CNY").
+    public let currency: String
     public let asOfDate: String
 
     public init(id: Int64? = nil, assetKey: String, quantity: Double,
-                costBasis: Double, valueCny: Double, asOfDate: String) {
+                costBasis: Double, value: Double, currency: String = "CNY", asOfDate: String) {
         self.id = id; self.assetKey = assetKey; self.quantity = quantity
-        self.costBasis = costBasis; self.valueCny = valueCny; self.asOfDate = asOfDate
+        self.costBasis = costBasis; self.value = value; self.currency = currency
+        self.asOfDate = asOfDate
+    }
+}
+
+/// A CNY exchange rate for one currency (能力2 权重汇率统一).
+public struct FxRate: Codable, Identifiable, Hashable {
+    public let currency: String
+    public let rateToCny: Double
+    public let asOfDate: String
+    public let source: String?
+    public var id: String { currency }
+
+    public init(currency: String, rateToCny: Double, asOfDate: String, source: String? = nil) {
+        self.currency = currency; self.rateToCny = rateToCny
+        self.asOfDate = asOfDate; self.source = source
     }
 }
 
