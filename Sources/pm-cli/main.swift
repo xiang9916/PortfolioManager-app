@@ -124,6 +124,36 @@ if args.count >= 2 && args[1] == "import" {
         exit(1)
     }
 }
+if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "restore" || args[1] == "export") {
+    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    let backupDir = URL(fileURLWithPath: "tmp/backups")
+    do {
+        let db = try Database(path: dbPath)
+        let bm = BackupManager(db: db, backupDir: backupDir)
+        switch args[1] {
+        case "backup":
+            let dest = try bm.createBackup()
+            print("已备份: " + dest.lastPathComponent)
+        case "list":
+            let items = bm.listBackups()
+            print("备份(" + String(items.count) + "):")
+            for u in items { print("  " + u.lastPathComponent) }
+        case "restore":
+            guard args.count >= 4 else { print("用法: pm-cli restore <db> <backup.db>"); exit(1) }
+            try bm.restore(from: URL(fileURLWithPath: args[3]))
+            print("已回滚到: " + args[3])
+        case "export":
+            let out = URL(fileURLWithPath: args.count >= 4 ? args[3] : "tmp/export.json")
+            try bm.exportJSON(to: out)
+            print("已导出: " + out.path)
+        default: break
+        }
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("失败: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+}
 if args.count >= 2 && args[1] == "extract" {
     let numbersPath = args.count >= 3 ? args[2] : "../Finance/投资组合情况.numbers"
     exit(runExtract(numbersPath: numbersPath))
