@@ -1,0 +1,8 @@
+.build/
+.swiftpm-cache/
+.tmp/
+.cache/
+.DS_Store
+xcuserdata/
+*.xcodeproj
+.build-scratch/
