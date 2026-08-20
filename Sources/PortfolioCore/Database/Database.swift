@@ -33,8 +33,23 @@ public final class Database {
     deinit { sqlite3_close(db) }
 
     public func migrate() throws {
-        for ddl in Schema.ddl { try exec(ddl) }
-        try exec("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', '" + String(Schema.version) + "')")
+        // Ensure schema_meta exists first so we can read the persisted version.
+        try exec("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        let current = currentSchemaVersion()
+        for (v, statements) in Schema.migrations where v > current {
+            for sql in statements { try exec(sql) }
+            try exec("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', '" + String(v) + "')")
+        }
+    }
+
+    /// Read the persisted schema version (0 for a brand-new / empty DB).
+    public func currentSchemaVersion() -> Int {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT value FROM schema_meta WHERE key = 'version'", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_type(stmt, 0) == SQLITE_TEXT else { return 0 }
+        let s = String(cString: sqlite3_column_text(stmt, 0))
+        return Int(s) ?? 0
     }
 
     public func exec(_ sql: String) throws {
