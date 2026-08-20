@@ -149,7 +149,7 @@ public final class Database {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, assetKey, -1, nil)
+        assetKey.withCString { sqlite3_bind_text(stmt, 1, $0, -1, SQLITE_TRANSIENT) }
         var out: [PricePoint] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let key = String(cString: sqlite3_column_text(stmt, 0))
@@ -168,5 +168,231 @@ public final class Database {
         defer { sqlite3_finalize(stmt) }
         if sqlite3_step(stmt) == SQLITE_ROW { return Int(sqlite3_column_int64(stmt, 0)) }
         return 0
+    }
+
+    // MARK: - Queries (Phase 3-6 UI + financials + optimizer runs)
+
+    private func colText(_ stmt: OpaquePointer?, _ idx: Int32) -> String? {
+        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else { return nil }
+        return String(cString: sqlite3_column_text(stmt, idx))
+    }
+
+    private func colDouble(_ stmt: OpaquePointer?, _ idx: Int32) -> Double? {
+        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(stmt, idx)
+    }
+
+    public func fetchAssets() throws -> [Asset] {
+        let sql = "SELECT id, key, name, ticker, market, asset_class, pool, currency, source, fee_rate FROM assets ORDER BY key"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var out: [Asset] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let poolRaw = String(cString: sqlite3_column_text(stmt, 6))
+            out.append(Asset(
+                id: sqlite3_column_int64(stmt, 0),
+                key: String(cString: sqlite3_column_text(stmt, 1)),
+                name: String(cString: sqlite3_column_text(stmt, 2)),
+                ticker: colText(stmt, 3),
+                market: colText(stmt, 4),
+                assetClass: colText(stmt, 5),
+                pool: Pool(rawValue: poolRaw) ?? .overseas,
+                currency: String(cString: sqlite3_column_text(stmt, 7)),
+                source: colText(stmt, 8),
+                feeRate: colDouble(stmt, 9)))
+        }
+        return out
+    }
+
+    public func fetchHoldings(asOfDate: String? = nil) throws -> [Holding] {
+        var sql = "SELECT id, asset_key, quantity, cost_basis, value_cny, as_of_date FROM holdings"
+        if let d = asOfDate { sql += " WHERE as_of_date = '" + d + "'" }
+        sql += " ORDER BY asset_key"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var out: [Holding] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(Holding(
+                id: sqlite3_column_int64(stmt, 0),
+                assetKey: String(cString: sqlite3_column_text(stmt, 1)),
+                quantity: sqlite3_column_double(stmt, 2),
+                costBasis: sqlite3_column_double(stmt, 3),
+                valueCny: sqlite3_column_double(stmt, 4),
+                asOfDate: String(cString: sqlite3_column_text(stmt, 5))))
+        }
+        return out
+    }
+
+    public func fetchSnapshots() throws -> [Snapshot] {
+        let sql = "SELECT id, date, total_value, domestic_value, overseas_value FROM snapshots ORDER BY date"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var out: [Snapshot] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(Snapshot(
+                id: sqlite3_column_int64(stmt, 0),
+                date: String(cString: sqlite3_column_text(stmt, 1)),
+                totalValue: sqlite3_column_double(stmt, 2),
+                domesticValue: sqlite3_column_double(stmt, 3),
+                overseasValue: sqlite3_column_double(stmt, 4)))
+        }
+        return out
+    }
+
+    public func fetchFinancials(assetKey: String? = nil) throws -> [Financial] {
+        var sql = "SELECT id, asset_key, period, period_end, revenue, net_income, eps, source FROM financials"
+        if let k = assetKey { sql += " WHERE asset_key = '" + k + "'" }
+        sql += " ORDER BY period_end"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var out: [Financial] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let periodRaw = String(cString: sqlite3_column_text(stmt, 2))
+            out.append(Financial(
+                id: sqlite3_column_int64(stmt, 0),
+                assetKey: String(cString: sqlite3_column_text(stmt, 1)),
+                period: FinancialPeriod(rawValue: periodRaw) ?? .quarter,
+                periodEnd: String(cString: sqlite3_column_text(stmt, 3)),
+                revenue: colDouble(stmt, 4),
+                netIncome: colDouble(stmt, 5),
+                eps: colDouble(stmt, 6),
+                source: colText(stmt, 7)))
+        }
+        return out
+    }
+
+    public func upsertFinancials(_ items: [Financial]) throws {
+        try exec("BEGIN TRANSACTION")
+        let sql = "INSERT OR REPLACE INTO financials(asset_key, period, period_end, revenue, net_income, eps, source) VALUES(?,?,?,?,?,?,?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for f in items {
+            bindText(stmt, 1, f.assetKey)
+            bindText(stmt, 2, f.period.rawValue)
+            bindText(stmt, 3, f.periodEnd)
+            bindDouble(stmt, 4, f.revenue)
+            bindDouble(stmt, 5, f.netIncome)
+            bindDouble(stmt, 6, f.eps)
+            bindText(stmt, 7, f.source)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+            }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+        }
+        try exec("COMMIT")
+    }
+
+    @discardableResult
+    public func insertRun(_ run: OptimizationRun) throws -> Int64 {
+        let sql = "INSERT INTO optimization_runs(started_at, finished_at, status, params_hash, result_json, log_path) VALUES(?,?,?,?,?,?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, run.startedAt)
+        bindText(stmt, 2, run.finishedAt)
+        bindText(stmt, 3, run.status)
+        bindText(stmt, 4, run.paramsHash)
+        bindText(stmt, 5, run.resultJSON)
+        bindText(stmt, 6, run.logPath)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func updateRun(id: Int64, finishedAt: String?, status: String, resultJSON: String?) throws {
+        let sql = "UPDATE optimization_runs SET finished_at = ?, status = ?, result_json = ? WHERE id = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, finishedAt)
+        bindText(stmt, 2, status)
+        bindText(stmt, 3, resultJSON)
+        sqlite3_bind_int64(stmt, 4, id)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    public func insertLog(runID: Int64, seq: Int, step: String, message: String, level: String, ts: String) throws {
+        let sql = "INSERT INTO optimization_logs(run_id, seq, step, message, level, ts) VALUES(?,?,?,?,?,?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, runID)
+        sqlite3_bind_int(stmt, 2, Int32(seq))
+        bindText(stmt, 3, step)
+        bindText(stmt, 4, message)
+        bindText(stmt, 5, level)
+        bindText(stmt, 6, ts)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    public func fetchRuns(limit: Int = 20) throws -> [OptimizationRun] {
+        let sql = "SELECT id, started_at, finished_at, status, params_hash, result_json, log_path FROM optimization_runs ORDER BY id DESC LIMIT " + String(limit)
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var out: [OptimizationRun] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            var r = OptimizationRun(
+                id: sqlite3_column_int64(stmt, 0),
+                startedAt: String(cString: sqlite3_column_text(stmt, 1)),
+                finishedAt: colText(stmt, 2),
+                status: String(cString: sqlite3_column_text(stmt, 3)),
+                paramsHash: colText(stmt, 4),
+                resultJSON: colText(stmt, 5),
+                logPath: colText(stmt, 6))
+            out.append(r)
+        }
+        return out
+    }
+
+    public func fetchLogs(runID: Int64) throws -> [OptimizationLogEntry] {
+        let sql = "SELECT id, run_id, seq, step, message, level, ts FROM optimization_logs WHERE run_id = ? ORDER BY seq"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, runID)
+        var out: [OptimizationLogEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(OptimizationLogEntry(
+                id: sqlite3_column_int64(stmt, 0),
+                runID: sqlite3_column_int64(stmt, 1),
+                seq: Int(sqlite3_column_int(stmt, 2)),
+                step: String(cString: sqlite3_column_text(stmt, 3)),
+                message: String(cString: sqlite3_column_text(stmt, 4)),
+                level: String(cString: sqlite3_column_text(stmt, 5)),
+                ts: String(cString: sqlite3_column_text(stmt, 6))))
+        }
+        return out
     }
 }
