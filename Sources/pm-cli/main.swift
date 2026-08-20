@@ -56,8 +56,59 @@ func runExtract(numbersPath: String) -> Int32 {
     }
 }
 
+// Swift 6 strict-concurrency-safe async bridge for a CLI.
+final class AsyncResult: @unchecked Sendable {
+    var error: String?
+}
+
+func runAsync(_ body: @escaping @Sendable () async throws -> Void) -> Int32 {
+    let sem = DispatchSemaphore(value: 0)
+    let result = AsyncResult()
+    Task {
+        do { try await body() }
+        catch { result.error = String(describing: error) }
+        sem.signal()
+    }
+    sem.wait()
+    if let e = result.error {
+        FileHandle.standardError.write("错误: \(e)\n".data(using: .utf8)!)
+        return 1
+    }
+    return 0
+}
+
 let args = CommandLine.arguments
 if args.count >= 2 && args[1] == "--self-test" { exit(selfTest()) }
+if args.count >= 3 && args[1] == "fetch" {
+    let sourceName = args[2]
+    let symbol = args.count >= 4 ? args[3] : "SPMO"
+    exit(runAsync {
+        let source: any DataSource = sourceName == "fund" ? EastmoneySource() : YahooFinanceSource()
+        let hist = try await source.fetchHistory(symbol: symbol)
+        print("来源 \(source.name)  标的 \(symbol)  共 \(hist.count) 个数据点")
+        for p in hist.suffix(5) { print("  \(p.date)  \(p.close)") }
+    })
+}
+if args.count >= 2 && args[1] == "refresh" {
+    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    exit(runAsync {
+        let db = try Database(path: dbPath)
+        let keys = args.count >= 4 ? Array(args[3...]) : ["SPMO", "UNH", "GOOG", "O_GOLD", "O_BTC", "D_CN_CREDIT_BOND"]
+        var total = 0
+        for key in keys {
+            guard let ref = AssetCatalog.ref(for: key) else { print("  未知标的: \(key)"); continue }
+            let source: any DataSource = ref.source == .fund ? EastmoneySource() : YahooFinanceSource()
+            let hist = try await source.fetchHistory(symbol: ref.symbol)
+            let points = hist.map { PricePoint(assetKey: ref.key, date: $0.date, close: $0.close, currency: $0.currency) }
+            try db.upsertPrices(points)
+            total += points.count
+            print("  \(ref.key) (\(ref.symbol)): \(points.count) 点")
+        }
+        try db.insertSnapshot(Snapshot(date: "2026-08-20", totalValue: 354290.32, domesticValue: 82051.27, overseasValue: 272239.04))
+        print("共写入 \(total) 个价格点 → \(dbPath)")
+        print("prices 表行数: \(db.count(table: "prices"))  snapshots 表行数: \(db.count(table: "snapshots"))")
+    })
+}
 if args.count >= 2 && args[1] == "extract" {
     let numbersPath = args.count >= 3 ? args[2] : "../Finance/投资组合情况.numbers"
     exit(runExtract(numbersPath: numbersPath))
@@ -72,5 +123,6 @@ if args.count >= 2 && args[1] == "summarize" && args.count >= 3 {
 print("用法:")
 print("  pm-cli summarize <portfolio_result.json>")
 print("  pm-cli extract [投资组合情况.numbers]")
+print("  pm-cli fetch <yahoo|fund> [symbol]")
 print("  pm-cli --self-test")
 exit(1)
