@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,16 @@ from params import (
     us_core_params,
 )
 
+
+
+def log_step(step, message, level="info", log_path=None):
+    """Append a JSONL step record for the Swift sidecar / AI to read."""
+    if not log_path:
+        return
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), "step": step,
+             "message": message, "level": level}
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 def portfolio_stats(weights, mu, cov):
     weights = np.asarray(weights, dtype=float)
@@ -650,10 +661,12 @@ def main():
     )
     parser.add_argument("--json", dest="out_path", help="Write detailed JSON output to file")
     parser.add_argument("--result-json", dest="result_path", help="Write clean summary JSON to file")
+    parser.add_argument("--log", dest="log_path", help="JSONL step log path")
     args = parser.parse_args()
 
     with open(args.extract_json, encoding="utf-8") as f:
         extract = json.load(f)
+    log_step("load_extract", f"已加载提取结果 total={extract.get('total_value')}", log_path=args.log_path)
 
     warnings = list(extract.get("warnings", []))
 
@@ -662,6 +675,7 @@ def main():
         try:
             hsbc_pool = load_hsbc_fund_pool(args.hsbc_funds)
             pool_count = sum(len(v) for v in hsbc_pool.values())
+            log_step("load_hsbc_pool", f"已加载开放基金池 {pool_count} 只", log_path=args.log_path)
             warnings.append(f"已加载基金搜索易开放基金池：{pool_count} 只。")
         except Exception as exc:
             warnings.append(f"基金搜索易开放基金池加载失败：{exc}")
@@ -693,6 +707,7 @@ def main():
             )
             sys.exit(2)
         warnings.append("已自动通过天天基金校验境内基金申购状态。")
+    log_step("availability", "天天基金申购状态校验完成", log_path=args.log_path)
 
     dom_w = float(extract["domestic_weight"])
     ov_w = float(extract["overseas_weight"])
@@ -708,6 +723,7 @@ def main():
             item["vol"] = core_vol
         assets.append(item)
     assets = filter_available_assets(assets, avail_funds, warnings)
+    log_step("build_assets", f"构建大类资产 {len(assets)} 项", log_path=args.log_path)
     if not any(a["pool"] == "domestic" for a in assets):
         print(
             json.dumps(
@@ -724,6 +740,7 @@ def main():
     dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
     ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
 
+    log_step("stage1_broad", "第一阶段：大类资产均值-方差优化", log_path=args.log_path)
     lower, upper = stage1_bounds(assets)
     target = TARGET_RETURN
     solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target)
@@ -738,14 +755,17 @@ def main():
         sys.exit(1)
 
     w1, ret1, vol1, sharpe1 = solved
+    log_step("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}", log_path=args.log_path)
     total_assets = args.total_assets or float(extract["total_value"])
 
     domestic_selection = select_domestic_funds(w1, assets, hsbc_pool, total_assets)
+    log_step("select_domestic", "境内基金选择完成", log_path=args.log_path)
 
     japan_selection = stage2_japan_optimize(w1, assets, total_assets)
     hk_selection = stage2_hk_optimize(w1, assets, total_assets)
     gc_selection = stage2_gc_optimize(w1, assets, total_assets)
 
+    log_step("stage2_internal", "第二阶段：美国权益内部标的优化", log_path=args.log_path)
     internal, stage2_error = stage2_optimize(
         w1,
         extract,
@@ -819,6 +839,7 @@ def main():
         if stage2_error:
             output["warnings"].append(stage2_error)
 
+    log_step("finalize", f"优化完成 共{len(assets)}大类 夏普={sharpe1:.3f}", log_path=args.log_path)
     if args.out_path:
         with open(args.out_path, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)

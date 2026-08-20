@@ -165,9 +165,99 @@ if args.count >= 2 && args[1] == "summarize" && args.count >= 3 {
         exit(0)
     } catch { FileHandle.standardError.write("解析失败: \(error)\n".data(using: .utf8)!); exit(1) }
 }
+if args.count >= 2 && args[1] == "optimize" {
+    let extractJSON = args.count >= 3 ? args[2] : "tmp/extract_app.json"
+    let dbPath = "tmp/portfolio.db"
+    var totalAssets: Double? = nil
+    for i in 2..<args.count where args[i] == "--total-assets" && i + 1 < args.count {
+        totalAssets = Double(args[i + 1])
+    }
+    do {
+        let db = try Database(path: dbPath)
+        let svc = OptimizationService(db: db, sidecar: sidecar(), logsDir: URL(fileURLWithPath: "tmp/optimizer_logs"))
+        let out = try svc.runSync(extractJSON: URL(fileURLWithPath: extractJSON), totalAssets: totalAssets)
+        if let r = out.result {
+            print("优化完成 (run \(out.runID)):")
+            print("  预期收益: \(String(format: "%.2f%%", r.portfolio.expectedReturn * 100))")
+            print("  波动: \(String(format: "%.2f%%", r.portfolio.volatility * 100))")
+            print("  夏普: \(String(format: "%.3f", r.portfolio.sharpe))")
+            for a in r.assets { print(String(format: "  %-8@ %-32@ %6.2f%%", a.key, a.name, a.weight * 100)) }
+            print("步骤日志: \(out.logPath)")
+        } else {
+            FileHandle.standardError.write(("优化失败: " + (out.error ?? "未知")).data(using: .utf8)!)
+            exit(1)
+        }
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(("优化失败: " + String(describing: error)).data(using: .utf8)!)
+        exit(1)
+    }
+}
+
+if args.count >= 2 && args[1] == "overview" {
+    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    do {
+        let db = try Database(path: dbPath)
+        let repo = Repository(db: db)
+        let alloc = try repo.fetchAllocation()
+        let perf = try repo.fetchPerformance()
+        print("总资产: \(alloc.totalValue)")
+        print("境内: \(alloc.domesticValue)  境外: \(alloc.overseasValue)")
+        print("配置 (按资产类别):")
+        for s in alloc.slices {
+            print(String(format: "  %-20@ %12.0f  %6.2f%%", s.assetClass, s.value, s.weight * 100))
+        }
+        let sm = perf.summary
+        print("历史表现: 总收益 \(String(format: "%.2f%%", sm.totalReturn * 100))  年化波动 \(String(format: "%.2f%%", sm.annualizedVolatility * 100))  最大回撤 \(String(format: "%.2f%%", sm.maxDrawdown * 100))  (\(perf.points.count) 点)")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(("overview 失败: " + String(describing: error)).data(using: .utf8)!)
+        exit(1)
+    }
+}
+
+if args.count >= 2 && args[1] == "financials" {
+    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    do {
+        let db = try Database(path: dbPath)
+        let fs = try db.fetchFinancials()
+        print("财务报表 (\(fs.count) 条):")
+        for f in fs {
+            print("  \(f.assetKey) \(f.period.rawValue) \(f.periodEnd) 营收=\(f.revenue ?? 0) 净利=\(f.netIncome ?? 0) EPS=\(f.eps ?? 0)")
+        }
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(("financials 失败: " + String(describing: error)).data(using: .utf8)!)
+        exit(1)
+    }
+}
+
+if args.count >= 2 && args[1] == "report" {
+    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    let outPath = args.count >= 4 ? args[3] : "tmp/report.pdf"
+    do {
+        let db = try Database(path: dbPath)
+        let repo = Repository(db: db)
+        let alloc = try repo.fetchAllocation()
+        let perf = try repo.fetchPerformance()
+        let rows = try repo.fetchAssetPerspectives()
+        try PDFExporter.writeReport(to: URL(fileURLWithPath: outPath), allocation: alloc, performance: perf.summary, rows: rows, generatedAt: ISO8601DateFormatter().string(from: Date()))
+        print("已生成报告: \(outPath)")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(("report 失败: " + String(describing: error)).data(using: .utf8)!)
+        exit(1)
+    }
+}
+
 print("用法:")
 print("  pm-cli summarize <portfolio_result.json>")
 print("  pm-cli extract [投资组合情况.numbers]")
 print("  pm-cli fetch <yahoo|fund> [symbol]")
+print("  pm-cli optimize [extract.json] [--total-assets N]")
+print("  pm-cli overview [db]")
+print("  pm-cli financials [db]")
+print("  pm-cli report [db] [out.pdf]")
 print("  pm-cli --self-test")
 exit(1)
+

@@ -8,3 +8,6 @@ tmp/
 xcuserdata/
 *.xcodeproj
 .build-scratch/
+
+__pycache__/
+*.pyc
