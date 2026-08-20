@@ -11,3 +11,5 @@ xcuserdata/
 
 __pycache__/
 *.pyc
+dist/
+

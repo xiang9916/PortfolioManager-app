@@ -12,12 +12,33 @@
 - Sources/PortfolioManager —— SwiftUI UI 层
 - Sources/pm-cli —— 无 UI 的 CLI（可 headless 验证核心逻辑）
 - Optimizer/scripts —— vendored 的 portfolio-optimizer Python 脚本链
+- scripts/ —— Info.plist、图标生成、打包脚本
 
 ## 构建
-\`\`\`bash
-swift build          # 编译核心库 + CLI（CommandLineTools 即可）
-swift run pm-cli ../Finance/portfolio_result.json   # 冒烟测试
-swift test           # 单元测试
-\`\`\`
+```bash
+swift build                    # 编译核心库 + CLI + SwiftUI 可执行
+swift run pm-cli --self-test   # 自测
+swift build -c release         # release 构建
+```
 
-打包 .app 需完整 Xcode（xcodebuild），见 docs/specs/。
+## 打包 .app（Phase 8）
+```bash
+bash scripts/build_app.sh              # 组装 dist/PortfolioManager.app + ad-hoc 签名
+bash scripts/build_app.sh --with-venv  # 额外打包 Python venv（优化器 sidecar）
+```
+
+产物 `dist/PortfolioManager.app`（arm64，最低 macOS 14）。首次运行数据落在
+`~/Library/Application Support/PortfolioManager/`。正式分发需 Developer ID 签名 + 公证
+（`notarytool`），见 docs/specs/。
+
+## CLI 命令（pm-cli）
+```
+pm-cli extract [投资组合情况.numbers]                 # 从 .numbers 提取
+pm-cli import [db] [extract.json]                     # 导入持仓到 SQLite
+pm-cli refresh [db] [keys...]                         # 抓行情落库
+pm-cli optimize [extract.json] [--total-assets N]     # 运行优化器
+pm-cli overview [db]                                  # 资产分布/历史表现
+pm-cli financials [db]                                # 财务报表
+pm-cli report [db] [out.pdf]                          # 生成 PDF 报告
+pm-cli backup|list|restore|export|import-json|export-csv|daily-backup  # 数据安全
+```

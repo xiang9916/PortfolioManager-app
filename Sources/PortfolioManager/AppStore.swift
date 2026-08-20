@@ -2,38 +2,62 @@ import Foundation
 import SwiftUI
 import PortfolioCore
 
-/// App-level paths. Dev layout points at the repo tree; Phase 8 packaging will
-/// relocate the DB + vendored optimizer into the .app bundle / Application Support.
+/// App-level paths. Dev layout points at the repo tree; packaged (.app) layout
+/// relocates the DB + vendored optimizer into the bundle / Application Support.
 public enum AppPaths {
-    /// Database location. Prefer an existing dev DB (repo tmp/), else Application Support.
-    public static func databaseURL() -> URL {
-        let cwd = FileManager.default.currentDirectoryPath
-        let dev = URL(fileURLWithPath: cwd).appendingPathComponent("tmp/portfolio.db")
-        if FileManager.default.fileExists(atPath: dev.path) {
-            return dev
-        }
+    /// True when running inside a packaged .app bundle.
+    public static var isBundled: Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
+    }
+
+    /// Application Support root (user-writable, survives app updates).
+    public static func supportDir() -> URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = support.appendingPathComponent("PortfolioManager", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("portfolio.db")
+        return dir
     }
 
-    /// Vendored optimizer scripts directory (dev: repo Optimizer/scripts).
+    /// Database location. Dev: repo tmp/portfolio.db if present; packaged: Application Support.
+    public static func databaseURL() -> URL {
+        if !isBundled {
+            let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("tmp/portfolio.db")
+            if FileManager.default.fileExists(atPath: dev.path) { return dev }
+        }
+        return supportDir().appendingPathComponent("portfolio.db")
+    }
+
+    /// Vendored optimizer scripts directory (packaged: bundle Resources, else repo).
     public static func scriptsURL() -> URL {
-        let cwd = FileManager.default.currentDirectoryPath
-        return URL(fileURLWithPath: cwd).appendingPathComponent("Optimizer/scripts", isDirectory: true)
+        if isBundled, let res = Bundle.main.resourceURL {
+            return res.appendingPathComponent("Optimizer/scripts", isDirectory: true)
+        }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Optimizer/scripts", isDirectory: true)
     }
 
     /// Python interpreter inside the vendored venv.
+    /// Resolution order: env override → bundled venv → repo venv → PATH python3.
     public static func interpreterPath() -> String {
-        let cwd = FileManager.default.currentDirectoryPath
-        return URL(fileURLWithPath: cwd).appendingPathComponent("Optimizer/.venv/bin/python3").path
+        if let env = ProcessInfo.processInfo.environment["PORTFOLIO_OPTIMIZER_PYTHON"] {
+            return env
+        }
+        if isBundled, let res = Bundle.main.resourceURL {
+            let bundled = res.appendingPathComponent("Optimizer/.venv/bin/python3").path
+            if FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
+        }
+        let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Optimizer/.venv/bin/python3").path
+        if FileManager.default.isExecutableFile(atPath: dev) { return dev }
+        return "/usr/bin/env python3"
     }
 
     /// Extracted .numbers state (input to the optimizer).
     public static func extractJSONURL() -> URL {
-        let cwd = FileManager.default.currentDirectoryPath
-        return URL(fileURLWithPath: cwd).appendingPathComponent("tmp/extract_app.json")
+        if isBundled { return supportDir().appendingPathComponent("extract_app.json") }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tmp/extract_app.json")
     }
 
     /// Daily-backup directory (sibling of the active DB's parent).
