@@ -109,6 +109,21 @@ if args.count >= 2 && args[1] == "refresh" {
         print("prices 表行数: \(db.count(table: "prices"))  snapshots 表行数: \(db.count(table: "snapshots"))")
     })
 }
+if args.count >= 2 && args[1] == "import" {
+    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    let extractPath = args.count >= 4 ? args[3] : "tmp/extract_app.json"
+    do {
+        let db = try Database(path: dbPath)
+        try PortfolioImporter.importExtract(url: URL(fileURLWithPath: extractPath), into: db, asOfDate: "2026-08-20")
+        print("导入完成: assets=" + String(db.count(table: "assets")) +
+              " holdings=" + String(db.count(table: "holdings")) +
+              " snapshots=" + String(db.count(table: "snapshots")))
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("导入失败: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+}
 if args.count >= 2 && args[1] == "extract" {
     let numbersPath = args.count >= 3 ? args[2] : "../Finance/投资组合情况.numbers"
     exit(runExtract(numbersPath: numbersPath))

@@ -80,6 +80,68 @@ public final class Database {
         try exec(sql)
     }
 
+    private func bindText(_ stmt: OpaquePointer?, _ idx: Int32, _ s: String?) {
+        if let s = s {
+            s.withCString { sqlite3_bind_text(stmt, idx, $0, -1, SQLITE_TRANSIENT) }
+        } else {
+            sqlite3_bind_null(stmt, idx)
+        }
+    }
+
+    private func bindDouble(_ stmt: OpaquePointer?, _ idx: Int32, _ v: Double?) {
+        if let v = v { sqlite3_bind_double(stmt, idx, v) } else { sqlite3_bind_null(stmt, idx) }
+    }
+
+    public func upsertAssets(_ assets: [Asset]) throws {
+        try exec("BEGIN TRANSACTION")
+        let sql = "INSERT OR REPLACE INTO assets(key, name, ticker, market, asset_class, pool, currency, source, fee_rate) VALUES(?,?,?,?,?,?,?,?,?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for a in assets {
+            bindText(stmt, 1, a.key)
+            bindText(stmt, 2, a.name)
+            bindText(stmt, 3, a.ticker)
+            bindText(stmt, 4, a.market)
+            bindText(stmt, 5, a.assetClass)
+            bindText(stmt, 6, a.pool.rawValue)
+            bindText(stmt, 7, a.currency)
+            bindText(stmt, 8, a.source)
+            bindDouble(stmt, 9, a.feeRate)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+            }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+        }
+        try exec("COMMIT")
+    }
+
+    public func upsertHoldings(_ holdings: [Holding]) throws {
+        try exec("BEGIN TRANSACTION")
+        let sql = "INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, value_cny, as_of_date) VALUES(?,?,?,?,?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for h in holdings {
+            bindText(stmt, 1, h.assetKey)
+            sqlite3_bind_double(stmt, 2, h.quantity)
+            sqlite3_bind_double(stmt, 3, h.costBasis)
+            sqlite3_bind_double(stmt, 4, h.valueCny)
+            bindText(stmt, 5, h.asOfDate)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+            }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+        }
+        try exec("COMMIT")
+    }
+
     public func fetchPrices(assetKey: String) throws -> [PricePoint] {
         let sql = "SELECT asset_key, date, close, currency FROM prices WHERE asset_key = ? ORDER BY date"
         var stmt: OpaquePointer?

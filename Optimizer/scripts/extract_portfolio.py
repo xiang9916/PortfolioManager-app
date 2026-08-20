@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Extract pool ratios and US equity internal weights from a Numbers file."""
+"""Extract pool ratios and full holdings from a Numbers file.
+
+Adds a "holdings" field (all tickers with currency + value) on top of the
+original pool / US-equity output, so the app can show the full allocation.
+Backward compatible: us_equity + pool fields are unchanged.
+"""
 
 import argparse
 import json
@@ -41,10 +46,11 @@ def find_explicit_pool_table(doc):
 
 
 def classify_by_currency(doc):
-    """Classify holdings by currency column in 细分项目 tables."""
+    """Return (domestic, overseas, us_holdings, all_holdings)."""
     domestic = 0.0
     overseas = 0.0
     us_holdings = []
+    all_holdings = []
     for sheet in doc.sheets:
         for table in sheet.tables:
             if table.num_rows < 2 or table.num_cols < 11:
@@ -55,6 +61,7 @@ def classify_by_currency(doc):
             is_us = "美国权益" in table.name or "美股" in table.name or "缓冲" in table.name
             for r in range(1, table.num_rows):
                 ticker = cell_str(table.cell(r, 0).value)
+                name = cell_str(table.cell(r, 1).value)
                 currency = cell_str(table.cell(r, 2).value)
                 if not ticker or not currency:
                     continue
@@ -67,13 +74,19 @@ def classify_by_currency(doc):
                 else:
                     overseas += cny_value
                 if is_us and ticker:
-                    name = cell_str(table.cell(r, 1).value)
                     us_holdings.append({
                         "ticker": ticker,
                         "name": name,
                         "value_cny": cny_value,
                     })
-    return domestic, overseas, us_holdings
+                all_holdings.append({
+                    "ticker": ticker,
+                    "name": name,
+                    "currency": currency,
+                    "value_cny": cny_value,
+                    "table": table.name,
+                })
+    return domestic, overseas, us_holdings, all_holdings
 
 
 def main():
@@ -91,15 +104,17 @@ def main():
 
     doc = Document(args.numbers_file)
     warnings = []
-    pool_mode = "none"
     domestic = overseas = 0.0
+
+    # Classify once: currency-based pools + US internals + full holdings.
+    cur_domestic, cur_overseas, us_holdings, all_holdings = classify_by_currency(doc)
 
     explicit = find_explicit_pool_table(doc)
     if explicit is not None:
         domestic, overseas = explicit
         pool_mode = "explicit"
     else:
-        domestic, overseas, us_holdings_raw = classify_by_currency(doc)
+        domestic, overseas = cur_domestic, cur_overseas
         pool_mode = "currency"
         warnings.append("未找到明确的境内/境外资金池表，已按货币分类：CNY=境内，其他=境外。")
         warnings.append("该口径只统计 .numbers 中已记录的投资资产，不含现金。")
@@ -115,18 +130,6 @@ def main():
     if total <= 0:
         print("No pool values found.", file=sys.stderr)
         sys.exit(1)
-
-    us_holdings = []
-    if pool_mode != "currency":
-        # Re-extract US holdings even when pools come from override.
-        _, _, us_holdings = classify_by_currency(doc)
-    else:
-        # classify_by_currency already returned us_holdings in third position.
-        pass
-
-    # If classify_by_currency wasn't run because explicit pool found, run it now for US weights.
-    if not us_holdings:
-        _, _, us_holdings = classify_by_currency(doc)
 
     us_total = sum(h["value_cny"] for h in us_holdings)
     for h in us_holdings:
@@ -144,6 +147,7 @@ def main():
             "total_value": us_total,
             "holdings": us_holdings,
         },
+        "holdings": all_holdings,
         "warnings": warnings,
     }
 
