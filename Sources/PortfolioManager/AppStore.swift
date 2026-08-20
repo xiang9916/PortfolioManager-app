@@ -69,6 +69,18 @@ public enum AppPaths {
     }
 }
 
+/// Editable draft of a holding's fields (资产透视 editing).
+public struct HoldingDraft: Hashable {
+    public var quantity: Double
+    public var costBasis: Double
+    public var valueCny: Double
+    public init(quantity: Double = 0, costBasis: Double = 0, valueCny: Double = 0) {
+        self.quantity = quantity
+        self.costBasis = costBasis
+        self.valueCny = valueCny
+    }
+}
+
 /// Central @MainActor store: owns the DB + repository + optimizer and exposes
 /// observable state to all SwiftUI views.
 @MainActor
@@ -85,6 +97,8 @@ public final class AppStore {
 
     // 模块2
     public var perspectives: [AssetPerspectiveRow] = []
+    /// Editing drafts (assetKey -> draft). Populated on load; saved via savePerspectives().
+    public var holdingDrafts: [String: HoldingDraft] = [:]
 
     // 能力4
     public var financials: [Financial] = []
@@ -158,11 +172,74 @@ public final class AppStore {
             performancePoints = perf.points
             performanceSummary = perf.summary
             perspectives = try repository.fetchAssetPerspectives()
+            holdingDrafts = Dictionary(uniqueKeysWithValues: perspectives.map {
+                ($0.assetKey, HoldingDraft(quantity: $0.quantity, costBasis: $0.costBasis, valueCny: $0.valueCny))
+            })
             financials = try repository.fetchFinancialComparison()
             lastUpdated = ISO8601DateFormatter().string(from: Date())
             statusMessage = nil
         } catch {
             statusMessage = "加载失败: \(error)"
+        }
+    }
+
+    // MARK: 模块2 / 能力4 — editing & save
+
+    public var hasUnsavedChanges: Bool {
+        for (key, draft) in holdingDrafts {
+            guard let row = perspectives.first(where: { $0.assetKey == key }) else { continue }
+            if draft.valueCny != row.valueCny || draft.quantity != row.quantity || draft.costBasis != row.costBasis {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Persist all holding drafts back to the holdings table and reload.
+    public func savePerspectives() {
+        do {
+            for (key, draft) in holdingDrafts {
+                try db.updateHolding(assetKey: key, quantity: draft.quantity,
+                                     costBasis: draft.costBasis, valueCny: draft.valueCny)
+            }
+            loadAll()
+            statusMessage = "已保存"
+        } catch {
+            statusMessage = "保存失败: \(error)"
+        }
+    }
+
+    /// A two-way Binding into a holding draft's Double field.
+    public func holdingBinding(_ key: String, _ keyPath: WritableKeyPath<HoldingDraft, Double>) -> Binding<Double> {
+        Binding(
+            get: { self.holdingDrafts[key]?[keyPath: keyPath] ?? 0 },
+            set: { v in
+                var d = self.holdingDrafts[key] ?? HoldingDraft()
+                d[keyPath: keyPath] = v
+                var copy = self.holdingDrafts
+                copy[key] = d
+                self.holdingDrafts = copy
+            }
+        )
+    }
+
+    public func upsertFinancial(_ f: Financial) {
+        do {
+            try db.upsertFinancials([f])
+            loadAll()
+            statusMessage = "已保存财务报表"
+        } catch {
+            statusMessage = "保存失败: \(error)"
+        }
+    }
+
+    public func deleteFinancial(id: Int64) {
+        do {
+            try db.deleteFinancial(id: id)
+            loadAll()
+            statusMessage = "已删除"
+        } catch {
+            statusMessage = "删除失败: \(error)"
         }
     }
 

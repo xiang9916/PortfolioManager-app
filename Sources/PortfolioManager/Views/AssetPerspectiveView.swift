@@ -76,7 +76,6 @@ public struct AssetDetailView: View {
                 detailRow("资产类别", AssetClassStyle.displayName(row.assetClass))
                 detailRow("池", AssetClassStyle.poolName(row.pool))
                 detailRow("币种", row.currency)
-                detailRow("市值", money(row.valueCny))
                 detailRow("权重", pct(row.weight))
                 if let p = row.latestPrice {
                     detailRow("最新价", String(format: "%.4f", p))
@@ -84,10 +83,31 @@ public struct AssetDetailView: View {
                 if let d = row.latestDate {
                     detailRow("最新日期", d)
                 }
+
+                GroupBox("编辑持仓（改完点右下角「保存」）") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        editableField("市值 (CNY)", store.holdingBinding(row.assetKey, \.valueCny))
+                        editableField("份额 / 数量", store.holdingBinding(row.assetKey, \.quantity))
+                        editableField("成本 (CNY)", store.holdingBinding(row.assetKey, \.costBasis))
+                    }
+                    .padding(6)
+                }
             }
             .padding()
         }
         .navigationTitle(row.name)
+    }
+
+    private func editableField(_ label: String, _ value: Binding<Double>) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            TextField("", value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .monospacedDigit()
+                .frame(width: 200)
+        }
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {

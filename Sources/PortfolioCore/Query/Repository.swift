@@ -45,6 +45,8 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let pool: Pool
     public let currency: String
     public let valueCny: Double
+    public let quantity: Double
+    public let costBasis: Double
     public let weight: Double
     public let latestPrice: Double?
     public let latestDate: String?
@@ -205,6 +207,8 @@ public final class Repository {
                 pool: a.pool,
                 currency: a.currency,
                 valueCny: h.valueCny,
+                quantity: h.quantity,
+                costBasis: h.costBasis,
                 weight: total > 0 ? h.valueCny / total : 0,
                 latestPrice: latestPrice,
                 latestDate: latestDate)

@@ -20,7 +20,8 @@ for a in "$@"; do
 done
 
 echo "==> swift build -c release"
-swift build -c release
+# --disable-sandbox flags make it work inside nested sandboxes (e.g. DSH); harmless elsewhere.
+swift build -c release --disable-sandbox -Xswiftc -Xfrontend -Xswiftc -disable-sandbox
 
 echo "==> assembling bundle at ${BUNDLE}"
 rm -rf "${BUNDLE}"
