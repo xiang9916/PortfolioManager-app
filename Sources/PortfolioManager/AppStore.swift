@@ -35,6 +35,14 @@ public enum AppPaths {
         let cwd = FileManager.default.currentDirectoryPath
         return URL(fileURLWithPath: cwd).appendingPathComponent("tmp/extract_app.json")
     }
+
+    /// Daily-backup directory (sibling of the active DB's parent).
+    public static func backupsURL() -> URL {
+        let parent = databaseURL().deletingLastPathComponent()
+        let dir = parent.appendingPathComponent("backups", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
 }
 
 /// Central @MainActor store: owns the DB + repository + optimizer and exposes
@@ -68,6 +76,9 @@ public final class AppStore {
     public var lastUpdated: String?
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var backupManager: BackupManager?
+    @ObservationIgnored private var backupTask: Task<Void, Never>?
+    public var lastBackupAt: String?
 
     public init(db: Database, optimizer: OptimizationService) {
         self.db = db
@@ -87,9 +98,30 @@ public final class AppStore {
             let logsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("tmp/optimizer_logs", isDirectory: true)
             let optimizer = OptimizationService(db: db, sidecar: sidecar, logsDir: logsDir)
-            return AppStore(db: db, optimizer: optimizer)
+            let store = AppStore(db: db, optimizer: optimizer)
+            store.startBackupScheduler()
+            return store
         } catch {
             return nil
+        }
+    }
+
+    // MARK: 能力3 — daily auto-backup scheduler
+
+    /// Kick off a loop that checks hourly and creates one backup per day.
+    public func startBackupScheduler() {
+        let bm = BackupManager(db: db, backupDir: AppPaths.backupsURL())
+        backupManager = bm
+        backupTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                do {
+                    if let dest = try self.backupManager?.ensureDailyBackup() {
+                        self.lastBackupAt = dest.lastPathComponent
+                    }
+                } catch { /* non-fatal: skip this tick */ }
+                try? await Task.sleep(for: .seconds(3600))
+            }
         }
     }
 

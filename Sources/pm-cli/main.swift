@@ -124,7 +124,7 @@ if args.count >= 2 && args[1] == "import" {
         exit(1)
     }
 }
-if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "restore" || args[1] == "export") {
+if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "restore" || args[1] == "export" || args[1] == "import-json" || args[1] == "export-csv" || args[1] == "daily-backup") {
     let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
     let backupDir = URL(fileURLWithPath: "tmp/backups")
     do {
@@ -146,6 +146,20 @@ if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "r
             let out = URL(fileURLWithPath: args.count >= 4 ? args[3] : "tmp/export.json")
             try bm.exportJSON(to: out)
             print("已导出: " + out.path)
+        case "import-json":
+            guard args.count >= 4 else { print("用法: pm-cli import-json <db> <export.json>"); exit(1) }
+            try bm.importJSON(from: URL(fileURLWithPath: args[3]))
+            print("已导入: " + args[3])
+        case "export-csv":
+            let csv = URL(fileURLWithPath: args.count >= 4 ? args[3] : "tmp/holdings.csv")
+            try bm.exportCSV(to: csv)
+            print("已导出 CSV: " + csv.path)
+        case "daily-backup":
+            if let dest = try bm.ensureDailyBackup() {
+                print("已创建每日备份: " + dest.lastPathComponent)
+            } else {
+                print("今日已有备份，跳过")
+            }
         default: break
         }
         exit(0)
@@ -258,6 +272,9 @@ print("  pm-cli optimize [extract.json] [--total-assets N]")
 print("  pm-cli overview [db]")
 print("  pm-cli financials [db]")
 print("  pm-cli report [db] [out.pdf]")
+print("  pm-cli backup [db] / list [db] / restore <db> <backup.db>")
+print("  pm-cli export [db] [out.json] / import-json <db> <export.json>")
+print("  pm-cli export-csv [db] [out.csv] / daily-backup [db]")
 print("  pm-cli --self-test")
 exit(1)
 

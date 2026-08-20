@@ -4,7 +4,10 @@ import Foundation
 public enum Schema {
     public static let version: Int = 1
 
-    public static let ddl: [String] = [
+    /// Ordered migrations: apply each version's statements in sequence to bring an
+    /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
+    public static let migrations: [(version: Int, statements: [String])] = [
+        (1, [
         // version meta (capability 3: forward compatibility)
         """
         CREATE TABLE IF NOT EXISTS schema_meta (
@@ -102,5 +105,6 @@ public enum Schema {
             schema_version INTEGER NOT NULL
         );
         """,
+        ]),
     ]
 }
