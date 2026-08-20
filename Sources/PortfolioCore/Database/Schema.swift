@@ -2,7 +2,7 @@ import Foundation
 
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 2
+    public static let version: Int = 3
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -135,6 +135,44 @@ public enum Schema {
             rate_to_cny REAL NOT NULL,
             as_of_date TEXT NOT NULL,
             source TEXT
+        );
+        """,
+        "COMMIT;",
+        ]),
+        (3, [
+        // 能力2/能力4: 市值派生 (市值 = 份额 × 最后价, 不再存储 value 列),
+        // 回填持仓币种 = 标的币种 (之前导入误记为 CNY);
+        // 删除旧的「公司财报」financials 表, 新建「个人收益结构」income_periods 表。
+        "BEGIN TRANSACTION;",
+        """
+        CREATE TABLE holdings_v3 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_key TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            cost_basis REAL NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'CNY',
+            as_of_date TEXT NOT NULL,
+            FOREIGN KEY(asset_key) REFERENCES assets(key)
+        );
+        """,
+        """
+        INSERT INTO holdings_v3(id, asset_key, quantity, cost_basis, currency, as_of_date)
+            SELECT h.id, h.asset_key, h.quantity, h.cost_basis,
+                   COALESCE(a.currency, h.currency), h.as_of_date
+            FROM holdings h LEFT JOIN assets a ON a.key = h.asset_key;
+        """,
+        "DROP TABLE holdings;",
+        "ALTER TABLE holdings_v3 RENAME TO holdings;",
+        "DROP TABLE IF EXISTS financials;",
+        """
+        CREATE TABLE IF NOT EXISTS income_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            dividends REAL NOT NULL DEFAULT 0,
+            realized_pnl REAL NOT NULL DEFAULT 0,
+            source TEXT,
+            UNIQUE(period, period_end)
         );
         """,
         "COMMIT;",

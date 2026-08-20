@@ -59,9 +59,9 @@ public enum PortfolioImporter {
             assets.append(Asset(key: h.ticker, name: h.name, ticker: h.ticker,
                                 assetClass: cls, pool: pool,
                                 currency: h.currency ?? "CNY", source: "numbers"))
-            // .numbers 提取的 valueCny 已是人民币, 持仓币种记为 CNY (可之后在界面切换为标的币种并重填)
+            // 份额/成本留空(0), 由用户在资产透视手填; 市值 = 份额 × 最后价 (派生).
             holdings.append(Holding(assetKey: h.ticker, quantity: 0, costBasis: 0,
-                                    value: h.valueCny, currency: "CNY", asOfDate: asOfDate))
+                                    currency: h.currency ?? "CNY", asOfDate: asOfDate))
         }
         try db.upsertAssets(assets)
         try db.upsertHoldings(holdings)

@@ -28,18 +28,18 @@ public struct Asset: Codable, Identifiable, Hashable {
 public struct Holding: Codable, Identifiable, Hashable {
     public var id: Int64?
     public let assetKey: String
+    /// 份额/数量 (shares / units). 市值 = 份额 × 最后价 (派生值, 不存储).
     public let quantity: Double
+    /// 成本/本金, denominated in `currency` (the asset's own currency).
     public let costBasis: Double
-    /// Market value denominated in `currency` (the asset's own currency, e.g. USD).
-    public let value: Double
-    /// ISO currency code of `value` and `costBasis` (e.g. "USD", "HKD", "CNY").
+    /// ISO currency code of `costBasis` and the derived market value (e.g. "USD", "CNY").
     public let currency: String
     public let asOfDate: String
 
     public init(id: Int64? = nil, assetKey: String, quantity: Double,
-                costBasis: Double, value: Double, currency: String = "CNY", asOfDate: String) {
+                costBasis: Double, currency: String = "CNY", asOfDate: String) {
         self.id = id; self.assetKey = assetKey; self.quantity = quantity
-        self.costBasis = costBasis; self.value = value; self.currency = currency
+        self.costBasis = costBasis; self.currency = currency
         self.asOfDate = asOfDate
     }
 }
@@ -86,24 +86,23 @@ public struct PricePoint: Codable, Identifiable, Hashable {
     }
 }
 
-public enum FinancialPeriod: String, Codable { case quarter, halfYear, annual }
+public enum FinancialPeriod: String, Codable, CaseIterable { case quarter, halfYear, annual }
 
-public struct Financial: Codable, Identifiable, Hashable {
+/// 能力4 财务分析: 个人收益结构的期间汇总 (股息分红 + 交易损益), 组合级(非标的级).
+public struct IncomeSummary: Codable, Identifiable, Hashable {
     public var id: Int64?
-    public let assetKey: String
     public let period: FinancialPeriod
     public let periodEnd: String
-    public let revenue: Double?
-    public let netIncome: Double?
-    public let eps: Double?
+    /// 股息分红 (人民币).
+    public let dividends: Double
+    /// 交易损益 (已实现, 人民币).
+    public let realizedPnl: Double
     public let source: String?
 
-    public init(id: Int64? = nil, assetKey: String, period: FinancialPeriod,
-                periodEnd: String, revenue: Double? = nil, netIncome: Double? = nil,
-                eps: Double? = nil, source: String? = nil) {
-        self.id = id; self.assetKey = assetKey; self.period = period
-        self.periodEnd = periodEnd; self.revenue = revenue
-        self.netIncome = netIncome; self.eps = eps; self.source = source
+    public init(id: Int64? = nil, period: FinancialPeriod, periodEnd: String,
+                dividends: Double = 0, realizedPnl: Double = 0, source: String? = nil) {
+        self.id = id; self.period = period; self.periodEnd = periodEnd
+        self.dividends = dividends; self.realizedPnl = realizedPnl; self.source = source
     }
 }
 

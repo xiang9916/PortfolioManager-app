@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum MainTab: Hashable { case overview, perspective, financial }
+enum MainTab: Hashable { case overview, perspective, analysis }
 
 /// App shell: 3 tabs (资产管理 / 资产透视 / 财务报表) + bottom-right 运行/设置 pill.
 struct ContentView: View {
@@ -18,8 +18,11 @@ struct ContentView: View {
         }
         .task {
             if store == nil {
-                store = AppStore.makeDefault()
-                store?.loadAll()
+                let s = AppStore.makeDefault()
+                store = s
+                s?.loadAll()
+                // 能力1/能力2: 启动时自动抓取有效汇率 + 行情 (异步, 不阻塞 UI)
+                await s?.startupRefresh()
             }
         }
     }
@@ -32,9 +35,9 @@ struct ContentView: View {
             AssetPerspectiveView(store: store)
                 .tabItem { Label("资产透视", systemImage: "list.bullet") }
                 .tag(MainTab.perspective)
-            FinancialComparisonView(store: store)
-                .tabItem { Label("财务报表", systemImage: "chart.bar.doc.horizontal") }
-                .tag(MainTab.financial)
+            FinancialAnalysisView(store: store)
+                .tabItem { Label("财务分析", systemImage: "chart.pie.badge.percent") }
+                .tag(MainTab.analysis)
         }
         .frame(minWidth: 900, minHeight: 600)
         .overlay(alignment: .bottomTrailing) {
