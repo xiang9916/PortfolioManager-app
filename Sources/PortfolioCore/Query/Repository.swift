@@ -27,7 +27,7 @@ public struct PerformancePoint: Codable, Hashable, Identifiable {
     public var id: String { date }
 }
 
-/// Summary statistics for historical performance (能力1 历史财务表现).
+/// Summary statistics of historical performance (能力1 历史财务表现).
 public struct PerformanceSummary: Codable, Hashable {
     public let startDate: String?
     public let endDate: String?
@@ -43,18 +43,39 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let name: String
     public let assetClass: String
     public let pool: Pool
-    /// Holding currency (the currency `value` / `costBasis` are entered in).
+    /// Holding currency (the currency `costBasis` is entered in; the derived value shares it).
     public let currency: String
-    /// Market value in the holding currency (e.g. USD).
+    /// 市值(标的币种) = 份额 × 最后价 (派生, 不手填).
     public let value: Double
-    /// Market value converted to CNY (value × FX rate) — basis for weight.
+    /// 市值折人民币 (value × FX rate) — 权重计算基准.
     public let valueCny: Double
+    /// 成本/本金折人民币 (costBasis × FX rate).
+    public let costCny: Double
+    /// 浮盈浮亏 = 市值 - 本金 (人民币).
+    public let unrealizedPnl: Double
+    /// 收益率 = 浮盈浮亏 / 本金 (本金为 0 时记 0).
+    public let returnRate: Double
     public let quantity: Double
     public let costBasis: Double
     public let weight: Double
     public let latestPrice: Double?
     public let latestDate: String?
     public var id: String { assetKey }
+}
+
+/// 能力4 财务分析: 个人资产/收益结构底稿 (组合级).
+public struct FinancialAnalysis: Codable, Hashable {
+    // 资产结构
+    public let principal: Double        // 本金 = Σ 成本×汇率
+    public let marketValue: Double      // 市值 = Σ 市值折¥
+    public let unrealizedPnl: Double    // 浮盈浮亏 = 市值 - 本金
+    public let returnRate: Double       // 收益率 = 浮盈浮亏 / 本金
+    // 收益结构 (从 income_periods 累计)
+    public let totalDividends: Double   // 累计股息分红
+    public let totalRealizedPnl: Double // 累计交易损益
+    public let totalIncome: Double      // 合计收益 = 浮盈 + 股息 + 交易损益
+    public let totalReturnRate: Double  // 合计收益率 = 合计收益 / 本金
+    public let periods: [IncomeSummary] // 期间明细
 }
 
 /// High-level query layer: composes raw Database rows into UI-ready structures.
@@ -66,7 +87,7 @@ public final class Repository {
         self.db = db
     }
 
-    // MARK: FX — 能力2 权重统一成人民币
+    // MARK: FX + 派生市值 — 能力2 权重统一成人民币
 
     /// Load currency→CNY rates; CNY is always 1.0.
     private func fxRates() -> [String: Double] {
@@ -75,9 +96,25 @@ public final class Repository {
         return map
     }
 
-    /// A holding's value converted to CNY (missing rate falls back to 1.0).
-    private func cny(_ h: Holding, fx: [String: Double]) -> Double {
-        h.value * (fx[h.currency] ?? 1.0)
+    /// Latest close price per asset key (nil if no price data yet).
+    private func latestPriceMap(_ holdings: [Holding]) -> [String: Double] {
+        var map: [String: Double] = [:]
+        for h in holdings {
+            if let pts = try? db.fetchPrices(assetKey: h.assetKey), let last = pts.last {
+                map[h.assetKey] = last.close
+            }
+        }
+        return map
+    }
+
+    /// A holding's derived market value in its own currency: 份额 × 最后价.
+    private func derivedValue(_ h: Holding, latest: [String: Double]) -> Double {
+        h.quantity * (latest[h.assetKey] ?? 0)
+    }
+
+    /// A holding's derived market value converted to CNY (份额 × 最后价 × 汇率).
+    private func valueCny(_ h: Holding, fx: [String: Double], latest: [String: Double]) -> Double {
+        derivedValue(h, latest: latest) * (fx[h.currency] ?? 1.0)
     }
 
     // MARK: 模块1 — asset allocation
@@ -87,29 +124,30 @@ public final class Repository {
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let holdings = try db.fetchHoldings()
         let fx = fxRates()
+        let latest = latestPriceMap(holdings)
 
-        let total = holdings.reduce(0.0) { $0 + cny($1, fx: fx) }
+        // 大类配置完全由「资产透视每个标的的资产类别 × 派生市值」现算, 不吃导入的死数.
+        let total = holdings.reduce(0.0) { $0 + valueCny($1, fx: fx, latest: latest) }
         var groups: [String: (value: Double, pool: Pool)] = [:]
         for h in holdings {
             let cls = byKey[h.assetKey]?.assetClass ?? "其他"
             let pool = byKey[h.assetKey]?.pool ?? .overseas
             let cur = groups[cls] ?? (0, pool)
-            groups[cls] = (cur.value + cny(h, fx: fx), pool)
+            groups[cls] = (cur.value + valueCny(h, fx: fx, latest: latest), pool)
         }
         let slices = groups.map { (cls, v) in
             AllocationSlice(assetClass: cls, value: v.value,
                             weight: total > 0 ? v.value / total : 0, pool: v.pool)
         }.sorted { $0.value > $1.value }
 
-        let latest = try db.fetchSnapshots().last
         let domestic = slices.filter { $0.pool == .domestic }.reduce(0.0) { $0 + $1.value }
         let overseas = total - domestic
 
         return AllocationSnapshot(
-            asOfDate: latest?.date ?? holdings.first?.asOfDate,
+            asOfDate: holdings.first?.asOfDate,
             totalValue: total,
-            domesticValue: latest?.domesticValue ?? domestic,
-            overseasValue: latest?.overseasValue ?? overseas,
+            domesticValue: domestic,
+            overseasValue: overseas,
             slices: slices)
     }
 
@@ -117,17 +155,18 @@ public final class Repository {
 
     /// Reconstructs a trailing weighted-NAV series from current holdings + price history.
     /// Each asset is rebased to 1.0 at its first observation inside a trailing window
-    /// (default 3 years) and weighted by its current CNY value. Cross-currency is ignored
+    /// (default 3 years) and weighted by its current derived CNY value. Cross-currency is ignored
     /// (FX is not embedded), so the series reflects relative weighted performance.
     public func fetchPerformance(lookbackYears: Double = 3.0) throws -> (points: [PerformancePoint], summary: PerformanceSummary) {
         let holdings = try db.fetchHoldings()
         let fx = fxRates()
-        let total = holdings.reduce(0.0) { $0 + cny($1, fx: fx) }
+        let latest = latestPriceMap(holdings)
+        let total = holdings.reduce(0.0) { $0 + valueCny($1, fx: fx, latest: latest) }
         guard total > 0, !holdings.isEmpty else {
             return ([], PerformanceSummary(startDate: nil, endDate: nil, totalReturn: 0,
                                            annualizedVolatility: 0, maxDrawdown: 0, pointCount: 0))
         }
-        let weights = Dictionary(uniqueKeysWithValues: holdings.map { ($0.assetKey, cny($0, fx: fx) / total) })
+        let weights = Dictionary(uniqueKeysWithValues: holdings.map { ($0.assetKey, valueCny($0, fx: fx, latest: latest) / total) })
 
         // window end = latest price date across holdings; start = end - lookback
         var latestDate = ""
@@ -211,15 +250,18 @@ public final class Repository {
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let holdings = try db.fetchHoldings()
         let fx = fxRates()
-        let total = holdings.reduce(0.0) { $0 + cny($1, fx: fx) }
+        let latest = latestPriceMap(holdings)
+        let total = holdings.reduce(0.0) { $0 + valueCny($1, fx: fx, latest: latest) }
 
         return holdings.compactMap { h -> AssetPerspectiveRow? in
             guard let a = byKey[h.assetKey] else { return nil }
-            let valueCny = cny(h, fx: fx)
-            var latestPrice: Double? = nil
+            let value = derivedValue(h, latest: latest)
+            let valueCny = value * (fx[h.currency] ?? 1.0)
+            let costCny = h.costBasis * (fx[h.currency] ?? 1.0)
+            let unrealizedPnl = valueCny - costCny
+            let latestPrice = latest[h.assetKey]
             var latestDate: String? = nil
             if let pts = try? db.fetchPrices(assetKey: h.assetKey), let last = pts.last {
-                latestPrice = last.close
                 latestDate = last.date
             }
             return AssetPerspectiveRow(
@@ -228,8 +270,11 @@ public final class Repository {
                 assetClass: a.assetClass ?? "其他",
                 pool: a.pool,
                 currency: h.currency,
-                value: h.value,
+                value: value,
                 valueCny: valueCny,
+                costCny: costCny,
+                unrealizedPnl: unrealizedPnl,
+                returnRate: costCny > 0 ? unrealizedPnl / costCny : 0,
                 quantity: h.quantity,
                 costBasis: h.costBasis,
                 weight: total > 0 ? valueCny / total : 0,
@@ -238,9 +283,32 @@ public final class Repository {
         }.sorted { $0.valueCny > $1.valueCny }
     }
 
-    // MARK: 能力4 — financial statements
+    // MARK: 能力4 — 财务分析 (个人资产/收益结构)
 
-    public func fetchFinancialComparison() throws -> [Financial] {
-        try db.fetchFinancials()
+    public func fetchIncomeSummaries() throws -> [IncomeSummary] {
+        try db.fetchIncomeSummaries()
+    }
+
+    public func fetchFinancialAnalysis() throws -> FinancialAnalysis {
+        let holdings = try db.fetchHoldings()
+        let fx = fxRates()
+        let latest = latestPriceMap(holdings)
+        let principal = holdings.reduce(0.0) { $0 + $1.costBasis * (fx[$1.currency] ?? 1.0) }
+        let marketValue = holdings.reduce(0.0) { $0 + valueCny($1, fx: fx, latest: latest) }
+        let unrealized = marketValue - principal
+        let periods = try db.fetchIncomeSummaries()
+        let totalDividends = periods.reduce(0.0) { $0 + $1.dividends }
+        let totalRealized = periods.reduce(0.0) { $0 + $1.realizedPnl }
+        let totalIncome = unrealized + totalDividends + totalRealized
+        return FinancialAnalysis(
+            principal: principal,
+            marketValue: marketValue,
+            unrealizedPnl: unrealized,
+            returnRate: principal > 0 ? unrealized / principal : 0,
+            totalDividends: totalDividends,
+            totalRealizedPnl: totalRealized,
+            totalIncome: totalIncome,
+            totalReturnRate: principal > 0 ? totalIncome / principal : 0,
+            periods: periods)
     }
 }

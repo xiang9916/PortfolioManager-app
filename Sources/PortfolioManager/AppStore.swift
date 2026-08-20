@@ -73,12 +73,10 @@ public enum AppPaths {
 public struct HoldingDraft: Hashable {
     public var quantity: Double
     public var costBasis: Double
-    public var value: Double
     public var currency: String
-    public init(quantity: Double = 0, costBasis: Double = 0, value: Double = 0, currency: String = "CNY") {
+    public init(quantity: Double = 0, costBasis: Double = 0, currency: String = "CNY") {
         self.quantity = quantity
         self.costBasis = costBasis
-        self.value = value
         self.currency = currency
     }
 }
@@ -102,8 +100,9 @@ public final class AppStore {
     /// Editing drafts (assetKey -> draft). Populated on load; saved via savePerspectives().
     public var holdingDrafts: [String: HoldingDraft] = [:]
 
-    // 能力4
-    public var financials: [Financial] = []
+    // 能力4 财务分析
+    public var financialAnalysis: FinancialAnalysis?
+    public var incomeSummaries: [IncomeSummary] = []
 
     // 能力2 汇率 (币种→人民币), 自动抓取 + 手动可覆盖
     public var fxRates: [FxRate] = []
@@ -179,10 +178,11 @@ public final class AppStore {
             perspectives = try repository.fetchAssetPerspectives()
             holdingDrafts = Dictionary(uniqueKeysWithValues: perspectives.map {
                 ($0.assetKey, HoldingDraft(quantity: $0.quantity, costBasis: $0.costBasis,
-                                           value: $0.value, currency: $0.currency))
+                                           currency: $0.currency))
             })
             fxRates = try db.fetchFxRates()
-            financials = try repository.fetchFinancialComparison()
+            financialAnalysis = try repository.fetchFinancialAnalysis()
+            incomeSummaries = try repository.fetchIncomeSummaries()
             lastUpdated = ISO8601DateFormatter().string(from: Date())
             statusMessage = nil
         } catch {
@@ -190,12 +190,18 @@ public final class AppStore {
         }
     }
 
+    /// 启动时自动抓取有效汇率 + 行情 (能力1/能力2), 异步不阻塞 UI.
+    public func startupRefresh() async {
+        await refreshFxRates()
+        await refreshPrices()
+    }
+
     // MARK: 模块2 / 能力4 — editing & save
 
     public var hasUnsavedChanges: Bool {
         for (key, draft) in holdingDrafts {
             guard let row = perspectives.first(where: { $0.assetKey == key }) else { continue }
-            if draft.value != row.value || draft.quantity != row.quantity || draft.costBasis != row.costBasis || draft.currency != row.currency {
+            if draft.quantity != row.quantity || draft.costBasis != row.costBasis || draft.currency != row.currency {
                 return true
             }
         }
@@ -207,7 +213,7 @@ public final class AppStore {
         do {
             for (key, draft) in holdingDrafts {
                 try db.updateHolding(assetKey: key, quantity: draft.quantity,
-                                     costBasis: draft.costBasis, value: draft.value, currency: draft.currency)
+                                     costBasis: draft.costBasis, currency: draft.currency)
             }
             loadAll()
             statusMessage = "已保存"
@@ -230,19 +236,19 @@ public final class AppStore {
         )
     }
 
-    public func upsertFinancial(_ f: Financial) {
+    public func upsertIncomeSummary(_ f: IncomeSummary) {
         do {
-            try db.upsertFinancials([f])
+            try db.upsertIncomeSummaries([f])
             loadAll()
-            statusMessage = "已保存财务报表"
+            statusMessage = "已保存收益期间"
         } catch {
             statusMessage = "保存失败: \(error)"
         }
     }
 
-    public func deleteFinancial(id: Int64) {
+    public func deleteIncomeSummary(id: Int64) {
         do {
-            try db.deleteFinancial(id: id)
+            try db.deleteIncomeSummary(id: id)
             loadAll()
             statusMessage = "已删除"
         } catch {
@@ -281,7 +287,7 @@ public final class AppStore {
                               assetClass: assetClass, pool: pool, currency: currency, source: "manual")
             try db.insertAsset(asset)
             try db.upsertHoldings([Holding(assetKey: key, quantity: 0, costBasis: 0,
-                                           value: 0, currency: currency,
+                                           currency: currency,
                                            asOfDate: Self.todayString())])
             loadAll()
             statusMessage = "已添加 \(name)"

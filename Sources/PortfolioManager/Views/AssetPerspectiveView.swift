@@ -80,9 +80,13 @@ public struct AssetDetailView: View {
                 detailRow("池", AssetClassStyle.poolName(row.pool))
                 detailRow("币种", row.currency)
                 detailRow("权重", pct(row.weight))
-                detailRow("折合人民币", money(row.valueCny) + " ¥")
-                if let p = row.latestPrice { detailRow("最新价", String(format: "%.4f", p)) }
-                if let d = row.latestDate { detailRow("最新日期", d) }
+                if let p = row.latestPrice { detailRow("最后价", String(format: "%.4f", p)) }
+                if let d = row.latestDate { detailRow("最后日期", d) }
+                detailRow("市值 (" + row.currency + ")", CurrencyStyle.symbol(row.currency) + money(row.value))
+                detailRow("市值 (折人民币)", money(row.valueCny) + " ¥")
+                detailRow("本金 (折人民币)", money(row.costCny) + " ¥")
+                pnlRow("浮盈浮亏", row.unrealizedPnl)
+                detailRow("收益率", pct(row.returnRate))
 
                 GroupBox("编辑持仓（改完点右下角「保存」）") {
                     VStack(alignment: .leading, spacing: 12) {
@@ -97,9 +101,9 @@ public struct AssetDetailView: View {
                             .labelsHidden().frame(width: 120)
                         }
                         let ccy = store.holdingDrafts[row.assetKey]?.currency ?? row.currency
-                        editableField("市值 (" + ccy + ")", store.holdingBinding(row.assetKey, \.value))
                         editableField("份额 / 数量", store.holdingBinding(row.assetKey, \.quantity))
                         editableField("成本 (" + ccy + ")", store.holdingBinding(row.assetKey, \.costBasis))
+                        Text("市值 = 份额 × 最后价，自动抓取计算，无需手填").font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(6)
                 }
@@ -135,5 +139,18 @@ public struct AssetDetailView: View {
         let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0
         return f.string(from: NSNumber(value: v)) ?? "0"
     }
+    private func signedMoney(_ v: Double) -> String {
+        (v >= 0 ? "+" : "-") + money(abs(v))
+    }
     private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
+
+    private func pnlRow(_ label: String, _ v: Double) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(signedMoney(v) + " ¥").monospacedDigit()
+                .foregroundStyle(v >= 0 ? .green : .red)
+        }
+        .padding(.vertical, 4)
+    }
 }

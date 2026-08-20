@@ -42,7 +42,7 @@ public final class BackupManager {
         var out: [String: Any] = [:]
         out["schema_version"] = Schema.version
         out["assets"] = try queryRows("SELECT key, name, ticker, asset_class, pool, currency FROM assets ORDER BY key")
-        out["holdings"] = try queryRows("SELECT asset_key, quantity, cost_basis, value, currency, as_of_date FROM holdings ORDER BY asset_key")
+        out["holdings"] = try queryRows("SELECT asset_key, quantity, cost_basis, currency, as_of_date FROM holdings ORDER BY asset_key")
         out["snapshots"] = try queryRows("SELECT date, total_value, domestic_value, overseas_value FROM snapshots ORDER BY date")
         let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url)
@@ -104,7 +104,6 @@ public final class BackupManager {
                 holdings.append(Holding(assetKey: key,
                                         quantity: asDouble(r["quantity"]) ?? 0,
                                         costBasis: asDouble(r["cost_basis"]) ?? 0,
-                                        value: asDouble(r["value"]) ?? asDouble(r["value_cny"]) ?? 0,
                                         currency: asString(r["currency"]) ?? "CNY",
                                         asOfDate: asString(r["as_of_date"]) ?? ""))
             }
@@ -125,14 +124,14 @@ public final class BackupManager {
     /// Export holdings (joined with asset metadata) to a CSV for spreadsheet interop.
     public func exportCSV(to url: URL) throws {
         let rows = try queryRows("""
-            SELECT h.asset_key, a.name, a.asset_class, a.pool, h.quantity, h.cost_basis, h.value, h.currency, h.as_of_date
+            SELECT h.asset_key, a.name, a.asset_class, a.pool, h.quantity, h.cost_basis, h.currency, h.as_of_date
             FROM holdings h LEFT JOIN assets a ON a.key = h.asset_key
-            ORDER BY h.value DESC
+            ORDER BY h.asset_key
             """)
-        var lines: [String] = ["asset_key,name,asset_class,pool,quantity,cost_basis,value,currency,as_of_date"]
+        var lines: [String] = ["asset_key,name,asset_class,pool,quantity,cost_basis,currency,as_of_date"]
         for r in rows {
             let cols = ["asset_key", "name", "asset_class", "pool", "quantity",
-                        "cost_basis", "value", "currency", "as_of_date"]
+                        "cost_basis", "currency", "as_of_date"]
             lines.append(cols.map { csvField(r[$0]) }.joined(separator: ","))
         }
         try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)

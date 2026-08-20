@@ -136,7 +136,7 @@ public final class Database {
 
     public func upsertHoldings(_ holdings: [Holding]) throws {
         try exec("BEGIN TRANSACTION")
-        let sql = "INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, value, currency, as_of_date) VALUES(?,?,?,?,?,?)"
+        let sql = "INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, currency, as_of_date) VALUES(?,?,?,?,?)"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
@@ -146,9 +146,8 @@ public final class Database {
             bindText(stmt, 1, h.assetKey)
             sqlite3_bind_double(stmt, 2, h.quantity)
             sqlite3_bind_double(stmt, 3, h.costBasis)
-            sqlite3_bind_double(stmt, 4, h.value)
-            bindText(stmt, 5, h.currency)
-            bindText(stmt, 6, h.asOfDate)
+            bindText(stmt, 4, h.currency)
+            bindText(stmt, 5, h.asOfDate)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
             }
@@ -158,9 +157,9 @@ public final class Database {
         try exec("COMMIT")
     }
 
-    /// Update the editable fields of a holding (资产透视 editing).
-    public func updateHolding(assetKey: String, quantity: Double, costBasis: Double, value: Double, currency: String) throws {
-        let sql = "UPDATE holdings SET quantity = ?, cost_basis = ?, value = ?, currency = ? WHERE asset_key = ?"
+    /// Update the editable fields of a holding (资产透视 editing). 市值不在此列(派生 = 份额×最后价).
+    public func updateHolding(assetKey: String, quantity: Double, costBasis: Double, currency: String) throws {
+        let sql = "UPDATE holdings SET quantity = ?, cost_basis = ?, currency = ? WHERE asset_key = ?"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
@@ -168,9 +167,8 @@ public final class Database {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_double(stmt, 1, quantity)
         sqlite3_bind_double(stmt, 2, costBasis)
-        sqlite3_bind_double(stmt, 3, value)
-        currency.withCString { sqlite3_bind_text(stmt, 4, $0, -1, SQLITE_TRANSIENT) }
-        assetKey.withCString { sqlite3_bind_text(stmt, 5, $0, -1, SQLITE_TRANSIENT) }
+        currency.withCString { sqlite3_bind_text(stmt, 3, $0, -1, SQLITE_TRANSIENT) }
+        assetKey.withCString { sqlite3_bind_text(stmt, 4, $0, -1, SQLITE_TRANSIENT) }
         if sqlite3_step(stmt) != SQLITE_DONE {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
         }
@@ -186,7 +184,7 @@ public final class Database {
     /// Delete an asset target and its holdings / prices / financials (资产透视 删除标的).
     public func deleteAsset(key: String) throws {
         try exec("BEGIN TRANSACTION")
-        for table in ["holdings", "prices", "financials", "assets"] {
+        for table in ["holdings", "prices", "assets"] {
             let col = (table == "assets") ? "key" : "asset_key"
             let sql = "DELETE FROM " + table + " WHERE " + col + " = ?"
             var stmt: OpaquePointer?
@@ -308,7 +306,7 @@ public final class Database {
     }
 
     public func fetchHoldings(asOfDate: String? = nil) throws -> [Holding] {
-        var sql = "SELECT id, asset_key, quantity, cost_basis, value, currency, as_of_date FROM holdings"
+        var sql = "SELECT id, asset_key, quantity, cost_basis, currency, as_of_date FROM holdings"
         if let d = asOfDate { sql += " WHERE as_of_date = '" + d + "'" }
         sql += " ORDER BY asset_key"
         var stmt: OpaquePointer?
@@ -323,9 +321,8 @@ public final class Database {
                 assetKey: String(cString: sqlite3_column_text(stmt, 1)),
                 quantity: sqlite3_column_double(stmt, 2),
                 costBasis: sqlite3_column_double(stmt, 3),
-                value: sqlite3_column_double(stmt, 4),
-                currency: String(cString: sqlite3_column_text(stmt, 5)),
-                asOfDate: String(cString: sqlite3_column_text(stmt, 6))))
+                currency: String(cString: sqlite3_column_text(stmt, 4)),
+                asOfDate: String(cString: sqlite3_column_text(stmt, 5))))
         }
         return out
     }
@@ -349,47 +346,41 @@ public final class Database {
         return out
     }
 
-    public func fetchFinancials(assetKey: String? = nil) throws -> [Financial] {
-        var sql = "SELECT id, asset_key, period, period_end, revenue, net_income, eps, source FROM financials"
-        if let k = assetKey { sql += " WHERE asset_key = '" + k + "'" }
-        sql += " ORDER BY period_end"
+    public func fetchIncomeSummaries() throws -> [IncomeSummary] {
+        let sql = "SELECT id, period, period_end, dividends, realized_pnl, source FROM income_periods ORDER BY period_end"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
-        var out: [Financial] = []
+        var out: [IncomeSummary] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let periodRaw = String(cString: sqlite3_column_text(stmt, 2))
-            out.append(Financial(
+            let periodRaw = String(cString: sqlite3_column_text(stmt, 1))
+            out.append(IncomeSummary(
                 id: sqlite3_column_int64(stmt, 0),
-                assetKey: String(cString: sqlite3_column_text(stmt, 1)),
                 period: FinancialPeriod(rawValue: periodRaw) ?? .quarter,
-                periodEnd: String(cString: sqlite3_column_text(stmt, 3)),
-                revenue: colDouble(stmt, 4),
-                netIncome: colDouble(stmt, 5),
-                eps: colDouble(stmt, 6),
-                source: colText(stmt, 7)))
+                periodEnd: String(cString: sqlite3_column_text(stmt, 2)),
+                dividends: sqlite3_column_double(stmt, 3),
+                realizedPnl: sqlite3_column_double(stmt, 4),
+                source: colText(stmt, 5)))
         }
         return out
     }
 
-    public func upsertFinancials(_ items: [Financial]) throws {
+    public func upsertIncomeSummaries(_ items: [IncomeSummary]) throws {
         try exec("BEGIN TRANSACTION")
-        let sql = "INSERT OR REPLACE INTO financials(asset_key, period, period_end, revenue, net_income, eps, source) VALUES(?,?,?,?,?,?,?)"
+        let sql = "INSERT OR REPLACE INTO income_periods(period, period_end, dividends, realized_pnl, source) VALUES(?,?,?,?,?)"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
         for f in items {
-            bindText(stmt, 1, f.assetKey)
-            bindText(stmt, 2, f.period.rawValue)
-            bindText(stmt, 3, f.periodEnd)
-            bindDouble(stmt, 4, f.revenue)
-            bindDouble(stmt, 5, f.netIncome)
-            bindDouble(stmt, 6, f.eps)
-            bindText(stmt, 7, f.source)
+            bindText(stmt, 1, f.period.rawValue)
+            bindText(stmt, 2, f.periodEnd)
+            sqlite3_bind_double(stmt, 3, f.dividends)
+            sqlite3_bind_double(stmt, 4, f.realizedPnl)
+            bindText(stmt, 5, f.source)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
             }
@@ -399,9 +390,9 @@ public final class Database {
         try exec("COMMIT")
     }
 
-    /// Delete one financial statement record by id (财务报表 editing).
-    public func deleteFinancial(id: Int64) throws {
-        try exec("DELETE FROM financials WHERE id = " + String(id))
+    /// Delete one income summary record by id (财务分析 editing).
+    public func deleteIncomeSummary(id: Int64) throws {
+        try exec("DELETE FROM income_periods WHERE id = " + String(id))
     }
 
     @discardableResult

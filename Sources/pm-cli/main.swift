@@ -234,10 +234,14 @@ if args.count >= 2 && args[1] == "financials" {
     let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
     do {
         let db = try Database(path: dbPath)
-        let fs = try db.fetchFinancials()
-        print("财务报表 (\(fs.count) 条):")
-        for f in fs {
-            print("  \(f.assetKey) \(f.period.rawValue) \(f.periodEnd) 营收=\(f.revenue ?? 0) 净利=\(f.netIncome ?? 0) EPS=\(f.eps ?? 0)")
+        let repo = Repository(db: db)
+        let fa = try repo.fetchFinancialAnalysis()
+        print("财务分析:")
+        print("  资产结构: 本金 \(fa.principal) 市值 \(fa.marketValue) 浮盈 \(fa.unrealizedPnl) 收益率 \(String(format: "%.2f%%", fa.returnRate * 100))")
+        print("  收益结构: 浮盈 \(fa.unrealizedPnl) 股息 \(fa.totalDividends) 交易损益 \(fa.totalRealizedPnl) 合计 \(fa.totalIncome)")
+        print("  期间明细 (\(fa.periods.count) 条):")
+        for f in fa.periods {
+            print("    \(f.period.rawValue) \(f.periodEnd) 股息=\(f.dividends) 交易损益=\(f.realizedPnl)")
         }
         exit(0)
     } catch {
