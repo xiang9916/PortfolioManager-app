@@ -157,6 +157,23 @@ public final class Database {
         try exec("COMMIT")
     }
 
+    /// Update the editable fields of a holding (资产透视 editing).
+    public func updateHolding(assetKey: String, quantity: Double, costBasis: Double, valueCny: Double) throws {
+        let sql = "UPDATE holdings SET quantity = ?, cost_basis = ?, value_cny = ? WHERE asset_key = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, quantity)
+        sqlite3_bind_double(stmt, 2, costBasis)
+        sqlite3_bind_double(stmt, 3, valueCny)
+        assetKey.withCString { sqlite3_bind_text(stmt, 4, $0, -1, SQLITE_TRANSIENT) }
+        if sqlite3_step(stmt) != SQLITE_DONE {
+            throw DatabaseError.exec(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
     public func fetchPrices(assetKey: String) throws -> [PricePoint] {
         let sql = "SELECT asset_key, date, close, currency FROM prices WHERE asset_key = ? ORDER BY date"
         var stmt: OpaquePointer?
@@ -311,6 +328,11 @@ public final class Database {
             sqlite3_clear_bindings(stmt)
         }
         try exec("COMMIT")
+    }
+
+    /// Delete one financial statement record by id (财务报表 editing).
+    public func deleteFinancial(id: Int64) throws {
+        try exec("DELETE FROM financials WHERE id = " + String(id))
     }
 
     @discardableResult

@@ -28,12 +28,14 @@ ctx.drawLinearGradient(grad, start: CGPoint(x: rect.midX, y: rect.maxY),
                        end: CGPoint(x: rect.midX, y: rect.minY), options: [])
 
 // White ascending polyline chart (trend up = growth).
+// CG bitmap origin is bottom-left (larger y = higher), so an upward trend uses
+// increasing y left-to-right.
 let pts: [CGPoint] = [
-    CGPoint(x: rect.minX + rect.width*0.18, y: rect.minY + rect.height*0.62),
-    CGPoint(x: rect.minX + rect.width*0.36, y: rect.minY + rect.height*0.50),
-    CGPoint(x: rect.minX + rect.width*0.52, y: rect.minY + rect.height*0.58),
-    CGPoint(x: rect.minX + rect.width*0.68, y: rect.minY + rect.height*0.40),
-    CGPoint(x: rect.minX + rect.width*0.84, y: rect.minY + rect.height*0.24),
+    CGPoint(x: rect.minX + rect.width*0.18, y: rect.minY + rect.height*0.26),
+    CGPoint(x: rect.minX + rect.width*0.36, y: rect.minY + rect.height*0.44),
+    CGPoint(x: rect.minX + rect.width*0.52, y: rect.minY + rect.height*0.36),
+    CGPoint(x: rect.minX + rect.width*0.68, y: rect.minY + rect.height*0.56),
+    CGPoint(x: rect.minX + rect.width*0.84, y: rect.minY + rect.height*0.68),
 ]
 ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.95))
 ctx.setLineWidth(rect.width * 0.045)
@@ -43,11 +45,11 @@ ctx.move(to: pts[0])
 for p in pts.dropFirst() { ctx.addLine(to: p) }
 ctx.strokePath()
 
-// Filled area under the line, subtle.
+// Filled area under the ascending line, subtle (down to the bottom edge).
 let area = CGMutablePath()
-area.move(to: CGPoint(x: pts[0].x, y: rect.maxY))
+area.move(to: CGPoint(x: pts[0].x, y: rect.minY))
 for p in pts { area.addLine(to: p) }
-area.addLine(to: CGPoint(x: pts.last!.x, y: rect.maxY))
+area.addLine(to: CGPoint(x: pts.last!.x, y: rect.minY))
 area.closeSubpath()
 ctx.addPath(area)
 ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.18))
