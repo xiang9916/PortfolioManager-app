@@ -15,13 +15,17 @@ public struct Asset: Codable, Identifiable, Hashable {
     public let currency: String
     public let source: String?
     public let feeRate: Double?
+    /// 手动排序序号 (资产透视拖动排序); nil = 尚未参与排序.
+    public let sortOrder: Double?
 
     public init(id: Int64? = nil, key: String, name: String, ticker: String? = nil,
                 market: String? = nil, assetClass: String? = nil, pool: Pool,
-                currency: String = "CNY", source: String? = nil, feeRate: Double? = nil) {
+                currency: String = "CNY", source: String? = nil, feeRate: Double? = nil,
+                sortOrder: Double? = nil) {
         self.id = id; self.key = key; self.name = name; self.ticker = ticker
         self.market = market; self.assetClass = assetClass; self.pool = pool
         self.currency = currency; self.source = source; self.feeRate = feeRate
+        self.sortOrder = sortOrder
     }
 }
 
@@ -168,4 +172,30 @@ public struct OptimizationLogEntry: Codable, Identifiable {
     public let message: String
     public let level: String
     public let ts: String
+}
+
+// MARK: - Sensitivity Analysis
+
+public struct SensitivityPoint: Codable, Hashable, Identifiable {
+    public var id: Int { Int((targetReturn * 10000).rounded()) }
+    public let targetReturn: Double
+    public let feasible: Bool
+    public let achievedReturn: Double?
+    public let volatility: Double?
+    public let sharpe: Double?
+    public let worstYear95: Double?
+    /// 对数正态精确 CAGR：exp(E[ln(1+R)])−1（矩匹配）
+    public let cagrLognormal: Double?
+    /// 肥尾混合 CAGR：亏损侧 Student-t(α=ν) 幂律尾（下限 −99.9%）+ 盈利侧对数正态拼接
+    public let cagrFatTail: Double?
+}
+
+public struct SensitivityAnalysisResult: Codable {
+    public let maxFeasibleReturn: Double
+    /// 肥尾模型自由度（尾部指数 α），对应 Python 端 --tail-dof
+    public let tailDof: Double?
+    public let rf: Double
+    public let domesticWeight: Double
+    public let overseasWeight: Double
+    public let points: [SensitivityPoint]
 }

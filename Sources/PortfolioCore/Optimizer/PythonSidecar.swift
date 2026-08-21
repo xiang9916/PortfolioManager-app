@@ -50,6 +50,8 @@ public final class PythonSidecar {
         if let cwd = currentDirectoryURL {
             process.currentDirectoryURL = cwd
         }
+        // Inherit + allow env override (DSH_FINANCE_DIR for external data file paths).
+        process.environment = ProcessInfo.processInfo.environment
         let outPipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = outPipe

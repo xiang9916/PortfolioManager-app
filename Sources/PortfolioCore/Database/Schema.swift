@@ -2,7 +2,7 @@ import Foundation
 
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 3
+    public static let version: Int = 6
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -176,6 +176,36 @@ public enum Schema {
         );
         """,
         "COMMIT;",
+        ]),
+        (4, [
+        // 能力1: quotes 表存储最新报价 (单位净值/最新价), 与 prices (历史K线/累计净值) 分离.
+        // 基金: quotes = 单位净值 (用于市值计算), prices = 累计净值 (用于模拟历史财务表现图表).
+        """
+        CREATE TABLE IF NOT EXISTS quotes (
+            asset_key TEXT PRIMARY KEY,
+            price REAL NOT NULL,
+            date TEXT NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'CNY',
+            source TEXT,
+            FOREIGN KEY(asset_key) REFERENCES assets(key)
+        );
+        """,
+        ]),
+        (5, [
+        // 模块2: assets.sort_order — 资产透视列表手动拖动排序 (0 = 未排序, 按 key 字典序回退).
+        "ALTER TABLE assets ADD COLUMN sort_order REAL NOT NULL DEFAULT 0;",
+        ]),
+        (6, [
+        // 能力2: macro_rates — 宏观利率缓存 (akshare 抓取的中美10年国债收益率, 用于动态 RF 计算).
+        // RF = ov_w * us_10y + dom_w * cn_10y (池比例加权无风险利率, 替代 params.py 写死的 0.025).
+        """
+        CREATE TABLE IF NOT EXISTS macro_rates (
+            key TEXT PRIMARY KEY,
+            value REAL NOT NULL,
+            as_of_date TEXT NOT NULL,
+            source TEXT
+        );
+        """,
         ]),
     ]
 }

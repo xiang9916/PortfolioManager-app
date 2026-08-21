@@ -14,8 +14,12 @@ public struct AssetPerspectiveView: View {
                 ForEach(store.perspectives) { row in
                     rowCell(row).tag(row.assetKey)
                 }
+                .onMove { source, destination in
+                    store.moveAsset(from: source, to: destination)
+                }
             }
             .navigationTitle("资产透视")
+            .help("列表行可直接拖动调整顺序，排序自动保存")
             .toolbar {
                 ToolbarItemGroup {
                     Button { showAddAsset = true } label: { Label("添加标的", systemImage: "plus") }
@@ -102,7 +106,7 @@ public struct AssetDetailView: View {
                         }
                         let ccy = store.holdingDrafts[row.assetKey]?.currency ?? row.currency
                         editableField("份额 / 数量", store.holdingBinding(row.assetKey, \.quantity))
-                        editableField("成本 (" + ccy + ")", store.holdingBinding(row.assetKey, \.costBasis))
+                        editableField("总成本 (" + ccy + ")", store.holdingBinding(row.assetKey, \.costBasis))
                         Text("市值 = 份额 × 最后价，自动抓取计算，无需手填").font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(6)

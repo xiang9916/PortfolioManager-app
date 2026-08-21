@@ -44,6 +44,9 @@ public final class BackupManager {
         out["assets"] = try queryRows("SELECT key, name, ticker, asset_class, pool, currency FROM assets ORDER BY key")
         out["holdings"] = try queryRows("SELECT asset_key, quantity, cost_basis, currency, as_of_date FROM holdings ORDER BY asset_key")
         out["snapshots"] = try queryRows("SELECT date, total_value, domestic_value, overseas_value FROM snapshots ORDER BY date")
+        out["income_periods"] = try queryRows("SELECT id, period, period_end, dividends, realized_pnl, source FROM income_periods ORDER BY period_end")
+        out["fx_rates"] = try queryRows("SELECT currency, rate_to_cny, as_of_date, source FROM fx_rates ORDER BY currency")
+        out["quotes"] = try queryRows("SELECT asset_key, price, date, currency, source FROM quotes ORDER BY asset_key")
         let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url)
     }
@@ -119,6 +122,45 @@ public final class BackupManager {
                                                overseasValue: asDouble(r["overseas_value"]) ?? 0))
             }
         }
+
+        if let rows = obj["income_periods"] as? [[String: Any]] {
+            var summaries: [IncomeSummary] = []
+            for r in rows {
+                guard let periodRaw = asString(r["period"]),
+                      let period = FinancialPeriod(rawValue: periodRaw) else { continue }
+                summaries.append(IncomeSummary(period: period,
+                                               periodEnd: asString(r["period_end"]) ?? "",
+                                               dividends: asDouble(r["dividends"]) ?? 0,
+                                               realizedPnl: asDouble(r["realized_pnl"]) ?? 0,
+                                               source: asString(r["source"])))
+            }
+            if !summaries.isEmpty { try db.upsertIncomeSummaries(summaries) }
+        }
+
+        if let rows = obj["fx_rates"] as? [[String: Any]] {
+            var rates: [FxRate] = []
+            for r in rows {
+                guard let ccy = asString(r["currency"]) else { continue }
+                rates.append(FxRate(currency: ccy,
+                                    rateToCny: asDouble(r["rate_to_cny"]) ?? 0,
+                                    asOfDate: asString(r["as_of_date"]) ?? "",
+                                    source: asString(r["source"])))
+            }
+            if !rates.isEmpty { try db.upsertFxRates(rates) }
+        }
+
+        if let rows = obj["quotes"] as? [[String: Any]] {
+            var quotes: [Quote] = []
+            for r in rows {
+                guard let key = asString(r["asset_key"]) else { continue }
+                quotes.append(Quote(symbol: key,
+                                     price: asDouble(r["price"]) ?? 0,
+                                     currency: asString(r["currency"]),
+                                     date: asString(r["date"]) ?? "",
+                                     source: asString(r["source"]) ?? ""))
+            }
+            if !quotes.isEmpty { try db.upsertQuotes(quotes) }
+        }
     }
 
     /// Export holdings (joined with asset metadata) to a CSV for spreadsheet interop.
@@ -170,10 +212,14 @@ public final class BackupManager {
         return s
     }
 
-    private static func timestamp() -> String {
+    private static let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
         f.timeZone = TimeZone.current
-        return f.string(from: Date())
+        return f
+    }()
+
+    private static func timestamp() -> String {
+        timestampFormatter.string(from: Date())
     }
 }

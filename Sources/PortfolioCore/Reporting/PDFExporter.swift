@@ -36,6 +36,7 @@ public final class PDFExporter {
 
         func beginPageIfNeeded(_ height: CGFloat) {
             if y - height < margin {
+                ctx.endPDFPage()
                 ctx.beginPDFPage(nil)
                 y = pageHeight - margin
             }
@@ -104,6 +105,7 @@ public final class PDFExporter {
         }
         emitTable(detail, colWeights: [0.32, 0.16, 0.16, 0.10, 0.12, 0.14], ctx: ctx, topY: &y, left: left, contentWidth: contentWidth)
 
+        ctx.endPDFPage()
         ctx.closePDF()
     }
 
@@ -126,15 +128,31 @@ public final class PDFExporter {
         switch p { case .domestic: return "境内"; case .overseas: return "境外"; case .cross: return "跨池" }
     }
 
+    /// Draw text upright in the CGContext (standard bottom-left origin).
+    /// Uses CTLineDraw line-by-line so glyphs are NOT mirrored.
+    /// `topY` is the device-space top edge of the text block;
+    /// lines are placed top-to-bottom from there.
     private static func draw(_ text: NSAttributedString, ctx: CGContext, x: CGFloat, topY: CGFloat, width: CGFloat) {
-        let framesetter = CTFramesetterCreateWithAttributedString(text as CFAttributedString)
-        let path = CGPath(rect: CGRect(x: x, y: topY - 2000, width: width, height: 4000), transform: nil)
-        let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), path, nil)
         ctx.saveGState()
-        ctx.textMatrix = .identity
-        ctx.translateBy(x: 0, y: topY)
-        ctx.scaleBy(x: 1, y: -1)
-        CTFrameDraw(frame, ctx)
+        ctx.textMatrix = .identity  // no flip — glyphs render upright
+        let framesetter = CTFramesetterCreateWithAttributedString(text as CFAttributedString)
+        // Path spans the full page height so the framesetter can lay out all lines.
+        let path = CGPath(rect: CGRect(x: x, y: 0, width: width, height: pageHeight), transform: nil)
+        let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), path, nil)
+        guard let lines = CTFrameGetLines(frame) as? [CTLine] else {
+            ctx.restoreGState()
+            return
+        }
+        let n = lines.count
+        var origins = [CGPoint](repeating: .zero, count: n)
+        CTFrameGetLineOrigins(frame, CFRange(location: 0, length: n), &origins)
+        // CTFrame line origins are in top-left convention (y increases downward from
+        // the path top). The path top is at device y = pageHeight. To start the text
+        // block at device y = topY, we shift: baseline_device = topY - origin.y.
+        for i in 0..<n {
+            ctx.textPosition = CGPoint(x: x + origins[i].x, y: topY - origins[i].y)
+            CTLineDraw(lines[i], ctx)
+        }
         ctx.restoreGState()
     }
 
@@ -165,7 +183,7 @@ public final class PDFExporter {
         ctx.restoreGState()
 
         for (ri, row) in rows.enumerated() {
-            if topY - rowHeight < margin { ctx.beginPDFPage(nil); topY = pageHeight - margin }
+            if topY - rowHeight < margin { ctx.endPDFPage(); ctx.beginPDFPage(nil); topY = pageHeight - margin }
             if ri % 2 == 1 {
                 let rr = CGRect(x: left, y: topY - rowHeight, width: contentWidth, height: rowHeight)
                 ctx.saveGState()

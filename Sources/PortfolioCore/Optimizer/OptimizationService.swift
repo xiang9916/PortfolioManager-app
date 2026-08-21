@@ -79,6 +79,8 @@ public final class OptimizationService {
             "--json", detailPath,
             "--log", logPath,
             "--check-timeout", "45",
+            // App 侧目标收益率 (滑块) 必须显式传给 Python, 否则脚本用 params.py 硬编码 0.10.
+            "--target-return", String(targetReturn),
         ]
         if let t = totalAssets { args += ["--total-assets", String(t)] }
         if let h = hsbcFunds, FileManager.default.fileExists(atPath: h) {
@@ -89,6 +91,7 @@ public final class OptimizationService {
         process.executableURL = URL(fileURLWithPath: sidecar.interpreterPath)
         process.arguments = [sidecar.scriptURL("optimize_portfolio.py").path] + args
         if let cwd = sidecar.currentDirectoryURL { process.currentDirectoryURL = cwd }
+        process.environment = ProcessInfo.processInfo.environment
 
         // redirect stdout/stderr to files to avoid pipe back-pressure
         FileManager.default.createFile(atPath: detailPath, contents: nil)
@@ -177,8 +180,30 @@ public final class OptimizationService {
         return try finalize()
     }
 
+    /// Run sensitivity analysis: step target return from 5% to max feasible, 1% increments.
+    /// Runs synchronously and returns the full sweep result.
+    public func runSensitivityAnalysis(extractJSON: URL, hsbcFunds: String? = nil) throws -> SensitivityAnalysisResult {
+        var args = [
+            extractJSON.path,
+            "--step-min", "0.05",
+        ]
+        if let h = hsbcFunds, FileManager.default.fileExists(atPath: h) {
+            args += ["--hsbc-funds", h]
+        }
+
+        let stdout = try sidecar.run(script: "sensitivity_analysis.py", args: args)
+
+        guard let data = stdout.data(using: .utf8) else {
+            throw SidecarError.nonZeroExit(code: -1, stderr: "sensitivity analysis produced no output")
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let result = try decoder.decode(SensitivityAnalysisResult.self, from: data)
+        return result
+    }
+
     private static func isoNow() -> String {
-        let f = ISO8601DateFormatter()
-        return f.string(from: Date())
+        ISO8601DateFormatter().string(from: Date())
     }
 }
