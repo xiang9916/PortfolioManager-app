@@ -25,7 +25,10 @@ public struct AddAssetSheet: View {
             Text("添加资产标的").font(.title2).bold()
             Form {
                 TextField("名称", text: $name)
-                TextField("标的代码（如 AAPL / 00700.HK / BTC-USD）", text: $ticker)
+                TextField("标的代码", text: $ticker)
+                Text("如 AAPL / 00700.HK / BTC-USD\n境内基金填 6 位代码，如 110035")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 TextField("市场（可选，如 NASDAQ / HKEX）", text: $market)
                 Picker("资产类别", selection: $assetClass) {
                     ForEach(AssetClassKeys.all, id: \.self) { k in
@@ -60,7 +63,7 @@ public struct AddAssetSheet: View {
             }
         }
         .padding()
-        .frame(width: 440)
+        .frame(width: 620)
     }
 
     private func validate() async {
@@ -71,6 +74,10 @@ public struct AddAssetSheet: View {
         if res.valid {
             // 以数据源返回的币种为准（用标的自身币种填写）
             if AppStore.currencyOptions.contains(res.currency) { currency = res.currency }
+            // 名称留空时用数据源返回的名称自动填充（如天天基金 fS_name）
+            if name.trimmingCharacters(in: .whitespaces).isEmpty, let n = res.name, !n.isEmpty {
+                name = n
+            }
         }
         validationMessage = res.message
     }

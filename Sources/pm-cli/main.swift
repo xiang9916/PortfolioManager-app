@@ -85,8 +85,11 @@ if args.count >= 3 && args[1] == "fetch" {
     exit(runAsync {
         let source: any DataSource = sourceName == "fund" ? EastmoneySource() : YahooFinanceSource()
         let hist = try await source.fetchHistory(symbol: symbol)
-        print("来源 \(source.name)  标的 \(symbol)  共 \(hist.count) 个数据点")
-        for p in hist.suffix(5) { print("  \(p.date)  \(p.close)") }
+        print("来源 \(source.name)  标的 \(symbol)  共 \(hist.count) 个数据点 (history)")
+        for p in hist.suffix(3) { print("  \(p.date)  \(p.close)") }
+        if let q = try? await source.fetchQuote(symbol: symbol) {
+            print("报价 (quote): \(q.price) @ \(q.date) [\(q.currency ?? "?")]")
+        }
     })
 }
 if args.count >= 2 && args[1] == "refresh" {
@@ -237,8 +240,9 @@ if args.count >= 2 && args[1] == "financials" {
         let repo = Repository(db: db)
         let fa = try repo.fetchFinancialAnalysis()
         print("财务分析:")
-        print("  资产结构: 本金 \(fa.principal) 市值 \(fa.marketValue) 浮盈 \(fa.unrealizedPnl) 收益率 \(String(format: "%.2f%%", fa.returnRate * 100))")
-        print("  收益结构: 浮盈 \(fa.unrealizedPnl) 股息 \(fa.totalDividends) 交易损益 \(fa.totalRealizedPnl) 合计 \(fa.totalIncome)")
+        print("  资产结构: 原始本金 \(fa.originalPrincipal) 实盈实亏 \(fa.realizedPnl) 本金 \(fa.principal) 市值 \(fa.marketValue)")
+        print("           浮盈 \(fa.unrealizedPnl) 收益率(实盈/原始本金) \(String(format: "%.2f%%", fa.returnRate * 100))")
+        print("  收益结构: 股息 \(fa.totalDividends) 交易损益 \(fa.totalRealizedPnl) 合计收益 \(fa.totalIncome) 合计收益率 \(String(format: "%.2f%%", fa.totalReturnRate * 100))")
         print("  期间明细 (\(fa.periods.count) 条):")
         for f in fa.periods {
             print("    \(f.period.rawValue) \(f.periodEnd) 股息=\(f.dividends) 交易损益=\(f.realizedPnl)")

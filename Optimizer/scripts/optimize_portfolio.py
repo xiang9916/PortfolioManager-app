@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -31,8 +32,19 @@ from params import (
     GC_INTERNAL,
     GC_INTERNAL_CORR,
     build_broad_cov,
+    classify_domestic_fund,
     load_hsbc_fund_pool,
+    load_hsbc_raw_funds,
     us_core_params,
+)
+from optimize_common import (
+    portfolio_stats,
+    feasible_start,
+    solve_min_var,
+    max_feasible_return,
+    stage1_bounds,
+    project_psd,
+    build_corr_matrix,
 )
 
 
@@ -46,12 +58,8 @@ def log_step(step, message, level="info", log_path=None):
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-def portfolio_stats(weights, mu, cov):
-    weights = np.asarray(weights, dtype=float)
-    ret = float(weights @ mu)
-    vol = float(np.sqrt(weights @ cov @ weights))
-    sharpe = (ret - RF) / vol if vol > 0 else 0.0
-    return ret, vol, sharpe
+# portfolio_stats is imported from optimize_common; it accepts rf as a keyword arg.
+# Callers in this module pass rf=RF (module-level, dynamically overridden).
 
 
 def load_availability(path):
@@ -80,7 +88,8 @@ def run_availability_check(timeout=120.0):
     return tmp.name
 
 
-def filter_available_assets(assets, avail_funds, warnings):
+def filter_available_assets(assets, avail_funds, warnings, hsbc_status=None):
+    """按天天基金口径过滤可投大类; 与汇丰搜索易口径冲突时显式提示, 强制采信天天基金."""
     kept = []
     for a in assets:
         code = a.get("fund_code")
@@ -88,102 +97,25 @@ def filter_available_assets(assets, avail_funds, warnings):
             kept.append(a)
             continue
         info = avail_funds.get(code)
+        hsbc = (hsbc_status or {}).get(code)
         if info is None:
-            warnings.append(f"基金 {a['name']}（{code}）未在天天基金校验结果中，已剔除。")
+            msg = f"基金 {a['name']}（{code}）未在天天基金校验结果中，已剔除。"
+            if hsbc is not None and hsbc.get("open", True):
+                msg += f"（汇丰搜索易显示{hsbc.get('status', '开放')}；两源冲突，以天天基金口径为准）"
+            warnings.append(msg)
             continue
         if not info.get("open", False):
-            warnings.append(f"基金 {a['name']}（{code}）当前状态为 {info.get('status', '未知')}，已剔除。")
+            msg = f"基金 {a['name']}（{code}）天天基金状态为 {info.get('status', '未知')}，已剔除"
+            if hsbc is not None and hsbc.get("open", True):
+                msg += "（汇丰搜索易显示开放申购；两源冲突，以天天基金口径为准）"
+            warnings.append(msg + "。")
             continue
         kept.append(a)
     return kept
 
 
-def feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng):
-    n = len(lower)
-    x = np.zeros(n)
-    for idx, target in ((dom_idx, dom_w), (ov_idx, ov_w)):
-        lo = lower[idx]
-        hi = upper[idx]
-        cap = hi - lo
-        rem = target - lo.sum()
-        if rem < -1e-9:
-            return None
-        if cap.sum() <= 0:
-            if abs(rem) > 1e-9:
-                return None
-            x[idx] = lo
-            continue
-        p = rng.random(len(idx)) * cap
-        if p.sum() <= 0:
-            return None
-        x[idx] = lo + rem * p / p.sum()
-    return x
-
-
-def solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_target, n_starts=120, seed=7):
-    n = len(mu)
-    bounds = list(zip(lower, upper))
-    cons = [
-        {"type": "eq", "fun": lambda w: w.sum() - 1.0},
-        {"type": "eq", "fun": lambda w: w[dom_idx].sum() - dom_w},
-        {"type": "eq", "fun": lambda w: mu @ w - ret_target},
-    ]
-    rng = np.random.default_rng(seed)
-    best = None
-    for _ in range(n_starts):
-        start = feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng)
-        if start is None:
-            continue
-        res = minimize(
-            lambda w: w @ cov @ w,
-            start,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=cons,
-            options={"maxiter": 2500, "ftol": 1e-14},
-        )
-        w = res.x
-        if abs(w.sum() - 1) > 1e-4 or abs(w[dom_idx].sum() - dom_w) > 1e-4:
-            continue
-        if abs(mu @ w - ret_target) > 1e-4:
-            continue
-        if np.any(w < -1e-6) or np.any(w > np.array(upper) + 1e-6):
-            continue
-        ret, vol, sharpe = portfolio_stats(w, mu, cov)
-        if best is None or sharpe > best[3]:
-            best = (w, ret, vol, sharpe)
-    return best
-
-
-def max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w, n_starts=80, seed=11):
-    n = len(mu)
-    bounds = list(zip(lower, upper))
-    cons = [
-        {"type": "eq", "fun": lambda w: w.sum() - 1.0},
-        {"type": "eq", "fun": lambda w: w[dom_idx].sum() - dom_w},
-    ]
-    rng = np.random.default_rng(seed)
-    best = -1.0
-    for _ in range(n_starts):
-        start = feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng)
-        if start is None:
-            continue
-        res = minimize(
-            lambda w: -mu @ w,
-            start,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=cons,
-            options={"maxiter": 2000, "ftol": 1e-14},
-        )
-        if res.success:
-            best = max(best, float(mu @ res.x))
-    return best
-
-
-def stage1_bounds(assets):
-    n = len(assets)
-    return np.zeros(n), np.ones(n)
+# feasible_start, solve_min_var, max_feasible_return, stage1_bounds
+# are imported from optimize_common.
 
 
 def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols):
@@ -239,14 +171,8 @@ def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, bro
             i2 = len(fixed_assets) + j2
             corr[i1, i2] = corr[i2, i1] = US_INTERNAL_CORR.get((t1, t2), US_INTERNAL_CORR.get((t2, t1), 0.5))
 
-    # PSD projection.
-    a = (corr + corr.T) / 2.0
-    vals, vecs = np.linalg.eigh(a)
-    vals = np.clip(vals, 0.0, None)
-    corr = vecs @ np.diag(vals) @ vecs.T
-    d = np.sqrt(np.diag(corr))
-    corr = corr / np.outer(d, d)
-    corr = (corr + corr.T) / 2.0
+    # PSD projection (shared helper).
+    corr = project_psd(corr)
     cov = np.outer(vols, vols) * corr
     cov += np.eye(n) * 1e-10
     return mus, cov, keys
@@ -291,7 +217,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
 
     def objective(internal_w):
         w = total_weights(internal_w)
-        _, _, sharpe = portfolio_stats(w, mus, cov)
+        _, _, sharpe = portfolio_stats(w, mus, cov, rf=RF)
         return -sharpe
 
     bounds = [(0.0, None)] * n_internal
@@ -329,7 +255,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
             continue
         if mus @ w < TARGET_RETURN - 1e-4:
             continue
-        ret, vol, sharpe = portfolio_stats(w, mus, cov)
+        ret, vol, sharpe = portfolio_stats(w, mus, cov, rf=RF)
         if best is None or sharpe > best[3]:
             best = (x, ret, vol, sharpe, w, internal_tickers)
     return best, None
@@ -388,16 +314,8 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     n = len(tickers)
     mu = np.array([internal_pool[t]["mu"] for t in tickers])
     vols = np.array([internal_pool[t]["vol"] for t in tickers])
-    corr = np.eye(n)
-    for i, a in enumerate(tickers):
-        for j, b in enumerate(tickers):
-            if i != j:
-                corr[i, j] = internal_corr.get((a, b), internal_corr.get((b, a), 0.5))
-    vals, vecs = np.linalg.eigh(corr)
-    vals = np.clip(vals, 0.0, None)
-    corr = vecs @ np.diag(vals) @ vecs.T
-    d = np.sqrt(np.diag(corr))
-    corr = corr / np.outer(d, d)
+    corr = build_corr_matrix(n, tickers, internal_corr)
+    corr = project_psd(corr)
     cov = np.outer(vols, vols) * corr
 
     def obj(w):
@@ -453,8 +371,31 @@ def stage2_gc_optimize(stage1_weights, assets, total_assets):
     return _internal_pool_optimize(stage1_weights, assets, GC_INTERNAL, GC_INTERNAL_CORR, "D_GREATER_CN", total_assets, seed=43)
 
 
-def build_result_summary(output):
+def build_result_summary(output, hsbc_pool=None):
     """Build a clean Finance result file: per-asset weights/return/vol/sharpe + totals."""
+    # 境外/跨池大类的执行代码（标的名前加 [代码] 前缀，便于直接下单；
+    # 无单一成交代码的大类保持 None，不加前缀）
+    exec_code = {
+        "O_BTC": "BTC",
+        "O_HYLB": "HYLB",
+        "O_SG_EQ": "G3B.SI",
+        "O_US_TLT": "TLH",
+        "O_US_REIT": "REZ",
+        "O_US_ENERGY": "XOM",
+    }
+    # 大中华二级风格桶 → 境内基金池类别（风格桶本身无单一成交代码，
+    # 执行代表基金取自对应类别的去重/最低费率代表，与境内大类同一套哲学）
+    gc_bucket_pool = {
+        "CSI300": "D_HSBC_CSI300",
+        "DIVLOWVOL": "D_HSBC_DIVLOWVOL",
+        "DIVLOWVOL100": "D_CN_DIVLOWVOL100",
+        "STOCK": "D_CN_STOCK",
+        "MIXED": "D_CN_MIXED",
+        "INDEX": "D_CN_INDEX",
+        "HK_BROAD": "D_CN_HK",
+        "HK_DIV": "D_CN_HK",
+        "HK_TECH": "D_HSBC_HSTECH",
+    }
     assets = []
     # Domestic categories with selected representative funds
     for key, sel in output.get("domestic_selection", {}).items():
@@ -465,7 +406,7 @@ def build_result_summary(output):
         vol = a["vol"]
         assets.append({
             "key": key,
-            "name": f"{a['name']} → {sel['selected']['code']} {sel['selected']['name']}",
+            "name": f"[{sel['selected']['code']}] {a['name']} → {sel['selected']['name']}",
             "weight": sel["category_weight"],
             "expected_return": mu,
             "volatility": vol,
@@ -483,7 +424,7 @@ def build_result_summary(output):
         vol = info["vol"]
         assets.append({
             "key": ticker,
-            "name": info["name"],
+            "name": f"[{ticker}] {info['name']}",
             "weight": w,
             "expected_return": mu,
             "volatility": vol,
@@ -502,7 +443,7 @@ def build_result_summary(output):
             vol = info["vol"]
             assets.append({
                 "key": f"JP:{ticker}",
-                "name": f"日本·{info['name']}",
+                "name": f"[{ticker}] 日本·{info['name']}",
                 "weight": w,
                 "expected_return": mu,
                 "volatility": vol,
@@ -522,7 +463,7 @@ def build_result_summary(output):
             vol = info["vol"]
             assets.append({
                 "key": f"HK:{ticker}",
-                "name": f"香港·{info['name']}",
+                "name": f"[{ticker}] 香港·{info['name']}",
                 "weight": w,
                 "expected_return": mu,
                 "volatility": vol,
@@ -530,8 +471,10 @@ def build_result_summary(output):
             })
 
     # Greater China equity internal factor split
+    # 风格桶无单一成交代码：前缀用对应境内基金池的代表基金代码
     gc = output.get("gc_selection")
     if gc is not None:
+        gc_used = {}  # pool_key -> 已用 code 列表，同池多桶避免重复同一代表
         for ticker, w in gc.get("internal_weights_total", {}).items():
             if w <= 1e-8:
                 continue
@@ -540,9 +483,19 @@ def build_result_summary(output):
                 continue
             mu = info["mu"]
             vol = info["vol"]
+            rep = None
+            if hsbc_pool:
+                pool_key = gc_bucket_pool.get(ticker)
+                cands = hsbc_pool.get(pool_key) or []
+                used = gc_used.setdefault(pool_key, [])
+                rep = next((c for c in cands if c["code"] not in used), None)
+                if rep is not None:
+                    used.append(rep["code"])
+            name = (f"[{rep['code']}] 大中华·{info['name']} → {rep['name']}"
+                    if rep is not None else f"大中华·{info['name']}")
             assets.append({
                 "key": f"GC:{ticker}",
-                "name": f"大中华·{info['name']}",
+                "name": name,
                 "weight": w,
                 "expected_return": mu,
                 "volatility": vol,
@@ -558,9 +511,11 @@ def build_result_summary(output):
             continue
         mu = a["mu"]
         vol = a["vol"]
+        code = a.get("fund_code") or exec_code.get(key)
+        name = f"[{code}] {a['name']}" if code else a["name"]
         assets.append({
             "key": key,
-            "name": a["name"],
+            "name": name,
             "weight": w,
             "expected_return": mu,
             "volatility": vol,
@@ -650,13 +605,19 @@ def main():
     parser.add_argument("extract_json")
     parser.add_argument("--total-assets", type=float, default=None)
     parser.add_argument(
+        "--target-return",
+        type=float,
+        default=None,
+        help="目标预期收益率覆盖 (如 0.20=20%%)；缺省用 params.TARGET_RETURN",
+    )
+    parser.add_argument(
         "--availability",
         help="天天基金校验 JSON；缺省时自动运行 check_fund_availability.py",
     )
     parser.add_argument("--check-timeout", type=float, default=120.0)
     parser.add_argument(
         "--hsbc-funds",
-        default="/Users/sectator/MEGA/Finance/tmp/hsbc_open_funds.json",
+        default=os.environ.get("DSH_HSBC_FUNDS", "/Users/sectator/MEGA/Finance/tmp/hsbc_open_funds.json"),
         help="基金搜索易开放申购基金 JSON 路径",
     )
     parser.add_argument("--json", dest="out_path", help="Write detailed JSON output to file")
@@ -664,19 +625,48 @@ def main():
     parser.add_argument("--log", dest="log_path", help="JSONL step log path")
     args = parser.parse_args()
 
+    # App 侧滑块传入的目标收益率覆盖 params.py 的默认值.
+    # TARGET_RETURN 是模块级全局, 下方 stage1/stage2 的约束 lambda 在调用时
+    # 按全局名查找, 此处重绑后全部生效.
+    global TARGET_RETURN
+    if args.target_return is not None:
+        TARGET_RETURN = float(args.target_return)
+        log_step("target_return", f"目标收益率覆盖为 {TARGET_RETURN:.0%}", log_path=args.log_path)
+
     with open(args.extract_json, encoding="utf-8") as f:
         extract = json.load(f)
     log_step("load_extract", f"已加载提取结果 total={extract.get('total_value')}", log_path=args.log_path)
 
+    # RF (无风险利率) 动态覆盖: App 侧按池比例加权中美10年国债收益率算出 rf,
+    # 通过 extract_live.json 的 "rf" 字段传入, 替代 params.py 写死的 0.025.
+    # RF 是模块级全局, 同 TARGET_RETURN 模式: global 重绑后约束 lambda 生效.
+    global RF
+    if extract.get("rf") is not None:
+        RF = float(extract["rf"])
+        log_step("rf", f"无风险利率覆盖为 {RF:.2%} (动态中美10年国债加权)", log_path=args.log_path)
+
     warnings = list(extract.get("warnings", []))
 
+    # live_anchors: 用户实际持有的境内基金代码 (从 extract_live.json domestic_holdings 提取),
+    # 用 classify_domestic_fund(name) 归类, 覆盖 params.py 写死的 fund_code 作为各类锚定.
+    # 效果: select_domestic_funds 优先保留用户已持有基金而非推荐换仓到同类最低费率基金.
+    live_anchors = {}
+    for h in extract.get("domestic_holdings", []):
+        cat = classify_domestic_fund(h.get("name", ""))
+        live_anchors[cat] = h.get("code")
+    if live_anchors:
+        log_step("live_anchors", f"动态锚定 {len(live_anchors)} 个境内基金 (覆盖 params.py 静态锚定)", log_path=args.log_path)
+
     hsbc_pool = {}
+    hsbc_status = {}
     if args.hsbc_funds and Path(args.hsbc_funds).exists():
         try:
-            hsbc_pool = load_hsbc_fund_pool(args.hsbc_funds)
+            hsbc_pool = load_hsbc_fund_pool(args.hsbc_funds, live_anchors=live_anchors)
             pool_count = sum(len(v) for v in hsbc_pool.values())
             log_step("load_hsbc_pool", f"已加载开放基金池 {pool_count} 只", log_path=args.log_path)
             warnings.append(f"已加载基金搜索易开放基金池：{pool_count} 只。")
+            # 原始在售状态, 供口径冲突提示 (汇丰开放 vs 天天基金暂停)
+            hsbc_status = {str(f.get("code", "")).strip(): f for f in load_hsbc_raw_funds(args.hsbc_funds)}
         except Exception as exc:
             warnings.append(f"基金搜索易开放基金池加载失败：{exc}")
     else:
@@ -717,12 +707,17 @@ def main():
 
     assets = []
     for a in BROAD_ASSETS:
+        # 汇丰在售池里没有任何候选的境内大类直接剔除 (如 QDII 商品可能无在售基金),
+        # 否则第一阶段会把权重分给一个买不到的类别, select_domestic_funds 又选不出代表基金.
+        if a["pool"] == "domestic" and hsbc_pool and a["key"] not in hsbc_pool:
+            warnings.append(f"境内大类 {a['name']}（{a['key']}）在汇丰在售池中无候选基金，已从第一阶段剔除。")
+            continue
         item = dict(a)
         if a["key"] == "O_US_CORE":
             item["mu"] = core_mu
             item["vol"] = core_vol
         assets.append(item)
-    assets = filter_available_assets(assets, avail_funds, warnings)
+    assets = filter_available_assets(assets, avail_funds, warnings, hsbc_status)
     log_step("build_assets", f"构建大类资产 {len(assets)} 项", log_path=args.log_path)
     if not any(a["pool"] == "domestic" for a in assets):
         print(
@@ -743,12 +738,15 @@ def main():
     log_step("stage1_broad", "第一阶段：大类资产均值-方差优化", log_path=args.log_path)
     lower, upper = stage1_bounds(assets)
     target = TARGET_RETURN
-    solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target)
+    solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
     if solved is None:
         max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
-        warnings.append(f"10% 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
+        warnings.append(f"{target:.0%} 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
         target = max_ret - 1e-6
-        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, seed=23)
+        # Bug D1 修复: 回退后的靶值必须同步回全局 TARGET_RETURN,
+        # 否则 stage2 的收益约束仍按原始(不可行)目标求解, 导致 stage2 必然返回 None.
+        TARGET_RETURN = target
+        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, seed=23, rf=RF)
 
     if solved is None:
         print(json.dumps({"error": "Optimization infeasible", "warnings": warnings}, ensure_ascii=False, indent=2))
@@ -784,6 +782,18 @@ def main():
             "sharpe": sharpe2,
             "floor": ret2 - 1.96 * vol2,
         }
+    else:
+        # Bug D2 修复: stage2 不可行时汇总回退第一阶段统计,
+        # 否则 final=None 会让结果文件的组合收益/波动/夏普全部变成 0.
+        final = {
+            "ret": ret1,
+            "vol": vol1,
+            "sharpe": sharpe1,
+            "floor": ret1 - 1.96 * vol1,
+        }
+        if stage2_error:
+            warnings.append(stage2_error)
+        warnings.append("美国权益内部优化不可行，组合统计已回退使用第一阶段结果。")
 
     stage1_detail = {
         "weights": {keys[i]: float(w1[i]) for i in range(len(keys)) if w1[i] > 1e-6},
@@ -847,7 +857,7 @@ def main():
         print(json.dumps(output, ensure_ascii=False, indent=2))
 
     if args.result_path:
-        summary = build_result_summary(output)
+        summary = build_result_summary(output, hsbc_pool=hsbc_pool)
         if args.out_path:
             summary["source_detail"] = args.out_path
         with open(args.result_path, "w", encoding="utf-8") as f:

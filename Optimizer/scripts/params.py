@@ -214,7 +214,10 @@ BROAD_ASSETS = [
     {"key": "D_HSBC_MMF", "name": "博时现金宝货币B", "fund_code": "000891", "pool": "domestic", "mu": 0.020, "vol": 0.01},
     # 境内：当前实际持仓补充（债券/全球保持独立）
     {"key": "D_CN_CREDIT_BOND", "name": "易方达双债增强债券A", "fund_code": "110035", "pool": "domestic", "mu": 0.045, "vol": 0.05},
-    {"key": "D_CN_QDII_GLOBAL", "name": "全球/亚洲QDII及互认基金", "fund_code": None, "pool": "domestic", "mu": 0.075, "vol": 0.18},
+    # QDII 细分三小类 (Bug C): 股票 / 稳健债性 / 商品, 各自独立 mu/vol 与校准代理
+    {"key": "D_CN_QDII_STOCK", "name": "QDII全球股票", "fund_code": None, "pool": "domestic", "mu": 0.085, "vol": 0.19},
+    {"key": "D_CN_QDII_STABLE", "name": "QDII稳健配置(债性FOF)", "fund_code": None, "pool": "domestic", "mu": 0.045, "vol": 0.06},
+    {"key": "D_CN_QDII_COMMODITY", "name": "QDII商品/原油", "fund_code": None, "pool": "domestic", "mu": 0.05, "vol": 0.25},
     # 大中华权益一级大类（跨池：内地权益 + 香港权益，内部再拆 9 类二级）
     {"key": "D_GREATER_CN", "name": "大中华权益（沪深300/红利低波/主动/港股等）", "fund_code": None, "pool": "cross", "mu": 0.075, "vol": 0.20},
     # 黄金一级大类（跨池：境内黄金基金 + 境外黄金ETF 合并）
@@ -507,36 +510,84 @@ BROAD_CORR = {
     ("D_CN_HK", "O_US_REIT"): 0.30,
     ("D_CN_HK", "O_US_ENERGY"): 0.25,
     ("D_CN_HK", "O_HK_GOLD"): 0.05,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_SP500"): 0.70,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_CSI300"): 0.40,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_DIVLOWVOL"): 0.35,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_CDB"): 0.05,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_GOLD"): 0.10,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_HSTECH"): 0.40,
-    ("D_CN_QDII_GLOBAL", "D_HSBC_MMF"): 0.00,
-    ("D_CN_QDII_GLOBAL", "D_CN_CREDIT_BOND"): 0.20,
-    ("D_CN_QDII_GLOBAL", "D_CN_DIVLOWVOL100"): 0.35,
-    ("D_CN_QDII_GLOBAL", "O_US_CORE"): 0.70,
-    ("D_CN_QDII_GLOBAL", "O_BTC"): 0.20,
-    ("D_CN_QDII_GLOBAL", "O_HYLB"): 0.40,
-    ("D_CN_QDII_GLOBAL", "O_HK_HSTECH"): 0.45,
-    ("D_CN_QDII_GLOBAL", "O_HK_HIGHDIV"): 0.40,
-    ("D_CN_QDII_GLOBAL", "O_JP_EQ"): 0.50,
-    ("D_CN_QDII_GLOBAL", "O_SG_EQ"): 0.45,
-    ("D_CN_QDII_GLOBAL", "O_US_TLT"): -0.10,
-    ("D_CN_QDII_GLOBAL", "O_US_REIT"): 0.40,
-    ("D_CN_QDII_GLOBAL", "O_US_ENERGY"): 0.35,
-    ("D_CN_QDII_GLOBAL", "O_HK_GOLD"): 0.10,
+    # QDII 股票小类: 跟随全球股市, 与美股核心高度相关
+    ("D_CN_QDII_STOCK", "D_HSBC_SP500"): 0.85,
+    ("D_CN_QDII_STOCK", "D_HSBC_CSI300"): 0.40,
+    ("D_CN_QDII_STOCK", "D_HSBC_DIVLOWVOL"): 0.35,
+    ("D_CN_QDII_STOCK", "D_HSBC_CDB"): 0.05,
+    ("D_CN_QDII_STOCK", "D_HSBC_GOLD"): 0.10,
+    ("D_CN_QDII_STOCK", "D_HSBC_HSTECH"): 0.40,
+    ("D_CN_QDII_STOCK", "D_HSBC_MMF"): 0.00,
+    ("D_CN_QDII_STOCK", "D_CN_CREDIT_BOND"): 0.10,
+    ("D_CN_QDII_STOCK", "D_CN_DIVLOWVOL100"): 0.35,
+    ("D_CN_QDII_STOCK", "O_US_CORE"): 0.85,
+    ("D_CN_QDII_STOCK", "O_BTC"): 0.20,
+    ("D_CN_QDII_STOCK", "O_HYLB"): 0.40,
+    ("D_CN_QDII_STOCK", "O_HK_HSTECH"): 0.55,
+    ("D_CN_QDII_STOCK", "O_HK_HIGHDIV"): 0.45,
+    ("D_CN_QDII_STOCK", "O_JP_EQ"): 0.55,
+    ("D_CN_QDII_STOCK", "O_SG_EQ"): 0.50,
+    ("D_CN_QDII_STOCK", "O_US_TLT"): -0.05,
+    ("D_CN_QDII_STOCK", "O_US_REIT"): 0.45,
+    ("D_CN_QDII_STOCK", "O_US_ENERGY"): 0.35,
+    ("D_CN_QDII_STOCK", "O_HK_GOLD"): 0.10,
+    # QDII 稳健小类: 债性, 与信用债/高收益债/长久期国债相关
+    ("D_CN_QDII_STABLE", "D_HSBC_SP500"): 0.25,
+    ("D_CN_QDII_STABLE", "D_HSBC_CSI300"): 0.10,
+    ("D_CN_QDII_STABLE", "D_HSBC_DIVLOWVOL"): 0.10,
+    ("D_CN_QDII_STABLE", "D_HSBC_CDB"): 0.30,
+    ("D_CN_QDII_STABLE", "D_HSBC_GOLD"): 0.05,
+    ("D_CN_QDII_STABLE", "D_HSBC_HSTECH"): 0.15,
+    ("D_CN_QDII_STABLE", "D_HSBC_MMF"): 0.05,
+    ("D_CN_QDII_STABLE", "D_CN_CREDIT_BOND"): 0.45,
+    ("D_CN_QDII_STABLE", "D_CN_DIVLOWVOL100"): 0.10,
+    ("D_CN_QDII_STABLE", "O_US_CORE"): 0.25,
+    ("D_CN_QDII_STABLE", "O_BTC"): 0.05,
+    ("D_CN_QDII_STABLE", "O_HYLB"): 0.55,
+    ("D_CN_QDII_STABLE", "O_HK_HSTECH"): 0.15,
+    ("D_CN_QDII_STABLE", "O_HK_HIGHDIV"): 0.15,
+    ("D_CN_QDII_STABLE", "O_JP_EQ"): 0.15,
+    ("D_CN_QDII_STABLE", "O_SG_EQ"): 0.15,
+    ("D_CN_QDII_STABLE", "O_US_TLT"): 0.55,
+    ("D_CN_QDII_STABLE", "O_US_REIT"): 0.20,
+    ("D_CN_QDII_STABLE", "O_US_ENERGY"): 0.05,
+    ("D_CN_QDII_STABLE", "O_HK_GOLD"): 0.05,
+    # QDII 商品小类: 原油/大宗, 与能源股和黄金相关
+    ("D_CN_QDII_COMMODITY", "D_HSBC_SP500"): 0.25,
+    ("D_CN_QDII_COMMODITY", "D_HSBC_CSI300"): 0.15,
+    ("D_CN_QDII_COMMODITY", "D_HSBC_CDB"): 0.05,
+    ("D_CN_QDII_COMMODITY", "D_HSBC_GOLD"): 0.35,
+    ("D_CN_QDII_COMMODITY", "D_HSBC_MMF"): 0.00,
+    ("D_CN_QDII_COMMODITY", "D_CN_CREDIT_BOND"): 0.05,
+    ("D_CN_QDII_COMMODITY", "O_US_CORE"): 0.25,
+    ("D_CN_QDII_COMMODITY", "O_BTC"): 0.10,
+    ("D_CN_QDII_COMMODITY", "O_HYLB"): 0.20,
+    ("D_CN_QDII_COMMODITY", "O_HK_HSTECH"): 0.20,
+    ("D_CN_QDII_COMMODITY", "O_US_TLT"): -0.05,
+    ("D_CN_QDII_COMMODITY", "O_US_REIT"): 0.20,
+    ("D_CN_QDII_COMMODITY", "O_US_ENERGY"): 0.50,
+    ("D_CN_QDII_COMMODITY", "O_HK_GOLD"): 0.45,
+    ("D_CN_QDII_COMMODITY", "O_GOLD"): 0.45,
+    ("D_CN_QDII_COMMODITY", "D_CN_QDII_STOCK"): 0.25,
+    ("D_CN_QDII_COMMODITY", "D_CN_QDII_STABLE"): 0.05,
     ("D_CN_STOCK", "D_CN_MIXED"): 0.70,
     ("D_CN_STOCK", "D_CN_INDEX"): 0.80,
     ("D_CN_STOCK", "D_CN_HK"): 0.55,
-    ("D_CN_STOCK", "D_CN_QDII_GLOBAL"): 0.40,
+    ("D_CN_STOCK", "D_CN_QDII_STOCK"): 0.45,
+    ("D_CN_STOCK", "D_CN_QDII_STABLE"): 0.15,
+    ("D_CN_STOCK", "D_CN_QDII_COMMODITY"): 0.20,
     ("D_CN_MIXED", "D_CN_INDEX"): 0.70,
     ("D_CN_MIXED", "D_CN_HK"): 0.50,
-    ("D_CN_MIXED", "D_CN_QDII_GLOBAL"): 0.40,
+    ("D_CN_MIXED", "D_CN_QDII_STOCK"): 0.45,
+    ("D_CN_MIXED", "D_CN_QDII_STABLE"): 0.15,
+    ("D_CN_MIXED", "D_CN_QDII_COMMODITY"): 0.20,
     ("D_CN_INDEX", "D_CN_HK"): 0.50,
-    ("D_CN_INDEX", "D_CN_QDII_GLOBAL"): 0.35,
-    ("D_CN_HK", "D_CN_QDII_GLOBAL"): 0.40,
+    ("D_CN_INDEX", "D_CN_QDII_STOCK"): 0.40,
+    ("D_CN_INDEX", "D_CN_QDII_STABLE"): 0.12,
+    ("D_CN_INDEX", "D_CN_QDII_COMMODITY"): 0.18,
+    ("D_CN_HK", "D_CN_QDII_STOCK"): 0.50,
+    ("D_CN_HK", "D_CN_QDII_STABLE"): 0.15,
+    ("D_CN_HK", "D_CN_QDII_COMMODITY"): 0.20,
 }
 
 
@@ -611,6 +662,22 @@ DOMESTIC_FUND_KEYWORDS = {
     "D_CN_INDEX": ["指数", "ETF", "联接"],
 }
 
+# QDII 细分三小类 (Bug C 修复: 原来整桶用 ^GSPC 标普代理, 把债性 FOF 按美股统计).
+# 商品最具体先判, 稳健次之, 其余默认 QDII 股票.
+QDII_SUB_KEYWORDS = {
+    "D_CN_QDII_COMMODITY": ["原油", "石油", "天然气", "大宗商品", "商品", "资源"],
+    "D_CN_QDII_STABLE": ["稳健", "债", "固收", "多元配置", "平衡", "绝对收益", "收益"],
+}
+
+
+def _subclass_qdii(name):
+    """Split the generic QDII bucket into stock / stable / commodity sub-categories."""
+    n = name.replace("[仅电子渠道]", "").strip()
+    for key, words in QDII_SUB_KEYWORDS.items():
+        if any(w in n for w in words):
+            return key
+    return "D_CN_QDII_STOCK"
+
 # 分类优先级：先匹配具体指数/主题，再匹配宽泛类型。
 DOMESTIC_FUND_ORDER = [
     "D_HSBC_SP500",
@@ -635,6 +702,8 @@ def classify_domestic_fund(name):
     n = name.replace("[仅电子渠道]", "").strip()
     for key in DOMESTIC_FUND_ORDER:
         if any(w in n for w in DOMESTIC_FUND_KEYWORDS[key]):
+            if key == "D_CN_QDII_GLOBAL":
+                return _subclass_qdii(n)
             return key
     return "D_CN_MIXED"
 
@@ -649,7 +718,7 @@ def _fund_base_name(name):
     return n
 
 
-def _dedup_a_class(candidates):
+def _dedup_a_class(candidates, anchor=None):
     """Prefer A-class over C-class for the same underlying fund; keep anchor if present."""
     groups = {}
     for c in candidates:
@@ -657,13 +726,37 @@ def _dedup_a_class(candidates):
         groups.setdefault(base, []).append(c)
     out = []
     for base, items in groups.items():
+        # Bug B 修复: 锚定基金(用户实际持有, 可能是 C 类)的份额类别必须原样保留,
+        # 不能被 A 类合并掉 — 否则后续按 code 查锚定永远找不到, 会选出同基金的另一份额。
+        if anchor:
+            anchor_item = next((c for c in items if c["code"] == anchor), None)
+            if anchor_item is not None:
+                out.append(anchor_item)
+                continue
         a_items = [c for c in items if "A类" in c["name"] or c["name"].rstrip().endswith("A")]
         chosen = a_items[0] if a_items else items[0]
         out.append(chosen)
     return out
 
 
-HSBC_FEES_PATH = "/Users/sectator/MEGA/Finance/tmp/hsbc_fund_fees.json"
+import os
+
+# External data file paths: env override → Finance/tmp (dev machine) → bundled Resources/data.
+# Packaged app sets DSH_FINANCE_DIR via PythonSidecar env, or falls back to Resources/data.
+_FINANCE_TMP = os.environ.get("DSH_FINANCE_DIR", "/Users/sectator/MEGA/Finance/tmp")
+_BUNDLE_DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+
+def _resolve_data_file(filename):
+    """Resolve a data file: env DSH_FINANCE_DIR → Finance/tmp → bundle Resources/data."""
+    candidates = [os.path.join(_FINANCE_TMP, filename), os.path.join(_BUNDLE_DATA, filename)]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]  # return first candidate path even if missing (caller handles)
+
+
+HSBC_FEES_PATH = _resolve_data_file("hsbc_fund_fees.json")
 _MIN_AUM_YI = 1.0      # 1 亿元以下视为低效
 _MIN_AGE_DAYS = 365    # 成立不足 1 年视为低效
 
@@ -698,8 +791,10 @@ def _select_lowest_fee(candidates, fees, anchor):
     if not valid:
         valid = candidates  # keep at least the anchor if everything is filtered
     if anchor:
+        # Bug A 修复: 锚定基金(静态代表或用户实际持仓)只要在校验后的候选里就优先返回。
+        # 原条件 len(valid) == 1 使得候选>=2 时锚定永远被最低费率分支覆盖(死代码)。
         anchor_fund = next((c for c in valid if c["code"] == anchor), None)
-        if anchor_fund is not None and len(valid) == 1:
+        if anchor_fund is not None:
             return [anchor_fund]
 
     def cost(c):
@@ -716,19 +811,26 @@ def _select_lowest_fee(candidates, fees, anchor):
     return [valid[0]]
 
 
-def load_hsbc_fund_pool(path):
+def load_hsbc_fund_pool(path, live_anchors=None):
     """Load 基金搜索易 open funds JSON and group them by broad asset key.
 
     A-share dedup rules:
     - A/C 份额只保留 A 类；
     - 同一基金/风格仅保留一个代表；
     - 按费率最低去重（使用 tmp/hsbc_fund_fees.json），并剔除规模<1亿或成立<1年的低效基金。
+
+    live_anchors: dict of {category_key: fund_code} from the App's actual domestic
+    holdings (extract_live.json domestic_holdings). When a category has a live
+    anchor, it overrides params.py's static fund_code — so select_domestic_funds
+    prefers the user's actual fund over a hardcoded stale snapshot.
     """
     fees = _load_fees()
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     funds = data.get("funds", data if isinstance(data, list) else [])
     anchors = {a["key"]: a.get("fund_code") for a in BROAD_ASSETS if a["pool"] == "domestic"}
+    if live_anchors:
+        anchors = {**anchors, **live_anchors}  # live 优先, 静态作 fallback
     pool = {}
     for item in funds:
         if not item.get("open", True):
@@ -740,10 +842,18 @@ def load_hsbc_fund_pool(path):
         key = classify_domestic_fund(name)
         pool.setdefault(key, []).append({"code": code, "name": name})
     for key, candidates in pool.items():
-        deduped = _dedup_a_class(candidates)
         anchor = anchors.get(key)
+        deduped = _dedup_a_class(candidates, anchor)
         pool[key] = _select_lowest_fee(deduped, fees, anchor)
     return pool
+
+
+def load_hsbc_raw_funds(path):
+    """Load the raw 基金搜索易 funds list (code/name/status), for cross-source checks."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    funds = data.get("funds", data if isinstance(data, list) else [])
+    return funds
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +864,7 @@ def load_hsbc_fund_pool(path):
 #   - 预期收益 = 60% 历史收益 + 40% 原前瞻假设，并做合理截断
 #   - 相关性矩阵 = 历史日收益相关性
 # 如果文件存在，模块加载时会自动覆盖上面写死的手工参数。
-CALIBRATION_PATH = "/Users/sectator/MEGA/Finance/tmp/calibrated_params.json"
+CALIBRATION_PATH = _resolve_data_file("calibrated_params.json")
 CALIBRATION_LOADED = False
 CALIBRATION_SUMMARY = None
 
@@ -782,42 +892,18 @@ def _apply_calibration():
             a["mu"] = cal_assets[key]["mu"]
             a["vol"] = cal_assets[key]["vol"]
 
-    # 2) 更新美国核心内部标的
-    for ticker, info in US_INTERNAL.items():
-        if ticker in cal_us:
-            info["mu"] = cal_us[ticker]["mu"]
-            info["vol"] = cal_us[ticker]["vol"]
-        elif ticker in cal_assets:
-            info["mu"] = cal_assets[ticker]["mu"]
-            info["vol"] = cal_assets[ticker]["vol"]
+    # 2) 更新内部标的 mu/vol (美国/日本/香港/大中华 — 同一套逻辑)
+    def _update_internal(internal_map, cal_sub):
+        for ticker, info in internal_map.items():
+            src = cal_sub.get(ticker) or cal_assets.get(ticker)
+            if src:
+                info["mu"] = src["mu"]
+                info["vol"] = src["vol"]
 
-    # 2b) 更新日本/香港/新加坡权益内部标的
-    cal_jp = cal.get("jp_internal", {})
-    for ticker, info in JP_INTERNAL.items():
-        if ticker in cal_jp:
-            info["mu"] = cal_jp[ticker]["mu"]
-            info["vol"] = cal_jp[ticker]["vol"]
-        elif ticker in cal_assets:
-            info["mu"] = cal_assets[ticker]["mu"]
-            info["vol"] = cal_assets[ticker]["vol"]
-
-    cal_hk = cal.get("hk_internal", {})
-    for ticker, info in HK_INTERNAL.items():
-        if ticker in cal_hk:
-            info["mu"] = cal_hk[ticker]["mu"]
-            info["vol"] = cal_hk[ticker]["vol"]
-        elif ticker in cal_assets:
-            info["mu"] = cal_assets[ticker]["mu"]
-            info["vol"] = cal_assets[ticker]["vol"]
-
-    cal_gc = cal.get("gc_internal", {})
-    for ticker, info in GC_INTERNAL.items():
-        if ticker in cal_gc:
-            info["mu"] = cal_gc[ticker]["mu"]
-            info["vol"] = cal_gc[ticker]["vol"]
-        elif ticker in cal_assets:
-            info["mu"] = cal_assets[ticker]["mu"]
-            info["vol"] = cal_assets[ticker]["vol"]
+    _update_internal(US_INTERNAL, cal_us)
+    _update_internal(JP_INTERNAL, cal.get("jp_internal", {}))
+    _update_internal(HK_INTERNAL, cal.get("hk_internal", {}))
+    _update_internal(GC_INTERNAL, cal.get("gc_internal", {}))
 
     broad_keys = {a["key"] for a in BROAD_ASSETS}
     internal_keys = set(US_INTERNAL.keys())
@@ -832,37 +918,22 @@ def _apply_calibration():
         if a in broad_keys and b in broad_keys:
             BROAD_CORR[(a, b)] = v
 
-    # 4) 用校准相关性重建美国核心内部相关性
-    US_INTERNAL_CORR.clear()
-    for pair, v in cal_corr.items():
-        a, b = pair.split("|")
-        if a in internal_keys and b in internal_keys:
-            US_INTERNAL_CORR[(a, b)] = v
+    # 4) 用校准相关性重建内部相关性矩阵 (美国/日本/香港/大中华 — 同一套逻辑)
+    def _rebuild_corr(corr_dict, valid_keys):
+        corr_dict.clear()
+        for pair, v in cal_corr.items():
+            a, b = pair.split("|")
+            if a in valid_keys and b in valid_keys:
+                corr_dict[(a, b)] = v
 
-    # 4b) 用校准相关性重建日本权益内部相关性
-    JP_INTERNAL_CORR.clear()
-    for pair, v in cal_corr.items():
-        a, b = pair.split("|")
-        if a in jp_keys and b in jp_keys:
-            JP_INTERNAL_CORR[(a, b)] = v
-
-    # 4c) 用校准相关性重建香港权益内部相关性
-    HK_INTERNAL_CORR.clear()
-    for pair, v in cal_corr.items():
-        a, b = pair.split("|")
-        if a in hk_keys and b in hk_keys:
-            HK_INTERNAL_CORR[(a, b)] = v
-
-    # 4d) 用校准相关性重建大中华权益内部相关性
-    GC_INTERNAL_CORR.clear()
-    for pair, v in cal_corr.items():
-        a, b = pair.split("|")
-        if a in gc_keys and b in gc_keys:
-            GC_INTERNAL_CORR[(a, b)] = v
+    _rebuild_corr(US_INTERNAL_CORR, internal_keys)
+    _rebuild_corr(JP_INTERNAL_CORR, jp_keys)
+    _rebuild_corr(HK_INTERNAL_CORR, hk_keys)
+    _rebuild_corr(GC_INTERNAL_CORR, gc_keys)
 
     # 5) 前瞻微调：aistockresearcher 生成的 forward_adjusted.json 若存在则覆盖大类 mu
     try:
-        with open("/Users/sectator/MEGA/Finance/tmp/forward_adjusted.json", encoding="utf-8") as f:
+        with open(_resolve_data_file("forward_adjusted.json"), encoding="utf-8") as f:
             fwd = json.load(f)
         fwd_assets = fwd.get("assets", {})
         for a in BROAD_ASSETS:

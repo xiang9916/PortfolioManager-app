@@ -6,6 +6,7 @@ public struct OptimizeButton: View {
     @State private var showSettings = false
     @State private var showLog = false
     @State private var showResult = false
+    @State private var targetReturnInput: Double = 0
 
     public var body: some View {
         Group {
@@ -17,6 +18,15 @@ public struct OptimizeButton: View {
         }
         .popover(isPresented: $showSettings) {
             settingsPopover()
+                .onAppear {
+                    // 初始化本地变量: 优先 UserDefaults (持久化), 否则用 store 当前值
+                    if let saved = UserDefaults.standard.object(forKey: "optimizer.targetReturn") as? Double {
+                        targetReturnInput = saved
+                        store.targetReturn = saved
+                    } else {
+                        targetReturnInput = store.targetReturn
+                    }
+                }
         }
         .sheet(isPresented: $showResult) {
             if let r = store.lastOptimization {
@@ -118,10 +128,22 @@ public struct OptimizeButton: View {
             HStack {
                 Text("目标收益率")
                 Spacer()
-                Text(String(format: "%.0f%%", store.targetReturn * 100))
+                Text(String(format: "%.1f%%", targetReturnInput * 100))
                     .monospacedDigit().foregroundStyle(.secondary)
             }
-            Slider(value: $store.targetReturn, in: 0.05...0.20, step: 0.01)
+            Slider(value: $targetReturnInput, in: 0.05...0.20, step: 0.005)
+                .onChange(of: targetReturnInput) { _, newValue in
+                    store.targetReturn = newValue
+                    UserDefaults.standard.set(newValue, forKey: "optimizer.targetReturn")
+                }
+            let w = store.livePoolWeights
+            HStack {
+                Text("境内池 / 境外池")
+                Spacer()
+                Text(String(format: "%.1f%% / %.1f%%", w.domestic * 100, w.overseas * 100))
+                    .monospacedDigit().foregroundStyle(.secondary)
+            }
+            .help("取自资产管理的实时统计（按每个标的的池归属折人民币计算），优化器与基准线均使用该比例。")
             Text("约束：境内池未达 50 万前只买汇丰中国开放申购基金；黄金与大中华权益可跨池分配。")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()

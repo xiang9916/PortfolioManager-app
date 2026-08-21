@@ -7,12 +7,32 @@ public struct OptimizationResultView: View {
     let result: OptimizationResult
     @Environment(\.dismiss) private var dismiss
 
+    // Sensitivity analysis state
+    @State private var showSensitivity = false
+    @State private var sensitivityResult: SensitivityAnalysisResult?
+    @State private var sensitivityLoading = false
+    @State private var sensitivityError: String?
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
+            HStack(spacing: 10) {
+                MacCloseButton { dismiss() }
                 Text("优化结果").font(.title2).fontWeight(.semibold)
+                Button {
+                    Task { await runSensitivity() }
+                } label: {
+                    if sensitivityLoading {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("敏感性分析")
+                        }
+                    } else {
+                        Label("敏感性分析", systemImage: "chart.line.uptrend.xyaxis")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(sensitivityLoading)
                 Spacer()
-                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
             }
 
             // Summary
@@ -50,6 +70,65 @@ public struct OptimizationResultView: View {
         }
         .padding()
         .frame(minWidth: 640, minHeight: 460)
+        .sheet(isPresented: $showSensitivity) {
+            if let sr = sensitivityResult {
+                SensitivityAnalysisView(result: sr)
+            } else if let err = sensitivityError {
+                VStack(spacing: 16) {
+                    Text("敏感性分析失败").font(.headline)
+                    Text(err).font(.caption).foregroundStyle(.secondary)
+                    Button("关闭") { showSensitivity = false }
+                }
+                .padding()
+            }
+        }
+    }
+
+    private func runSensitivity() async {
+        sensitivityLoading = true
+        sensitivityError = nil
+        sensitivityResult = nil
+        do {
+            // Get extract live path
+            let extractURL = AppPaths.extractJSONURL()
+                .deletingLastPathComponent()
+                .appendingPathComponent("extract_live.json")
+            guard FileManager.default.fileExists(atPath: extractURL.path) else {
+                sensitivityError = "未找到提取文件：\(extractURL.path)。请先运行优化。"
+                showSensitivity = true
+                sensitivityLoading = false
+                return
+            }
+
+            // Get HSBC funds path
+            let hsbcPath = AppPaths.supportDir().appendingPathComponent("hsbc_open_funds.json").path
+            // Try common locations
+            let altPath = "/Users/sectator/MEGA/Finance/tmp/hsbc_open_funds.json"
+            let usePath = FileManager.default.fileExists(atPath: hsbcPath) ? hsbcPath :
+                          (FileManager.default.fileExists(atPath: altPath) ? altPath : nil)
+
+            // Build sidecar + service
+            let sidecar = PythonSidecar(
+                interpreterPath: AppPaths.interpreterPath(),
+                scriptsDir: AppPaths.scriptsURL(),
+                currentDirectoryURL: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            )
+            let logsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("tmp/optimizer_logs", isDirectory: true)
+            let tempDB = try Database(path: AppPaths.databaseURL().path)
+            let optimizer = OptimizationService(db: tempDB, sidecar: sidecar, logsDir: logsDir)
+
+            let sr = try optimizer.runSensitivityAnalysis(
+                extractJSON: extractURL,
+                hsbcFunds: usePath
+            )
+            sensitivityResult = sr
+            showSensitivity = true
+        } catch {
+            sensitivityError = String(describing: error)
+            showSensitivity = true
+        }
+        sensitivityLoading = false
     }
 
     private func statCard(_ t: String, _ v: String) -> some View {

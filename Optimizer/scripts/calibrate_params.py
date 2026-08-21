@@ -23,6 +23,7 @@ import re
 import datetime
 import time
 import ssl
+import sys
 import urllib.request
 
 import numpy as np
@@ -119,7 +120,9 @@ sources = {
     "D_CN_MIXED": ("fund", "000849"),
     "D_CN_INDEX": ("fund", "001237"),
     "D_CN_HK": ("fund", "005698"),
-    "D_CN_QDII_GLOBAL": ("fund", "000043"),
+    "D_CN_QDII_STOCK": ("fund", "000043"),
+    "D_CN_QDII_STABLE": ("fund", "017970"),
+    "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
     "O_US_CORE": ("yahoo", "SPY"),
     "O_BTC": ("yahoo", "BTC-USD"),
     "O_HYLB": ("yahoo", "HYLB"),
@@ -187,7 +190,10 @@ proxy_map = {
     "D_CN_MIXED": ("yahoo", "000001.SS"),
     "D_CN_INDEX": ("yahoo", "000001.SS"),
     "D_CN_HK": ("yahoo", "^HSI"),
-    "D_CN_QDII_GLOBAL": ("yahoo", "^GSPC"),
+    # QDII 细分 (Bug C): 股票用标普代理, 稳健债性用美国综合债 BND, 商品用原油
+    "D_CN_QDII_STOCK": ("yahoo", "^GSPC"),
+    "D_CN_QDII_STABLE": ("yahoo", "BND"),
+    "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
     "O_US_CORE": ("yahoo", "^GSPC"),
     "O_BTC": None,
     "O_HYLB": None,
@@ -227,7 +233,9 @@ prior = {
     "D_CN_MIXED": 0.07,
     "D_CN_INDEX": 0.075,
     "D_CN_HK": 0.075,
-    "D_CN_QDII_GLOBAL": 0.075,
+    "D_CN_QDII_STOCK": 0.085,
+    "D_CN_QDII_STABLE": 0.045,
+    "D_CN_QDII_COMMODITY": 0.05,
     "O_US_CORE": 0.09,
     "O_BTC": 0.15,
     "O_HYLB": 0.065,
@@ -383,7 +391,9 @@ VOL_FLOOR = {
     "D_CN_MIXED": 0.13,
     "D_CN_INDEX": 0.15,
     "D_CN_HK": 0.22,
-    "D_CN_QDII_GLOBAL": 0.16,
+    "D_CN_QDII_STOCK": 0.15,
+    "D_CN_QDII_STABLE": 0.05,
+    "D_CN_QDII_COMMODITY": 0.20,
 }
 
 calib = {
@@ -423,8 +433,11 @@ if "SPLG" not in calib["assets"] and "O_US_CORE" in calib["assets"]:
     calib["assets"]["SPLG"] = dict(calib["assets"]["O_US_CORE"])
     calib["us_internal"]["SPLG"] = dict(calib["assets"]["O_US_CORE"])
 
-with open("/Users/sectator/MEGA/Finance/tmp/calibrated_params.json", "w") as f:
+_OUT = "/Users/sectator/MEGA/Finance/tmp/calibrated_params.json"
+if len(sys.argv) > 1 and sys.argv[1] == "--out" and len(sys.argv) > 2:
+    _OUT = sys.argv[2]  # 允许写出到任意路径(如 bundle data 目录), 避免沙箱只允许工作区
+with open(_OUT, "w") as f:
     json.dump(calib, f, ensure_ascii=False, indent=2)
-print("\nsaved /Users/sectator/MEGA/Finance/tmp/calibrated_params.json")
+print(f"\nsaved {_OUT}")
 print("assets calibrated:", len(calib["assets"]))
 print("corr pairs:", len(calib["corr"]))

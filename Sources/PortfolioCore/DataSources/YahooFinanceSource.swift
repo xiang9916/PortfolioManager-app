@@ -1,6 +1,6 @@
 import Foundation
 
-public final class YahooFinanceSource: DataSource {
+public final class YahooFinanceSource: DataSource, Sendable {
     public let name = "yahoo"
     private let session: URLSession
 
