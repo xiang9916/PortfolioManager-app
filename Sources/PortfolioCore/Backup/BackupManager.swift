@@ -41,7 +41,10 @@ public final class BackupManager {
     public func exportJSON(to url: URL) throws {
         var out: [String: Any] = [:]
         out["schema_version"] = Schema.version
-        out["assets"] = try queryRows("SELECT key, name, ticker, asset_class, pool, currency FROM assets ORDER BY key")
+        // Full asset row (incl. market/source/fee_rate/sort_order) so an
+        // export → import roundtrip loses nothing; older backups that lack the
+        // extra fields still import (missing keys decode as nil → defaults).
+        out["assets"] = try queryRows("SELECT key, name, ticker, market, asset_class, pool, currency, source, fee_rate, sort_order FROM assets ORDER BY key")
         out["holdings"] = try queryRows("SELECT asset_key, quantity, cost_basis, currency, as_of_date FROM holdings ORDER BY asset_key")
         out["snapshots"] = try queryRows("SELECT date, total_value, domestic_value, overseas_value FROM snapshots ORDER BY date")
         out["income_periods"] = try queryRows("SELECT id, period, period_end, dividends, realized_pnl, source FROM income_periods ORDER BY period_end")
@@ -95,7 +98,8 @@ public final class BackupManager {
                                     pool: pool,
                                     currency: asString(r["currency"]) ?? "CNY",
                                     source: asString(r["source"]),
-                                    feeRate: asDouble(r["fee_rate"])))
+                                    feeRate: asDouble(r["fee_rate"]),
+                                    sortOrder: asDouble(r["sort_order"])))
             }
             if !assets.isEmpty { try db.upsertAssets(assets) }
         }

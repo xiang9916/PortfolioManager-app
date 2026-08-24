@@ -8,5 +8,6 @@ let package = Package(
         .target(name: "PortfolioCore"),
         .executableTarget(name: "pm-cli", dependencies: ["PortfolioCore"]),
         .executableTarget(name: "PortfolioManager", dependencies: ["PortfolioCore"]),
+        .testTarget(name: "PortfolioCoreTests", dependencies: ["PortfolioCore"]),
     ]
 )
