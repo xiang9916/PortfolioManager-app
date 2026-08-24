@@ -61,6 +61,22 @@ public final class Database {
         }
     }
 
+    /// Run `body` inside a transaction. On any error the transaction is rolled
+    /// back before rethrowing — a failed batch must never leave the connection
+    /// stuck inside an open transaction, because every later `BEGIN` on the
+    /// same connection would then fail with "cannot start a transaction within
+    /// a transaction" (observed after a failed backup import).
+    public func inTransaction(_ body: () throws -> Void) throws {
+        try exec("BEGIN TRANSACTION")
+        do {
+            try body()
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     /// Prepare a statement, throwing on failure. Caller is responsible for
     /// stepping + binding; the statement is auto-finalized via the returned
     /// wrapper's deinit.
@@ -90,17 +106,17 @@ public final class Database {
     }
 
     public func upsertPrices(_ points: [PricePoint]) throws {
-        try exec("BEGIN TRANSACTION")
-        let stmt = try prepared("INSERT OR REPLACE INTO prices(asset_key, date, close, currency) VALUES(?,?,?,?)")
-        defer { sqlite3_finalize(stmt) }
-        for p in points {
-            bindText(stmt, 1, p.assetKey)
-            bindText(stmt, 2, p.date)
-            sqlite3_bind_double(stmt, 3, p.close)
-            bindText(stmt, 4, p.currency)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared("INSERT OR REPLACE INTO prices(asset_key, date, close, currency) VALUES(?,?,?,?)")
+            defer { sqlite3_finalize(stmt) }
+            for p in points {
+                bindText(stmt, 1, p.assetKey)
+                bindText(stmt, 2, p.date)
+                sqlite3_bind_double(stmt, 3, p.close)
+                bindText(stmt, 4, p.currency)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     public func insertSnapshot(_ s: Snapshot) throws {
@@ -122,7 +138,6 @@ public final class Database {
     }
 
     public func upsertAssets(_ assets: [Asset]) throws {
-        try exec("BEGIN TRANSACTION")
         // UPSERT (not REPLACE): re-importing an existing asset must NOT reset its
         // manual sort_order — only the insert path uses the provided value.
         let sql = """
@@ -133,50 +148,56 @@ public final class Database {
             asset_class=excluded.asset_class, pool=excluded.pool, currency=excluded.currency,
             source=excluded.source, fee_rate=excluded.fee_rate
         """
-        let stmt = try prepared(sql)
-        defer { sqlite3_finalize(stmt) }
-        for a in assets {
-            bindText(stmt, 1, a.key)
-            bindText(stmt, 2, a.name)
-            bindText(stmt, 3, a.ticker)
-            bindText(stmt, 4, a.market)
-            bindText(stmt, 5, a.assetClass)
-            bindText(stmt, 6, a.pool.rawValue)
-            bindText(stmt, 7, a.currency)
-            bindText(stmt, 8, a.source)
-            bindDouble(stmt, 9, a.feeRate)
-            bindDouble(stmt, 10, a.sortOrder)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared(sql)
+            defer { sqlite3_finalize(stmt) }
+            for a in assets {
+                bindText(stmt, 1, a.key)
+                bindText(stmt, 2, a.name)
+                bindText(stmt, 3, a.ticker)
+                bindText(stmt, 4, a.market)
+                bindText(stmt, 5, a.assetClass)
+                bindText(stmt, 6, a.pool.rawValue)
+                bindText(stmt, 7, a.currency)
+                bindText(stmt, 8, a.source)
+                bindDouble(stmt, 9, a.feeRate)
+                // sort_order is NOT NULL DEFAULT 0, but SQLite's column default
+                // only applies when the column is OMITTED from the INSERT — an
+                // explicitly bound NULL violates the constraint. Backups exported
+                // before sort_order existed carry no value: bind 0 ("unsorted",
+                // falls back to key order) instead of NULL.
+                bindDouble(stmt, 10, a.sortOrder ?? 0)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     /// Persist the manual list order for 资产透视 drag-to-reorder (module 2).
     public func updateAssetSortOrders(_ orders: [(key: String, order: Double)]) throws {
-        try exec("BEGIN TRANSACTION")
-        let stmt = try prepared("UPDATE assets SET sort_order = ? WHERE key = ?")
-        defer { sqlite3_finalize(stmt) }
-        for (key, order) in orders {
-            sqlite3_bind_double(stmt, 1, order)
-            bindText(stmt, 2, key)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared("UPDATE assets SET sort_order = ? WHERE key = ?")
+            defer { sqlite3_finalize(stmt) }
+            for (key, order) in orders {
+                sqlite3_bind_double(stmt, 1, order)
+                bindText(stmt, 2, key)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     public func upsertHoldings(_ holdings: [Holding]) throws {
-        try exec("BEGIN TRANSACTION")
-        let stmt = try prepared("INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, currency, as_of_date) VALUES(?,?,?,?,?)")
-        defer { sqlite3_finalize(stmt) }
-        for h in holdings {
-            bindText(stmt, 1, h.assetKey)
-            sqlite3_bind_double(stmt, 2, h.quantity)
-            sqlite3_bind_double(stmt, 3, h.costBasis)
-            bindText(stmt, 4, h.currency)
-            bindText(stmt, 5, h.asOfDate)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared("INSERT OR REPLACE INTO holdings(asset_key, quantity, cost_basis, currency, as_of_date) VALUES(?,?,?,?,?)")
+            defer { sqlite3_finalize(stmt) }
+            for h in holdings {
+                bindText(stmt, 1, h.assetKey)
+                sqlite3_bind_double(stmt, 2, h.quantity)
+                sqlite3_bind_double(stmt, 3, h.costBasis)
+                bindText(stmt, 4, h.currency)
+                bindText(stmt, 5, h.asOfDate)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     /// Update the editable fields of a holding (资产透视 editing). 市值不在此列(派生 = 份额×最后价).
@@ -199,30 +220,30 @@ public final class Database {
 
     /// Delete an asset target and its holdings / prices / financials (资产透视 删除标的).
     public func deleteAsset(key: String) throws {
-        try exec("BEGIN TRANSACTION")
-        for table in ["holdings", "prices", "assets"] {
-            let col = (table == "assets") ? "key" : "asset_key"
-            let sql = "DELETE FROM " + table + " WHERE " + col + " = ?"
-            let stmt = try prepared(sql)
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, key)
-            try stepOnce(stmt)
+        try inTransaction {
+            for table in ["holdings", "prices", "assets"] {
+                let col = (table == "assets") ? "key" : "asset_key"
+                let sql = "DELETE FROM " + table + " WHERE " + col + " = ?"
+                let stmt = try prepared(sql)
+                defer { sqlite3_finalize(stmt) }
+                bindText(stmt, 1, key)
+                try stepOnce(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     public func upsertFxRates(_ rates: [FxRate]) throws {
-        try exec("BEGIN TRANSACTION")
-        let stmt = try prepared("INSERT OR REPLACE INTO fx_rates(currency, rate_to_cny, as_of_date, source) VALUES(?,?,?,?)")
-        defer { sqlite3_finalize(stmt) }
-        for r in rates {
-            bindText(stmt, 1, r.currency)
-            sqlite3_bind_double(stmt, 2, r.rateToCny)
-            bindText(stmt, 3, r.asOfDate)
-            bindText(stmt, 4, r.source)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared("INSERT OR REPLACE INTO fx_rates(currency, rate_to_cny, as_of_date, source) VALUES(?,?,?,?)")
+            defer { sqlite3_finalize(stmt) }
+            for r in rates {
+                bindText(stmt, 1, r.currency)
+                sqlite3_bind_double(stmt, 2, r.rateToCny)
+                bindText(stmt, 3, r.asOfDate)
+                bindText(stmt, 4, r.source)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     public func fetchFxRates() throws -> [FxRate] {
@@ -243,18 +264,18 @@ public final class Database {
     // MARK: - Quotes (latest unit price per asset, separate from price history)
 
     public func upsertQuotes(_ quotes: [Quote]) throws {
-        try exec("BEGIN TRANSACTION")
-        let stmt = try prepared("INSERT OR REPLACE INTO quotes(asset_key, price, date, currency, source) VALUES(?,?,?,?,?)")
-        defer { sqlite3_finalize(stmt) }
-        for q in quotes {
-            bindText(stmt, 1, q.symbol)
-            sqlite3_bind_double(stmt, 2, q.price)
-            bindText(stmt, 3, q.date)
-            bindText(stmt, 4, q.currency ?? "CNY")
-            bindText(stmt, 5, q.source)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared("INSERT OR REPLACE INTO quotes(asset_key, price, date, currency, source) VALUES(?,?,?,?,?)")
+            defer { sqlite3_finalize(stmt) }
+            for q in quotes {
+                bindText(stmt, 1, q.symbol)
+                sqlite3_bind_double(stmt, 2, q.price)
+                bindText(stmt, 3, q.date)
+                bindText(stmt, 4, q.currency ?? "CNY")
+                bindText(stmt, 5, q.source)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     /// Latest quote (unit NAV / latest price) per asset key.
@@ -413,18 +434,18 @@ public final class Database {
     }
 
     public func upsertIncomeSummaries(_ items: [IncomeSummary]) throws {
-        try exec("BEGIN TRANSACTION")
-        let stmt = try prepared("INSERT OR REPLACE INTO income_periods(period, period_end, dividends, realized_pnl, source) VALUES(?,?,?,?,?)")
-        defer { sqlite3_finalize(stmt) }
-        for f in items {
-            bindText(stmt, 1, f.period.rawValue)
-            bindText(stmt, 2, f.periodEnd)
-            sqlite3_bind_double(stmt, 3, f.dividends)
-            sqlite3_bind_double(stmt, 4, f.realizedPnl)
-            bindText(stmt, 5, f.source)
-            try stepAndReset(stmt)
+        try inTransaction {
+            let stmt = try prepared("INSERT OR REPLACE INTO income_periods(period, period_end, dividends, realized_pnl, source) VALUES(?,?,?,?,?)")
+            defer { sqlite3_finalize(stmt) }
+            for f in items {
+                bindText(stmt, 1, f.period.rawValue)
+                bindText(stmt, 2, f.periodEnd)
+                sqlite3_bind_double(stmt, 3, f.dividends)
+                sqlite3_bind_double(stmt, 4, f.realizedPnl)
+                bindText(stmt, 5, f.source)
+                try stepAndReset(stmt)
+            }
         }
-        try exec("COMMIT")
     }
 
     /// Delete one income summary record by id (财务分析 editing).
