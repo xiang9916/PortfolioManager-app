@@ -5,6 +5,9 @@ Source: https://www.hsbc.com.cn/investments/products/3rd-party/local-unit-trust/
 The underlying Morningstar-powered search tool is:
   http://fundsresearch.investments.hsbc.com.cn/rbwm/QuickRank.aspx?fund=
 Using pageSize=2147483647 returns the full table in one page.
+
+每次优化运行都会调用本脚本实时抓取 (见 fund_pipeline.py) — 不再依赖预存快照。
+解析用纯 stdlib html.parser (打包 app 的 venv 不保证安装 BeautifulSoup)。
 """
 
 import argparse
@@ -13,8 +16,7 @@ import re
 import ssl
 import urllib.request
 from datetime import datetime, timezone
-
-from bs4 import BeautifulSoup
+from html.parser import HTMLParser
 
 BASE_URL = "http://fundsresearch.investments.hsbc.com.cn/rbwm/QuickRank.aspx?fund=&pageSize=2147483647"
 
@@ -31,15 +33,48 @@ def fetch_html(timeout=60.0):
         return resp.read().decode("utf-8", "replace")
 
 
+class _TableCollector(HTMLParser):
+    """Collect every <table> as a list of rows, each row a list of cell texts."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables = []
+        self._table = None
+        self._row = None
+        self._cell = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._table = []
+        elif tag == "tr" and self._table is not None:
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "tr" and self._row is not None and self._table is not None:
+            self._table.append(self._row)
+            self._row = None
+        elif tag == "table" and self._table is not None:
+            self.tables.append(self._table)
+            self._table = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
 def parse_funds(html):
-    soup = BeautifulSoup(html, "html.parser")
-    tables = soup.find_all("table")
-    if not tables:
+    collector = _TableCollector()
+    collector.feed(html)
+    if not collector.tables:
         return []
-    data_table = max(tables, key=lambda t: len(t.find_all("tr")))
+    data_table = max(collector.tables, key=len)
     funds = []
-    for tr in data_table.find_all("tr"):
-        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+    for cells in data_table:
         if not cells or not re.match(r"^\d{6}$", cells[0]):
             continue
         code = cells[0]

@@ -44,10 +44,31 @@ public final class OptimizationService {
 
     public var isRunning: Bool { process?.isRunning ?? false }
 
+    // MARK: - 联网管线临时目录 (基金搜索易实时列表 + 天天基金实时申赎状态)
+
+    /// 共享临时目录: 同一 App 会话里的优化运行与敏感性分析复用同一份联网产物。
+    /// 优化每次运行都会重写这些文件 (每次完整联网), 所以无需按会话清理旧文件 —
+    /// 上次崩溃残留会被下一次优化运行直接覆盖。
+    public static func workDirURL() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PortfolioManager-optimizer-work", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// 关闭优化器时调用: 整体删除联网管线临时文件。
+    public static func cleanupWorkDir() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PortfolioManager-optimizer-work", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+    }
+
     /// Launch the optimizer subprocess. Returns immediately with the run id.
+    /// 每次运行都会完整联网: 实时抓取基金搜索易 → 天天基金实时校验申赎状态,
+    /// 中间产物写入共享临时目录 (cleanupWorkDir 在优化器关闭时删除)。
     @discardableResult
     public func start(extractJSON: URL, totalAssets: Double? = nil,
-                      hsbcFunds: String? = nil, targetReturn: Double = 0.10) throws -> Int64 {
+                      targetReturn: Double = 0.10) throws -> Int64 {
         guard process == nil || process?.isRunning == false else {
             throw SidecarError.nonZeroExit(code: -1, stderr: "an optimization is already running")
         }
@@ -78,14 +99,13 @@ public final class OptimizationService {
             "--result-json", resultPath,
             "--json", detailPath,
             "--log", logPath,
-            "--check-timeout", "45",
+            "--work-dir", Self.workDirURL().path,
+            // 联网管线总预算: 分组早停校验实测 ~15-40s, 预留重试余量.
+            "--check-timeout", "300",
             // App 侧目标收益率 (滑块) 必须显式传给 Python, 否则脚本用 params.py 硬编码 0.10.
             "--target-return", String(targetReturn),
         ]
         if let t = totalAssets { args += ["--total-assets", String(t)] }
-        if let h = hsbcFunds, FileManager.default.fileExists(atPath: h) {
-            args += ["--hsbc-funds", h]
-        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sidecar.interpreterPath)
@@ -170,9 +190,9 @@ public final class OptimizationService {
 
     /// Convenience: run synchronously to completion (used by pm-cli).
     public func runSync(extractJSON: URL, totalAssets: Double? = nil,
-                        hsbcFunds: String? = nil, targetReturn: Double = 0.10) throws -> OptimizationOutcome {
+                        targetReturn: Double = 0.10) throws -> OptimizationOutcome {
         _ = try start(extractJSON: extractJSON, totalAssets: totalAssets,
-                      hsbcFunds: hsbcFunds, targetReturn: targetReturn)
+                      targetReturn: targetReturn)
         while isRunning {
             _ = pollSteps()
             Thread.sleep(forTimeInterval: 0.3)
@@ -181,15 +201,14 @@ public final class OptimizationService {
     }
 
     /// Run sensitivity analysis: step target return from 5% to max feasible, 1% increments.
-    /// Runs synchronously and returns the full sweep result.
-    public func runSensitivityAnalysis(extractJSON: URL, hsbcFunds: String? = nil) throws -> SensitivityAnalysisResult {
-        var args = [
+    /// 复用优化运行留在共享临时目录的联网产物 (基金搜索易 + 天天基金状态),
+    /// 不重新联网; 临时文件缺失/过期时由 Python 侧全量重跑管线。
+    public func runSensitivityAnalysis(extractJSON: URL) throws -> SensitivityAnalysisResult {
+        let args = [
             extractJSON.path,
+            "--work-dir", Self.workDirURL().path,
             "--step-min", "0.05",
         ]
-        if let h = hsbcFunds, FileManager.default.fileExists(atPath: h) {
-            args += ["--hsbc-funds", h]
-        }
 
         let stdout = try sidecar.run(script: "sensitivity_analysis.py", args: args)
 

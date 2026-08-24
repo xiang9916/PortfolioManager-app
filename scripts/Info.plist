@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.xiang9916.portfoliomanager</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>0.1-beta1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>0.1-beta1</string>
     <key>CFBundleExecutable</key>
     <string>PortfolioManager</string>
     <key>CFBundlePackageType</key>

@@ -856,6 +856,78 @@ def load_hsbc_raw_funds(path):
     return funds
 
 
+def _dedup_with_fallback(candidates, anchor=None):
+    """A/C 去重, 但每组保留 [锚定/首选, A类备选] 两个候选。
+
+    与 _dedup_a_class 的区别: 天天基金状态过滤前不能只留一个 —— 锚定份额
+    (可能是 C 类) 若被暂停申购, 还需要同基金的 A 类兄弟份额兜底, 所以每组
+    最多保留两个候选, 供状态过滤后回退。
+    """
+    groups = {}
+    for c in candidates:
+        groups.setdefault(_fund_base_name(c["name"]), []).append(c)
+    out = []
+    for base, items in groups.items():
+        picks = []
+        if anchor:
+            anchor_item = next((c for c in items if c["code"] == anchor), None)
+            if anchor_item is not None:
+                picks.append(anchor_item)
+        a_items = [c for c in items if "A类" in c["name"] or c["name"].rstrip().endswith("A")]
+        preferred = a_items[0] if a_items else items[0]
+        if all(p["code"] != preferred["code"] for p in picks):
+            picks.append(preferred)
+        out.extend(picks)
+    return out
+
+
+def build_open_pool_from_status(hsbc_funds, availability, live_anchors=None):
+    """按天天基金实时校验结果构建境内开放基金池 (每次优化运行调用)。
+
+    流程 (REQ: 所有基金大类的申赎状态都走天天基金实时联网):
+      fund_pipeline.build_check_plan 每类排序 (锚定优先→费率升序→备选垫后)
+      → check_fund_availability.py --plan-file 分组早停校验 (每类查到第一只
+        开放申购即停; 天天基金无数据的互认基金回退汇丰实时口径并标注)
+      → 本函数直接取 selection 中每类选中的开放代表基金。
+
+    hsbc_funds: sync_hsbc_funds.py 实时抓取的开放基金列表
+    availability: check_fund_availability.py 输出 (funds + selection + plan)
+    live_anchors: {category_key: fund_code} 用户实际持仓锚定 (覆盖静态 fund_code)
+
+    返回 (pool, meta):
+      pool: {broad_key: [代表基金 {code,name}]}, 仅含选中开放基金的类别
+      meta: {"checked": n, "kept": n, "categories": {key: {tried, open_found, anchor, rep}}}
+    """
+    anchors = {a["key"]: a.get("fund_code") for a in BROAD_ASSETS if a["pool"] == "domestic"}
+    if live_anchors:
+        anchors = {**anchors, **live_anchors}  # live 优先, 静态作 fallback
+
+    avail_funds = availability.get("funds", {})
+    selection = availability.get("selection", {})
+    code_name = {
+        str(f.get("code", "")).strip(): str(f.get("name", "")).strip()
+        for f in hsbc_funds
+    }
+
+    pool = {}
+    meta = {"checked": len(avail_funds), "kept": 0, "categories": {}}
+    for key, sel in selection.items():
+        if key.startswith("_"):
+            continue  # _anchors / _all 等兜底组不进基金池
+        chosen = sel.get("chosen")
+        cat_meta = {
+            "tried": sel.get("tried", []),
+            "open_found": bool(sel.get("open_found")),
+            "anchor": anchors.get(key),
+        }
+        if chosen:
+            pool[key] = [{"code": chosen, "name": code_name.get(chosen, "")}]
+            cat_meta["rep"] = chosen
+            meta["kept"] += 1
+        meta["categories"][key] = cat_meta
+    return pool, meta
+
+
 # ---------------------------------------------------------------------------
 # 市场数据校准（前瞻性混合）
 # ---------------------------------------------------------------------------

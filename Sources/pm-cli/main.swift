@@ -192,7 +192,10 @@ if args.count >= 2 && args[1] == "optimize" {
     do {
         let db = try Database(path: dbPath)
         let svc = OptimizationService(db: db, sidecar: sidecar(), logsDir: URL(fileURLWithPath: "tmp/optimizer_logs"))
+        // CLI 一次性运行: 优化结束即删除联网管线临时文件 (App 内则等关闭优化器再删)。
+        // 注意 exit() 不执行 defer, 必须在每个退出点显式清理。
         let out = try svc.runSync(extractJSON: URL(fileURLWithPath: extractJSON), totalAssets: totalAssets)
+        OptimizationService.cleanupWorkDir()
         if let r = out.result {
             print("优化完成 (run \(out.runID)):")
             print("  预期收益: \(String(format: "%.2f%%", r.portfolio.expectedReturn * 100))")
@@ -206,6 +209,7 @@ if args.count >= 2 && args[1] == "optimize" {
         }
         exit(0)
     } catch {
+        OptimizationService.cleanupWorkDir()
         FileHandle.standardError.write(("优化失败: " + String(describing: error)).data(using: .utf8)!)
         exit(1)
     }
