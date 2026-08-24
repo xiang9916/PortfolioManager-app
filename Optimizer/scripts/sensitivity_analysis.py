@@ -3,6 +3,10 @@
 
 Outputs JSON array of points, each with:
   target_return, feasible (bool), achieved_return, volatility, sharpe, worst_year_95
+
+基金口径与 optimize_portfolio.py 完全一致: 复用优化运行留在 work dir 的
+临时文件 (hsbc_funds.json + availability.json) 构建开放基金池并剔除
+暂停申购的大类 — 敏感性分析不再重复联网; 临时文件缺失/过期时才全量重跑管线。
 """
 
 import argparse
@@ -25,7 +29,8 @@ except ImportError:
 
 from params import (
     BROAD_ASSETS, BROAD_CORR, RF, TARGET_RETURN,
-    build_broad_cov, classify_domestic_fund, load_hsbc_fund_pool,
+    build_broad_cov, classify_domestic_fund,
+    build_open_pool_from_status,
     us_core_params,
 )
 from optimize_common import (
@@ -35,10 +40,84 @@ from optimize_common import (
     max_feasible_return,
     stage1_bounds,
 )
+from fund_pipeline import (
+    ensure_pipeline,
+    ensure_work_dir,
+    filter_available_assets,
+    load_pipeline,
+)
 
 
-# portfolio_stats, feasible_start, solve_min_var, max_feasible_return,
-# stage1_bounds are imported from optimize_common.
+def _stderr_log(step, message, level="info"):
+    print(f"[{step}] {message}", file=sys.stderr)
+
+
+def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
+                        request_timeout=12.0, check_total_timeout=300.0, log=None):
+    """复用/重建联网管线, 按优化同一口径构建 assets 与开放基金池。
+
+    返回 (assets, hsbc_pool, warnings, pipeline_info)。
+    """
+    log = log or _stderr_log
+    warnings = list(extract.get("warnings", []))
+
+    # live_anchors: 用户实际持仓的境内基金锚定 (与 optimize_portfolio 同一逻辑)
+    live_anchors = {}
+    for h in extract.get("domestic_holdings", []):
+        cat = classify_domestic_fund(h.get("name", ""))
+        live_anchors[cat] = h.get("code")
+
+    work = ensure_work_dir(work_dir)
+    cached = load_pipeline(work)
+    if cached is not None:
+        hsbc_data, availability = cached
+        log("pipeline_reuse", f"复用临时文件: {work}（抓取于 {hsbc_data.get('fetched_at', '?')[:19]}）")
+    else:
+        log("pipeline_refresh", "临时文件缺失或过期，全量重跑联网管线")
+        hsbc_data, availability = ensure_pipeline(
+            work,
+            live_anchors=live_anchors,
+            hsbc_request_timeout=hsbc_request_timeout,
+            request_timeout=request_timeout,
+            check_total_timeout=check_total_timeout,
+            log=log,
+        )
+    avail_funds = availability["funds"]
+    hsbc_status = {str(f.get("code", "")).strip(): f for f in hsbc_data.get("funds", [])}
+
+    hsbc_pool, pool_meta = build_open_pool_from_status(
+        hsbc_data.get("funds", []), availability, live_anchors=live_anchors)
+
+    internal_weights = {h["ticker"]: h["weight"] for h in extract["us_equity"]["holdings"]}
+    core_mu, core_vol = us_core_params(internal_weights)
+
+    assets = []
+    for a in BROAD_ASSETS:
+        if a["pool"] == "domestic" and hsbc_pool and a["key"] not in hsbc_pool:
+            cat = pool_meta["categories"].get(a["key"])
+            if cat:
+                warnings.append(
+                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选在天天基金"
+                    f"全部为暂停申购/校验失败，已剔除。")
+            else:
+                warnings.append(f"境内大类 {a['name']}（{a['key']}）在汇丰在售池中无候选基金，已剔除。")
+            continue
+        item = dict(a)
+        if item["key"] == "O_US_CORE":
+            item["mu"] = core_mu
+            item["vol"] = core_vol
+        assets.append(item)
+    assets = filter_available_assets(assets, avail_funds, warnings, hsbc_status)
+
+    pipeline_info = {
+        "work_dir": str(work),
+        "reused_cache": cached is not None,
+        "hsbc_fetched_at": hsbc_data.get("fetched_at"),
+        "availability_checked_at": availability.get("checked_at"),
+        "checked_codes": len(avail_funds),
+        "open_pool_categories": len(hsbc_pool),
+    }
+    return assets, hsbc_pool, warnings, pipeline_info
 
 
 def lognormal_cagr(mu, sigma):
@@ -107,12 +186,9 @@ def fattail_cagr(mu, sigma, nu=3.0, floor=-0.999):
     return math.exp(g) - 1.0
 
 
-# feasible_start, solve_min_var, max_feasible_return, stage1_bounds
-# are imported from optimize_common.
-
-
-def run_sensitivity(extract, hsbc_funds_path=None, availability_path=None,
-                    check_timeout=45.0, step_min=0.05, step_max=None, tail_dof=3.0):
+def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
+                    request_timeout=12.0, check_total_timeout=300.0,
+                    step_min=0.05, step_max=None, tail_dof=3.0, log=None):
     """Run sensitivity analysis from step_min to max feasible return, 1% increments."""
     global RF
 
@@ -124,17 +200,14 @@ def run_sensitivity(extract, hsbc_funds_path=None, availability_path=None,
     dom_w = float(extract["domestic_weight"])
     ov_w = float(extract["overseas_weight"])
 
-    # Build assets list (same logic as optimize_portfolio.py main)
-    internal_weights = {h["ticker"]: h["weight"] for h in extract["us_equity"]["holdings"]}
-    core_mu, core_vol = us_core_params(internal_weights)
-
-    assets = []
-    for a in BROAD_ASSETS:
-        item = dict(a)
-        if item["key"] == "O_US_CORE":
-            item["mu"] = core_mu
-            item["vol"] = core_vol
-        assets.append(item)
+    # 与 optimize_portfolio.py 同一资产口径 (联网管线复用/重建 + 暂停申购大类剔除)
+    assets, _hsbc_pool, warnings, pipeline_info = load_extract_assets(
+        extract, work_dir,
+        hsbc_request_timeout=hsbc_request_timeout,
+        request_timeout=request_timeout,
+        check_total_timeout=check_total_timeout,
+        log=log,
+    )
 
     keys = [a["key"] for a in assets]
     mu = np.array([a["mu"] for a in assets])
@@ -148,7 +221,8 @@ def run_sensitivity(extract, hsbc_funds_path=None, availability_path=None,
     # Find max feasible return
     max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
     if max_ret <= 0:
-        return {"error": "无法计算最大可行收益率", "points": []}
+        return {"error": "无法计算最大可行收益率", "points": [],
+                "warnings": warnings, "pipeline": pipeline_info}
 
     # Determine step range
     if step_max is not None:
@@ -203,15 +277,20 @@ def run_sensitivity(extract, hsbc_funds_path=None, availability_path=None,
         "domestic_weight": round(dom_w, 6),
         "overseas_weight": round(ov_w, 6),
         "points": points,
+        "warnings": warnings,
+        "pipeline": pipeline_info,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="敏感性分析：目标收益率步进扫描")
     parser.add_argument("extract_json", help="extract_live.json / extract_app.json 路径")
-    parser.add_argument("--hsbc-funds", default=None, help="汇丰开放基金 JSON 路径")
-    parser.add_argument("--availability", default=None, help="天天基金校验 JSON 路径")
-    parser.add_argument("--check-timeout", type=float, default=45.0)
+    parser.add_argument("--work-dir", default=None,
+                        help="优化运行临时文件目录 (复用联网管线产物); 缺省用系统临时目录共享目录")
+    parser.add_argument("--hsbc-timeout", type=float, default=60.0)
+    parser.add_argument("--request-timeout", type=float, default=12.0)
+    parser.add_argument("--check-timeout", type=float, default=300.0,
+                        help="临时文件缺失全量重跑时, 天天基金校验子进程总超时秒数")
     parser.add_argument("--step-min", type=float, default=0.05, help="起始目标收益率（默认 0.05）")
     parser.add_argument("--step-max", type=float, default=None, help="上限目标收益率（默认=最大可行）")
     parser.add_argument("--tail-dof", type=float, default=3.0,
@@ -224,9 +303,10 @@ def main():
 
     result = run_sensitivity(
         extract,
-        hsbc_funds_path=args.hsbc_funds,
-        availability_path=args.availability,
-        check_timeout=args.check_timeout,
+        work_dir=args.work_dir,
+        hsbc_request_timeout=args.hsbc_timeout,
+        request_timeout=args.request_timeout,
+        check_total_timeout=args.check_timeout,
         step_min=args.step_min,
         step_max=args.step_max,
         tail_dof=args.tail_dof,

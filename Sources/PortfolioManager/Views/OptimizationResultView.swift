@@ -100,14 +100,9 @@ public struct OptimizationResultView: View {
                 return
             }
 
-            // Get HSBC funds path
-            let hsbcPath = AppPaths.supportDir().appendingPathComponent("hsbc_open_funds.json").path
-            // Try common locations
-            let altPath = "/Users/sectator/MEGA/Finance/tmp/hsbc_open_funds.json"
-            let usePath = FileManager.default.fileExists(atPath: hsbcPath) ? hsbcPath :
-                          (FileManager.default.fileExists(atPath: altPath) ? altPath : nil)
-
             // Build sidecar + service
+            // 敏感性分析复用优化运行留在共享临时目录的联网产物
+            // (基金搜索易实时列表 + 天天基金实时申赎状态), 不再读预存快照。
             let sidecar = PythonSidecar(
                 interpreterPath: AppPaths.interpreterPath(),
                 scriptsDir: AppPaths.scriptsURL(),
@@ -118,10 +113,7 @@ public struct OptimizationResultView: View {
             let tempDB = try Database(path: AppPaths.databaseURL().path)
             let optimizer = OptimizationService(db: tempDB, sidecar: sidecar, logsDir: logsDir)
 
-            let sr = try optimizer.runSensitivityAnalysis(
-                extractJSON: extractURL,
-                hsbcFunds: usePath
-            )
+            let sr = try optimizer.runSensitivityAnalysis(extractJSON: extractURL)
             sensitivityResult = sr
             showSensitivity = true
         } catch {

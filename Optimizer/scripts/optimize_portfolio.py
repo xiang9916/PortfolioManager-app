@@ -3,12 +3,8 @@
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 
@@ -33,8 +29,7 @@ from params import (
     GC_INTERNAL_CORR,
     build_broad_cov,
     classify_domestic_fund,
-    load_hsbc_fund_pool,
-    load_hsbc_raw_funds,
+    build_open_pool_from_status,
     us_core_params,
 )
 from optimize_common import (
@@ -45,6 +40,11 @@ from optimize_common import (
     stage1_bounds,
     project_psd,
     build_corr_matrix,
+)
+from fund_pipeline import (
+    ensure_pipeline,
+    ensure_work_dir,
+    filter_available_assets,
 )
 
 
@@ -62,60 +62,8 @@ def log_step(step, message, level="info", log_path=None):
 # Callers in this module pass rf=RF (module-level, dynamically overridden).
 
 
-def load_availability(path):
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    funds = data.get("funds")
-    if not isinstance(funds, dict) or not funds:
-        raise ValueError("availability JSON 中没有 funds 字段")
-    return data, funds
-
-
-def run_availability_check(timeout=120.0):
-    script = Path(__file__).resolve().parent / "check_fund_availability.py"
-    tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-    tmp.close()
-    cmd = [sys.executable, str(script), "--json", tmp.name]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        print(json.dumps({"error": "基金状态在线校验超时"}, ensure_ascii=False))
-        sys.exit(2)
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or "")[-2000:]
-        print(json.dumps({"error": "基金状态在线校验失败", "detail": detail}, ensure_ascii=False))
-        sys.exit(2)
-    return tmp.name
-
-
-def filter_available_assets(assets, avail_funds, warnings, hsbc_status=None):
-    """按天天基金口径过滤可投大类; 与汇丰搜索易口径冲突时显式提示, 强制采信天天基金."""
-    kept = []
-    for a in assets:
-        code = a.get("fund_code")
-        if code is None:
-            kept.append(a)
-            continue
-        info = avail_funds.get(code)
-        hsbc = (hsbc_status or {}).get(code)
-        if info is None:
-            msg = f"基金 {a['name']}（{code}）未在天天基金校验结果中，已剔除。"
-            if hsbc is not None and hsbc.get("open", True):
-                msg += f"（汇丰搜索易显示{hsbc.get('status', '开放')}；两源冲突，以天天基金口径为准）"
-            warnings.append(msg)
-            continue
-        if not info.get("open", False):
-            msg = f"基金 {a['name']}（{code}）天天基金状态为 {info.get('status', '未知')}，已剔除"
-            if hsbc is not None and hsbc.get("open", True):
-                msg += "（汇丰搜索易显示开放申购；两源冲突，以天天基金口径为准）"
-            warnings.append(msg + "。")
-            continue
-        kept.append(a)
-    return kept
-
-
-# feasible_start, solve_min_var, max_feasible_return, stage1_bounds
-# are imported from optimize_common.
+# 基金申赎管线 (实时抓汇丰 + 天天基金校验 + 开放池构建) 统一在 fund_pipeline.py;
+# filter_available_assets 也从那里导入 (与 sensitivity_analysis.py 共用同一口径).
 
 
 def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols):
@@ -611,15 +559,16 @@ def main():
         help="目标预期收益率覆盖 (如 0.20=20%%)；缺省用 params.TARGET_RETURN",
     )
     parser.add_argument(
-        "--availability",
-        help="天天基金校验 JSON；缺省时自动运行 check_fund_availability.py",
+        "--work-dir",
+        default=None,
+        help="联网管线临时文件目录 (hsbc_funds.json / availability.json)；缺省用系统临时目录共享目录",
     )
-    parser.add_argument("--check-timeout", type=float, default=120.0)
-    parser.add_argument(
-        "--hsbc-funds",
-        default=os.environ.get("DSH_HSBC_FUNDS", "/Users/sectator/MEGA/Finance/tmp/hsbc_open_funds.json"),
-        help="基金搜索易开放申购基金 JSON 路径",
-    )
+    parser.add_argument("--check-timeout", type=float, default=300.0,
+                        help="天天基金状态校验子进程总超时秒数")
+    parser.add_argument("--hsbc-timeout", type=float, default=60.0,
+                        help="基金搜索易抓取单请求超时秒数")
+    parser.add_argument("--request-timeout", type=float, default=12.0,
+                        help="天天基金单只请求超时秒数")
     parser.add_argument("--json", dest="out_path", help="Write detailed JSON output to file")
     parser.add_argument("--result-json", dest="result_path", help="Write clean summary JSON to file")
     parser.add_argument("--log", dest="log_path", help="JSONL step log path")
@@ -657,47 +606,46 @@ def main():
     if live_anchors:
         log_step("live_anchors", f"动态锚定 {len(live_anchors)} 个境内基金 (覆盖 params.py 静态锚定)", log_path=args.log_path)
 
-    hsbc_pool = {}
-    hsbc_status = {}
-    if args.hsbc_funds and Path(args.hsbc_funds).exists():
-        try:
-            hsbc_pool = load_hsbc_fund_pool(args.hsbc_funds, live_anchors=live_anchors)
-            pool_count = sum(len(v) for v in hsbc_pool.values())
-            log_step("load_hsbc_pool", f"已加载开放基金池 {pool_count} 只", log_path=args.log_path)
-            warnings.append(f"已加载基金搜索易开放基金池：{pool_count} 只。")
-            # 原始在售状态, 供口径冲突提示 (汇丰开放 vs 天天基金暂停)
-            hsbc_status = {str(f.get("code", "")).strip(): f for f in load_hsbc_raw_funds(args.hsbc_funds)}
-        except Exception as exc:
-            warnings.append(f"基金搜索易开放基金池加载失败：{exc}")
-    else:
-        warnings.append("未找到基金搜索易开放基金池 JSON，境内基金内部选择将只使用原代表性基金。")
+    # ---- 联网管线: 每次优化完整执行 (抓汇丰搜索易 → 天天基金实时校验 → 开放池构建) ----
+    # 产物写入 work_dir 临时文件 (hsbc_funds.json / availability.json / check_plan.json),
+    # 敏感性分析复用同一目录, 不重新联网; 优化器关闭时由 Swift 侧整体删除。
+    work_dir = ensure_work_dir(args.work_dir)
+    try:
+        hsbc_data, availability = ensure_pipeline(
+            work_dir,
+            live_anchors=live_anchors,
+            hsbc_request_timeout=args.hsbc_timeout,
+            request_timeout=args.request_timeout,
+            check_total_timeout=args.check_timeout,
+            log=lambda step, message, level="info": log_step(
+                step, message, level=level, log_path=args.log_path),
+        )
+    except RuntimeError as exc:
+        print(json.dumps(
+            {"error": "联网管线失败（基金搜索易/天天基金）", "detail": str(exc)},
+            ensure_ascii=False))
+        sys.exit(2)
+    avail_funds = availability["funds"]
+    hsbc_funds_live = hsbc_data.get("funds", [])
+    # 汇丰原始在售状态, 供口径冲突提示 (汇丰开放 vs 天天基金暂停)
+    hsbc_status = {str(f.get("code", "")).strip(): f for f in hsbc_funds_live}
 
-    if args.availability:
-        try:
-            availability, avail_funds = load_availability(args.availability)
-        except (OSError, ValueError) as exc:
-            print(
-                    json.dumps(
-                    {"error": "无法读取天天基金校验结果", "detail": str(exc)},
-                    ensure_ascii=False,
-                )
-            )
-            sys.exit(2)
-        warnings.append(f"已读取天天基金校验结果：{args.availability}")
-    else:
-        availability_path = run_availability_check(timeout=args.check_timeout)
-        try:
-            availability, avail_funds = load_availability(availability_path)
-        except (OSError, ValueError) as exc:
-            print(
-                json.dumps(
-                    {"error": "天天基金校验结果不可用", "detail": str(exc)},
-                    ensure_ascii=False,
-                )
-            )
-            sys.exit(2)
-        warnings.append("已自动通过天天基金校验境内基金申购状态。")
-    log_step("availability", "天天基金申购状态校验完成", log_path=args.log_path)
+    # 直接取分组早停校验 selection 中每类选中的开放代表基金
+    # (组内顺序 = 锚定优先 → 费率升序 → A/C 备选垫后; 无数据的互认基金已按汇丰口径兜底)
+    hsbc_pool, pool_meta = build_open_pool_from_status(
+        hsbc_funds_live, availability, live_anchors=live_anchors)
+    warnings.append(
+        f"基金搜索易实时抓取：在售 {hsbc_data.get('total_count', '?')} 只，"
+        f"开放申购 {hsbc_data.get('open_count', '?')} 只。")
+    stats = availability.get("stats", {})
+    warnings.append(
+        f"天天基金实时校验（分组早停）：实际请求 {stats.get('checked', len(avail_funds))} 只，"
+        f"开放 {availability.get('open_count', '?')} 只，"
+        f"汇丰口径兜底 {stats.get('hsbc_fallback', 0)} 只。")
+    log_step("build_open_pool",
+             f"开放基金池：{len(hsbc_pool)} 个类别、代表基金 {pool_meta['kept']} 只"
+             f"（{stats.get('checked', '?')} 只候选实时校验, 耗时 {availability.get('elapsed_seconds', '?')}s）",
+             log_path=args.log_path)
 
     dom_w = float(extract["domestic_weight"])
     ov_w = float(extract["overseas_weight"])
@@ -707,10 +655,16 @@ def main():
 
     assets = []
     for a in BROAD_ASSETS:
-        # 汇丰在售池里没有任何候选的境内大类直接剔除 (如 QDII 商品可能无在售基金),
-        # 否则第一阶段会把权重分给一个买不到的类别, select_domestic_funds 又选不出代表基金.
+        # 境内大类剔除规则 (联网口径): 汇丰在售池无候选, 或全部候选被天天基金
+        # 判为暂停申购 → 买不到, 不进第一阶段 (如 QDII 商品可能无在售基金).
         if a["pool"] == "domestic" and hsbc_pool and a["key"] not in hsbc_pool:
-            warnings.append(f"境内大类 {a['name']}（{a['key']}）在汇丰在售池中无候选基金，已从第一阶段剔除。")
+            cat = pool_meta["categories"].get(a["key"])
+            if cat:
+                warnings.append(
+                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选在天天基金"
+                    f"全部为暂停申购/校验失败，已从第一阶段剔除。")
+            else:
+                warnings.append(f"境内大类 {a['name']}（{a['key']}）在汇丰在售池中无候选基金，已从第一阶段剔除。")
             continue
         item = dict(a)
         if a["key"] == "O_US_CORE":
@@ -816,6 +770,26 @@ def main():
             "mu": core_mu,
             "vol": core_vol,
             "internal_from_file": internal_weights,
+        },
+        "pipeline": {
+            "work_dir": str(work_dir),
+            "hsbc": {
+                "fetched_at": hsbc_data.get("fetched_at"),
+                "total_count": hsbc_data.get("total_count"),
+                "open_count": hsbc_data.get("open_count"),
+            },
+            "availability": {
+                "checked_at": availability.get("checked_at"),
+                "checked_codes": len(avail_funds),
+                "open_count": availability.get("open_count"),
+                "hsbc_fallback": availability.get("stats", {}).get("hsbc_fallback"),
+                "elapsed_seconds": availability.get("elapsed_seconds"),
+            },
+            "open_pool": {
+                "categories": len(hsbc_pool),
+                "representatives": pool_meta["kept"],
+                "category_detail": pool_meta["categories"],
+            },
         },
         "availability": {
             "source": availability.get("source"),

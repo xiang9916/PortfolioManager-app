@@ -12,10 +12,12 @@ BUNDLE="${DIST}/${APP_NAME}.app"
 
 WITH_VENV=0
 CODESIGN=1
+MAKE_DMG=0
 for a in "$@"; do
   case "$a" in
     --with-venv) WITH_VENV=1 ;;
     --no-codesign) CODESIGN=0 ;;
+    --dmg) MAKE_DMG=1 ;;
   esac
 done
 
@@ -70,6 +72,21 @@ if [ "${CODESIGN}" = "1" ]; then
   codesign --force --deep --sign - "${BUNDLE}"
   echo "==> verify"
   codesign --verify --verbose=2 "${BUNDLE}"
+fi
+
+if [ "${MAKE_DMG}" = "1" ]; then
+  echo "==> creating dmg"
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${BUNDLE}/Contents/Info.plist")"
+  DMG="${DIST}/PortfolioManager-${VERSION}.dmg"
+  STAGE="${DIST}/dmg-staging"
+  rm -rf "${STAGE}" "${DMG}"
+  mkdir -p "${STAGE}"
+  cp -R "${BUNDLE}" "${STAGE}/"
+  ln -s /Applications "${STAGE}/Applications"
+  hdiutil create -volname "投资组合管家 ${VERSION}" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}"
+  rm -rf "${STAGE}"
+  hdiutil verify "${DMG}" >/dev/null
+  echo "==> dmg: ${DMG}"
 fi
 
 echo "==> done: ${BUNDLE}"
