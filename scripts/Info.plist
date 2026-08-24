@@ -2,29 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>PortfolioManager</string>
-    <key>CFBundleDisplayName</key>
-    <string>投资组合管家</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.xiang9916.portfoliomanager</string>
-    <key>CFBundleVersion</key>
-    <string>0.1-beta1</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1-beta1</string>
-    <key>CFBundleExecutable</key>
-    <string>PortfolioManager</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSHumanReadableCopyright</key>
-    <string>© 2026</string>
+	<key>CFBundleDisplayName</key>
+	<string>投资组合管家</string>
+	<key>CFBundleExecutable</key>
+	<string>PortfolioManager</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.xiang9916.portfoliomanager</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>PortfolioManager</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1-beta2</string>
+	<key>CFBundleVersion</key>
+	<string>0.1-beta2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026</string>
 </dict>
 </plist>
