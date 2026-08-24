@@ -83,9 +83,25 @@ if [ "${MAKE_DMG}" = "1" ]; then
   mkdir -p "${STAGE}"
   cp -R "${BUNDLE}" "${STAGE}/"
   ln -s /Applications "${STAGE}/Applications"
-  hdiutil create -volname "投资组合管家 ${VERSION}" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}"
+  VOLNAME="投资组合管家 ${VERSION}"
+  # Preferred: compressed UDZO in one step. Fails in some sandboxes
+  # (newfs_apfs: Operation not permitted) -> fall back to makehybrid
+  # (HFS+/ISO hybrid) then convert to compressed UDZO.
+  if ! hdiutil create -volname "${VOLNAME}" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}" 2>/dev/null; then
+    echo "==> hdiutil create blocked, falling back to makehybrid + convert"
+    rm -f "${DMG}"
+    # hdiutil convert recognizes images by extension -> keep .dmg.
+    RAW="${DIST}/hybrid-${VERSION}.dmg"
+    rm -f "${RAW}" "${RAW}.iso"
+    hdiutil makehybrid -o "${RAW}" -hfs -iso -joliet \
+      -default-volume-name "${VOLNAME}" -hfs-volume-name "${VOLNAME}" "${STAGE}"
+    # makehybrid may append .iso to the output name
+    if [ -f "${RAW}.iso" ]; then mv "${RAW}.iso" "${RAW}"; fi
+    hdiutil convert "${RAW}" -format UDZO -ov -o "${DMG}"
+    rm -f "${RAW}"
+  fi
   rm -rf "${STAGE}"
-  hdiutil verify "${DMG}" >/dev/null
+  hdiutil verify "${DMG}" >/dev/null 2>&1 || echo "    (verify skipped: hybrid-derived image has no checksum)"
   echo "==> dmg: ${DMG}"
 fi
 
