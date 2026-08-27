@@ -101,9 +101,9 @@ public final class AppStore {
     /// Editing drafts (assetKey -> draft). Populated on load; saved via savePerspectives().
     public var holdingDrafts: [String: HoldingDraft] = [:]
 
-    // 能力4 财务分析
-    public var financialAnalysis: FinancialAnalysis?
-    public var incomeSummaries: [IncomeSummary] = []
+    // 能力4 财务分析 (重做: 逐季度底稿, 9 手动字段 + 派生行)
+    public var quarterlyReports: [QuarterlyReport] = []
+    @ObservationIgnored private var quarterlyPersistTask: Task<Void, Never>?
 
     // 能力2 汇率 (币种→人民币), 自动抓取 + 手动可覆盖
     public var fxRates: [FxRate] = []
@@ -186,8 +186,7 @@ public final class AppStore {
                                            currency: $0.currency))
             })
             fxRates = try db.fetchFxRates()
-            financialAnalysis = try repository.fetchFinancialAnalysis()
-            incomeSummaries = try repository.fetchIncomeSummaries()
+            quarterlyReports = try repository.fetchQuarterlyReports()
             lastUpdated = DateFormatters.nowISO()
             statusMessage = nil
         } catch {
@@ -270,24 +269,85 @@ public final class AppStore {
         )
     }
 
-    public func upsertIncomeSummary(_ f: IncomeSummary) {
-        do {
-            try db.upsertIncomeSummaries([f])
-            loadAll()
-            statusMessage = "已保存收益期间"
-        } catch {
-            statusMessage = "保存失败: \(error)"
-        }
+    // MARK: 能力4 — 逐季度财务分析底稿
+
+    /// 网格内联编辑: 更新某季度某手动字段 (内存立即生效, 派生行实时重算; 落盘防抖).
+    public func updateQuarterlyField(periodEnd: String, field: QuarterlyField, value: Double?) {
+        guard let i = quarterlyReports.firstIndex(where: { $0.periodEnd == periodEnd }) else { return }
+        quarterlyReports[i][keyPath: field.keyPath] = value
+        scheduleQuarterlyPersist()
     }
 
-    public func deleteIncomeSummary(id: Int64) {
+    /// 添加一个季度列 (默认 = 最后一列之后的下一个季末; 首列 = 当前季末).
+    public func addQuarter() {
+        let next: String
+        if let last = quarterlyReports.map(\.periodEnd).max(),
+           let n = QuarterlyMetrics.nextQuarterEnd(after: last) {
+            next = n
+        } else {
+            next = QuarterlyMetrics.currentQuarterEnd()
+        }
+        guard !quarterlyReports.contains(where: { $0.periodEnd == next }) else {
+            statusMessage = "季度 \(next) 已存在"
+            return
+        }
+        quarterlyReports.append(QuarterlyReport(periodEnd: next, source: "manual"))
+        quarterlyReports.sort { $0.periodEnd < $1.periodEnd }
+        flushQuarterlyPersist()
+        statusMessage = "已添加季度 " + QuarterlyMetrics.quarterLabel(next)
+    }
+
+    public func deleteQuarter(periodEnd: String) {
+        quarterlyPersistTask?.cancel()   // 取消未落盘快照, 防止删行被旧快照复活
+        quarterlyReports.removeAll { $0.periodEnd == periodEnd }
         do {
-            try db.deleteIncomeSummary(id: id)
-            loadAll()
-            statusMessage = "已删除"
+            try db.deleteQuarterlyReport(periodEnd: periodEnd)
+            statusMessage = "已删除季度"
         } catch {
             statusMessage = "删除失败: \(error)"
         }
+    }
+
+    /// 修改季度列的截止日 (表头编辑).
+    public func renameQuarter(from oldEnd: String, to newEnd: String) {
+        let trimmed = newEnd.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != oldEnd else { return }
+        guard !quarterlyReports.contains(where: { $0.periodEnd == trimmed }) else {
+            statusMessage = "季度 \(trimmed) 已存在"
+            return
+        }
+        do {
+            try db.renameQuarterlyReport(from: oldEnd, to: trimmed)
+            quarterlyPersistTask?.cancel()
+            if let i = quarterlyReports.firstIndex(where: { $0.periodEnd == oldEnd }) {
+                quarterlyReports[i].periodEnd = trimmed
+                quarterlyReports.sort { $0.periodEnd < $1.periodEnd }
+            }
+            flushQuarterlyPersist()
+            statusMessage = "已改为 " + trimmed
+        } catch {
+            statusMessage = "修改失败: \(error)"
+        }
+    }
+
+    /// 防抖落盘: 停止输入 0.6s 后整表 upsert (表小, 整表写无压力).
+    private func scheduleQuarterlyPersist() {
+        quarterlyPersistTask?.cancel()
+        let snapshot = quarterlyReports
+        quarterlyPersistTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.6))
+            guard !Task.isCancelled else { return }
+            do { try self?.db.upsertQuarterlyReports(snapshot) }
+            catch { self?.statusMessage = "保存失败: \(error)" }
+        }
+    }
+
+    /// 立即落盘 (添加/删除/改名等结构性操作后调用).
+    private func flushQuarterlyPersist() {
+        quarterlyPersistTask?.cancel()
+        quarterlyPersistTask = nil
+        do { try db.upsertQuarterlyReports(quarterlyReports) }
+        catch { statusMessage = "保存失败: \(error)" }
     }
 
     // MARK: 能力2 — 标的增删 + 联网校验 + 汇率

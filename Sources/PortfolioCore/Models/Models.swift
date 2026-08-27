@@ -110,6 +110,86 @@ public struct IncomeSummary: Codable, Identifiable, Hashable {
     }
 }
 
+/// 能力4 重做: 财务分析逐季度报表的一列 (对应 投资组合情况.xlsx 的一个季度列).
+/// 9 个字段全部手动录入 (季度结束后补录), 录入后仍可编辑; 其余行由 QuarterlyMetrics 派生.
+/// nil = 尚未填写 (网格显示空白, 计算按 0 处理, 同 Excel 空单元格语义).
+public struct QuarterlyReport: Codable, Identifiable, Hashable {
+    public var id: Int64?
+    /// 季度截止日 "yyyy-MM-dd" (如 2026-06-30), 一列一个季度.
+    public var periodEnd: String
+    /// 总市值 (季度末组合市值, 人民币).
+    public var marketValue: Double?
+    /// 总成本 (含已实现回报滚存的成本口径, 人民币).
+    public var totalCost: Double?
+    /// 当季利息 · 境内.
+    public var interestDomestic: Double?
+    /// 当季利息 · 境外.
+    public var interestOverseas: Double?
+    /// 当季股息 · 境内.
+    public var dividendDomestic: Double?
+    /// 当季股息 · 境外.
+    public var dividendOverseas: Double?
+    /// 当季资本利得 · 境内.
+    public var capitalGainDomestic: Double?
+    /// 当季资本利得 · 境外.
+    public var capitalGainOverseas: Double?
+    /// 当季 (红利税、资本利得税) 合计.
+    public var taxes: Double?
+    public var source: String?
+
+    public init(id: Int64? = nil, periodEnd: String,
+                marketValue: Double? = nil, totalCost: Double? = nil,
+                interestDomestic: Double? = nil, interestOverseas: Double? = nil,
+                dividendDomestic: Double? = nil, dividendOverseas: Double? = nil,
+                capitalGainDomestic: Double? = nil, capitalGainOverseas: Double? = nil,
+                taxes: Double? = nil, source: String? = nil) {
+        self.id = id; self.periodEnd = periodEnd
+        self.marketValue = marketValue; self.totalCost = totalCost
+        self.interestDomestic = interestDomestic; self.interestOverseas = interestOverseas
+        self.dividendDomestic = dividendDomestic; self.dividendOverseas = dividendOverseas
+        self.capitalGainDomestic = capitalGainDomestic; self.capitalGainOverseas = capitalGainOverseas
+        self.taxes = taxes; self.source = source
+    }
+}
+
+/// 9 个手动字段之一 (编辑网格用).
+public enum QuarterlyField: String, CaseIterable, Codable {
+    case marketValue, totalCost
+    case interestDomestic, interestOverseas
+    case dividendDomestic, dividendOverseas
+    case capitalGainDomestic, capitalGainOverseas
+    case taxes
+
+    /// 网格左侧行标签.
+    public var label: String {
+        switch self {
+        case .marketValue: return "总市值"
+        case .totalCost: return "总成本"
+        case .interestDomestic: return "境内"
+        case .interestOverseas: return "境外"
+        case .dividendDomestic: return "境内"
+        case .dividendOverseas: return "境外"
+        case .capitalGainDomestic: return "境内"
+        case .capitalGainOverseas: return "境外"
+        case .taxes: return "(红利税、资本利得税)"
+        }
+    }
+
+    public var keyPath: WritableKeyPath<QuarterlyReport, Double?> {
+        switch self {
+        case .marketValue: return \.marketValue
+        case .totalCost: return \.totalCost
+        case .interestDomestic: return \.interestDomestic
+        case .interestOverseas: return \.interestOverseas
+        case .dividendDomestic: return \.dividendDomestic
+        case .dividendOverseas: return \.dividendOverseas
+        case .capitalGainDomestic: return \.capitalGainDomestic
+        case .capitalGainOverseas: return \.capitalGainOverseas
+        case .taxes: return \.taxes
+        }
+    }
+}
+
 public struct OptimizedAsset: Codable, Hashable {
     public let key: String
     public let name: String

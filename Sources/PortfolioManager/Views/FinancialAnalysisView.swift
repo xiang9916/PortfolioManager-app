@@ -1,399 +1,418 @@
 import SwiftUI
-import Charts
 import PortfolioCore
 
-/// 能力4：财务分析 — 分析个人资产/收益结构 (像公司财务底稿一样).
+/// 能力4 (重做): 财务分析 — 结构 1:1 对齐 投资组合情况(模拟数据).xlsx.
+/// 顶部: 统计图预留区 (暂不绘制); 下方: 逐季度数据网格, 一列 = 一个季度.
+/// 9 个手动字段 (总市值 / 总成本 / 境内·境外利息 / 股息 / 资本利得 / (红利税、资本利得税))
+/// 在网格内联编辑, 录入后仍可修改; 其余行全部由 QuarterlyMetrics 公式链自动派生.
 public struct FinancialAnalysisView: View {
     @Bindable var store: AppStore
-    @State private var showAdd = false
-    @State private var showManage = false
+
+    /// 内联编辑的文本草稿 ((季度, 字段) → 原始输入). 显示以草稿为准, 不与格式化互相打架.
+    @State private var drafts: [CellKey: String] = [:]
+    /// 表头日期编辑草稿 (periodEnd → 原始输入).
+    @State private var dateDrafts: [String: String] = [:]
+
+    private let labelWidth: CGFloat = 212
+    private let columnWidth: CGFloat = 150
+    private let rowHeight: CGFloat = 30
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                if let fa = store.financialAnalysis {
-                    assetStructure(fa)
-                    realizedPnlStructure(fa)
-                    incomeStructure(fa)
-                }
-                incomePeriodsSection()
+            VStack(alignment: .leading, spacing: 16) {
+                chartPlaceholder
+                quarterlyCard
             }
             .padding()
         }
         .navigationTitle("财务分析")
         .toolbar {
             ToolbarItemGroup {
-                Button { showAdd = true } label: { Label("添加期间", systemImage: "plus") }
-                Button { showManage = true } label: { Label("管理", systemImage: "slider.horizontal.3") }
+                Button { store.addQuarter() } label: { Label("添加季度", systemImage: "plus") }
+                    .help("追加一个季度列 (自动取下一个季末日期)")
             }
         }
-        .sheet(isPresented: $showAdd) { IncomeSummaryEditorSheet(store: store) }
-        .sheet(isPresented: $showManage) { IncomeSummaryManageSheet(store: store) }
+        .onAppear { syncDrafts() }
+        .onChange(of: store.quarterlyReports.map(\.periodEnd)) { _, _ in syncDrafts() }
     }
 
-    // MARK: 资产结构 (本金 vs 市值)
+    /// 派生列 (按季末升序).
+    private var columns: [QuarterComputed] { QuarterlyMetrics.compute(store.quarterlyReports) }
 
-    private func assetStructure(_ fa: FinancialAnalysis) -> some View {
+    // MARK: - 统计图预留区
+
+    private var chartPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("统计图展示区")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("预留 · 后续版本将在此绘制累计回报 / 年化收益等统计图")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 210)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [7, 5]))
+                .foregroundStyle(.quaternary)
+        )
+    }
+
+    // MARK: - 逐季度数据区
+
+    private var quarterlyCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("资产结构").font(.headline)
-            // 第一行: 原始本金、实盈实亏、收益率 (收益率 = 实盈实亏 / 原始本金)
-            HStack(spacing: 16) {
-                statCard("原始本金", money(fa.originalPrincipal), "banknote", .teal)
-                statCard("实盈实亏", signedMoney(fa.realizedPnl), "arrow.left.arrow.right", fa.realizedPnl >= 0 ? .orange : .red)
-                statCard("收益率", pct(fa.returnRate), "percent", fa.returnRate >= 0 ? .green : .red)
-            }
-            // 第二行: 本金、浮盈浮亏、市值
-            HStack(spacing: 16) {
-                statCard("本金", money(fa.principal), "banknote.fill", .teal)
-                statCard("浮盈浮亏", signedMoney(fa.unrealizedPnl), "arrow.up.right", fa.unrealizedPnl >= 0 ? .green : .red)
-                statCard("市值", money(fa.marketValue), "chart.line.uptrend.xyaxis", .blue)
-            }
-            // 三段恒等式条: 市值 = 原始本金 + 实盈实亏 + 浮盈浮亏
-            if fa.marketValue != 0 {
-                let denom = abs(fa.originalPrincipal) + abs(fa.realizedPnl) + abs(fa.unrealizedPnl)
-                let p1 = denom > 0 ? abs(fa.originalPrincipal) / denom : 0
-                let p2 = denom > 0 ? abs(fa.realizedPnl) / denom : 0
-                let p3 = denom > 0 ? abs(fa.unrealizedPnl) / denom : 0
-                VStack(alignment: .leading, spacing: 4) {
-                    GeometryReader { geo in
-                        HStack(spacing: 0) {
-                            Rectangle().fill(.teal).frame(width: geo.size.width * p1)
-                            Rectangle().fill(.orange).frame(width: geo.size.width * p2)
-                            Rectangle().fill(fa.unrealizedPnl >= 0 ? Color.green : Color.red).frame(width: geo.size.width * p3)
-                        }
-                    }
-                    .frame(height: 12)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    HStack {
-                        Text("原始本金 " + pct(p1)).foregroundStyle(.teal)
-                        Text("实盈实亏 " + pct(p2)).foregroundStyle(.orange)
-                        Spacer()
-                        Text("浮盈浮亏 " + pct(p3)).foregroundStyle(fa.unrealizedPnl >= 0 ? .green : .red)
-                    }.font(.caption)
-                    Text("市值 = 原始本金 + 实盈实亏 + 浮盈浮亏").font(.caption2).foregroundStyle(.secondary)
+            Text("逐季度数据").font(.headline)
+            if columns.isEmpty {
+                ContentUnavailableView {
+                    Label("暂无季度数据", systemImage: "tablecells")
+                } description: {
+                    Text("点右上角「添加季度」建立第一列 (期初: 总市值 = 总成本)，之后每个季度结束后添加一列并补录 9 项数据。")
+                } actions: {
+                    Button("添加第一个季度") { store.addQuarter() }
+                        .buttonStyle(.borderedProminent)
                 }
-            }
-        }
-        .padding()
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    // MARK: 实盈实亏 (累计股息分红 + 累计交易损益)
-
-    private func realizedPnlStructure(_ fa: FinancialAnalysis) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("实盈实亏（累计至今）").font(.headline)
-            HStack(spacing: 16) {
-                statCard("累计股息分红", money(fa.totalDividends), "banknote", .orange)
-                statCard("累计交易损益", signedMoney(fa.totalRealizedPnl), "arrow.left.arrow.right", fa.totalRealizedPnl >= 0 ? .green : .red)
-                statCard("实盈实亏合计", signedMoney(fa.realizedPnl), "sum", fa.realizedPnl >= 0 ? .green : .red)
-            }
-            Text("本金 = 原始本金 + 实盈实亏").font(.caption).foregroundStyle(.secondary)
-        }
-        .padding()
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    // MARK: 收益结构 (浮盈 / 股息 / 交易损益)
-
-    private func incomeStructure(_ fa: FinancialAnalysis) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("收益结构（浮盈浮亏 · 股息分红 · 交易损益）").font(.headline)
-            HStack(spacing: 16) {
-                statCard("浮盈浮亏", signedMoney(fa.unrealizedPnl), "chart.line.uptrend.xyaxis", fa.unrealizedPnl >= 0 ? .green : .red)
-                statCard("股息分红", money(fa.totalDividends), "banknote", .orange)
-                statCard("交易损益", signedMoney(fa.totalRealizedPnl), "arrow.left.arrow.right", fa.totalRealizedPnl >= 0 ? .green : .red)
-                statCard("合计收益", signedMoney(fa.totalIncome), "sum", fa.totalIncome >= 0 ? .green : .red)
-            }
-            HStack {
-                Text("合计收益率").foregroundStyle(.secondary)
-                Spacer()
-                Text(pct(fa.totalReturnRate)).font(.title3).fontWeight(.semibold).monospacedDigit()
-                    .foregroundStyle(fa.totalReturnRate >= 0 ? .green : .red)
-            }
-        }
-        .padding()
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    // MARK: 期间明细 (季度录入 → 半年/年度 派生)
-
-    private func incomePeriodsSection() -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("收益期间明细").font(.headline)
-            if store.incomeSummaries.isEmpty {
-                ContentUnavailableView("暂无收益期间", systemImage: "chart.bar.doc.horizontal",
-                    description: Text("点右上角「添加期间」按季度录入；半年/年度自动汇总。"))
             } else {
-                periodTable()
+                ScrollView(.horizontal, showsIndicators: true) {
+                    grid
+                        .padding(.vertical, 4)
+                }
+                legend
             }
         }
         .padding()
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// Derived half-year or annual summary from quarterly records.
-    private struct DerivedPeriod: Identifiable {
-        let label: String   // e.g. "2026 H1" or "2026"
-        let dividends: Double
-        let realizedPnl: Double
-        var id: String { label }
-    }
-
-    /// Group quarterly records by year and half (H1=Q1+Q2, H2=Q3+Q4).
-    private func derivedHalfYearSummaries(_ quarters: [IncomeSummary]) -> [DerivedPeriod] {
-        // Extract year from periodEnd (first 4 chars).
-        var byYearHalf: [String: (div: Double, pnl: Double)] = [:]
-        for q in quarters {
-            let yr = String(q.periodEnd.prefix(4))
-            guard let mm = Int(q.periodEnd.dropFirst(5).prefix(2)) else { continue }
-            let half = mm <= 6 ? "H1" : "H2"
-            let key = "\(yr) \(half)"
-            let cur = byYearHalf[key] ?? (0, 0)
-            byYearHalf[key] = (cur.div + q.dividends, cur.pnl + q.realizedPnl)
-        }
-        return byYearHalf.keys.sorted().map { k in
-            let v = byYearHalf[k]!
-            return DerivedPeriod(label: k, dividends: v.div, realizedPnl: v.pnl)
-        }.sorted { $0.label > $1.label }
-    }
-
-    /// Group quarterly records by year.
-    private func derivedAnnualSummaries(_ quarters: [IncomeSummary]) -> [DerivedPeriod] {
-        var byYear: [String: (div: Double, pnl: Double)] = [:]
-        for q in quarters {
-            let yr = String(q.periodEnd.prefix(4))
-            let cur = byYear[yr] ?? (0, 0)
-            byYear[yr] = (cur.div + q.dividends, cur.pnl + q.realizedPnl)
-        }
-        return byYear.keys.sorted().map { k in
-            let v = byYear[k]!
-            return DerivedPeriod(label: k, dividends: v.div, realizedPnl: v.pnl)
-        }.sorted { $0.label > $1.label }
-    }
-
-    private func periodTable() -> some View {
-        let all = store.incomeSummaries.sorted { $0.periodEnd > $1.periodEnd }
-        let quarters = all.filter { $0.period == .quarter }
-        let nonQuarter = all.filter { $0.period != .quarter }  // legacy rows
-        let halfYears = derivedHalfYearSummaries(quarters)
-        let annuals = derivedAnnualSummaries(quarters)
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 0) {
-                headerCell("期间 / 口径", width: 200)
-                headerCell("股息分红 (¥)", width: 160)
-                headerCell("交易损益 (¥)", width: 160)
-                headerCell("期间收益 (¥)", width: 160)
-            }
-            Divider()
-            // Section: Quarterly (raw)
-            sectionHeader("季度（录入）")
-            ForEach(quarters) { f in
-                HStack(spacing: 0) {
-                    cell(f.periodEnd + " · 季度", width: 200, bold: true)
-                    cell(money(f.dividends), width: 160, bold: false)
-                    cell(signedMoney(f.realizedPnl), width: 160, bold: false)
-                    cell(signedMoney(f.dividends + f.realizedPnl), width: 160, bold: false)
+    private var grid: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerRow
+            ForEach(rows) { row in
+                if row.isSection {
+                    sectionRow(row.label)
+                } else {
+                    dataRow(row)
                 }
-                Divider()
             }
-            // Section: Legacy non-quarter (if any old rows exist)
-            if !nonQuarter.isEmpty {
-                sectionHeader("历史记录（半年/年度）")
-                ForEach(nonQuarter) { f in
-                    HStack(spacing: 0) {
-                        cell(f.periodEnd + " · " + periodName(f.period), width: 200, bold: true)
-                        cell(money(f.dividends), width: 160, bold: false)
-                        cell(signedMoney(f.realizedPnl), width: 160, bold: false)
-                        cell(signedMoney(f.dividends + f.realizedPnl), width: 160, bold: false)
+        }
+    }
+
+    // MARK: 表头 (季度日期, 可编辑 / 右键删除)
+
+    private var headerRow: some View {
+        HStack(spacing: 0) {
+            Text("季度截止日")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: labelWidth, alignment: .leading)
+                .padding(.horizontal, 8)
+            ForEach(columns, id: \.report.periodEnd) { c in
+                let pe = c.report.periodEnd
+                VStack(spacing: 1) {
+                    Text(QuarterlyMetrics.quarterLabel(pe))
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                    TextField("yyyy-MM-dd", text: dateBinding(pe))
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, design: .monospaced))
+                        .multilineTextAlignment(.center)
+                        .frame(width: columnWidth - 20)
+                        .onSubmit { commitDateEdit(pe) }
+                }
+                .frame(width: columnWidth)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 4))
+                .contextMenu {
+                    Button("删除该季度", role: .destructive) {
+                        store.deleteQuarter(periodEnd: pe)
                     }
-                    Divider()
+                }
+                .help("编辑日期或右键删除该季度列")
+            }
+            Color.clear.frame(width: 16)
+        }
+        .padding(.bottom, 6)
+    }
+
+    private func dateBinding(_ pe: String) -> Binding<String> {
+        Binding(
+            get: { dateDrafts[pe] ?? pe },
+            set: { dateDrafts[pe] = $0 }
+        )
+    }
+
+    private func commitDateEdit(_ oldEnd: String) {
+        let newText = (dateDrafts[oldEnd] ?? oldEnd).trimmingCharacters(in: .whitespaces)
+        store.renameQuarter(from: oldEnd, to: newText)
+    }
+
+    // MARK: 区块标题行 (资产 / 现金流)
+
+    private func sectionRow(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.weight(.bold))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.gray.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+            .padding(.vertical, 3)
+    }
+
+    // MARK: 数据行
+
+    private func dataRow(_ row: GridRow) -> some View {
+        HStack(spacing: 0) {
+            rowLabel(row)
+            ForEach(columns, id: \.report.periodEnd) { c in
+                if let field = row.manual {
+                    manualCell(c.report.periodEnd, field)
+                } else {
+                    computedCell(row.value(c), emphasis: row.emphasis)
                 }
             }
-            // Section: Half-year (derived)
-            if !halfYears.isEmpty {
-                sectionHeader("半年（派生）")
-                ForEach(halfYears) { h in
-                    HStack(spacing: 0) {
-                        cell(h.label + " · 半年", width: 200, bold: false)
-                        cell(money(h.dividends), width: 160, bold: false)
-                        cell(signedMoney(h.realizedPnl), width: 160, bold: false)
-                        cell(signedMoney(h.dividends + h.realizedPnl), width: 160, bold: false)
-                    }
-                    Divider()
-                }
-            }
-            // Section: Annual (derived)
-            if !annuals.isEmpty {
-                sectionHeader("年度（派生）")
-                ForEach(annuals) { a in
-                    HStack(spacing: 0) {
-                        cell(a.label + " · 年度", width: 200, bold: false)
-                        cell(money(a.dividends), width: 160, bold: false)
-                        cell(signedMoney(a.realizedPnl), width: 160, bold: false)
-                        cell(signedMoney(a.dividends + a.realizedPnl), width: 160, bold: false)
-                    }
-                    Divider()
-                }
-            }
+            Color.clear.frame(width: 16)
+        }
+        .frame(height: rowHeight)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title).font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-            .background(Color.gray.opacity(0.08))
-    }
-
-    private func headerCell(_ text: String, width: CGFloat) -> some View {
-        Text(text).font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
-            .frame(width: width, alignment: .leading).padding(8)
-    }
-    private func cell(_ text: String, width: CGFloat, bold: Bool) -> some View {
-        Text(text).font(bold ? .subheadline.bold() : .subheadline).monospacedDigit()
-            .frame(width: width, alignment: .leading).padding(8)
-    }
-
-    private func statCard(_ label: String, _ value: String, _ icon: String, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(label, systemImage: icon).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title2).fontWeight(.semibold).monospacedDigit().foregroundStyle(color)
+    private func rowLabel(_ row: GridRow) -> some View {
+        HStack(spacing: 4) {
+            if row.manual != nil {
+                Image(systemName: "pencil.and.list.clipboard")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+            }
+            Text(row.label)
+                .font(.system(size: 12, weight: row.emphasis ? .semibold : .regular))
+                .foregroundStyle(row.emphasis ? .primary : .secondary)
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.leading, 8 + CGFloat(row.indent) * 14)
+        .padding(.trailing, 8)
+        .frame(width: labelWidth, alignment: .leading)
     }
 
-    private func periodName(_ p: FinancialPeriod) -> String {
-        switch p {
-        case .quarter: return "季度"
-        case .halfYear: return "半年"
-        case .annual: return "年度"
+    /// 手动字段单元格: 蓝底内联输入框, 值解析后实时驱动派生行, 落盘防抖.
+    private func manualCell(_ pe: String, _ field: QuarterlyField) -> some View {
+        let key = CellKey(periodEnd: pe, field: field)
+        return TextField("—", text: Binding(
+            get: { drafts[key] ?? "" },
+            set: { text in
+                drafts[key] = text
+                store.updateQuarterlyField(periodEnd: pe, field: field, value: parseNumber(text))
+            }
+        ))
+        .textFieldStyle(.plain)
+        .font(.system(size: 12, design: .monospaced))
+        .multilineTextAlignment(.trailing)
+        .frame(width: columnWidth - 14, height: rowHeight - 8, alignment: .trailing)
+        .padding(.horizontal, 7)
+        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+        .help(field.label + " · 手动录入, 可随时修改")
+    }
+
+    private func computedCell(_ text: String, emphasis: Bool) -> some View {
+        Text(text.isEmpty ? "—" : text)
+            .font(.system(size: 12, weight: emphasis ? .semibold : .regular, design: .monospaced))
+            .foregroundStyle(styleFor(text))
+            .frame(width: columnWidth - 14, alignment: .trailing)
+            .padding(.horizontal, 7)
+    }
+
+    private func isNegative(_ s: String) -> Bool { s.hasPrefix("-") || s.hasPrefix("−") }
+
+    private func styleFor(_ text: String) -> AnyShapeStyle {
+        if text.isEmpty { return AnyShapeStyle(.quaternary) }
+        if isNegative(text) { return AnyShapeStyle(Color.red) }
+        return AnyShapeStyle(.primary)
+    }
+
+    // MARK: - 图例
+
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.accentColor.opacity(0.35))
+                    .frame(width: 22, height: 12)
+                Text("手动录入 (9 项, 录入后仍可编辑): 总市值 · 总成本 · 利息/股息/资本利得的境内与境外 · (红利税、资本利得税)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("其余行均由公式自动计算; 表头日期可点击编辑, 右键表头删除该季度; 第一列为期初基准列 (总市值 = 总成本)。")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.top, 2)
+    }
+
+    // MARK: - 草稿同步 (仅在列集合变化时重置, 不打断输入中的单元格)
+
+    private func syncDrafts() {
+        let keys = Set(store.quarterlyReports.map(\.periodEnd))
+        var newDrafts: [CellKey: String] = [:]
+        var newDates: [String: String] = [:]
+        for r in store.quarterlyReports {
+            newDates[r.periodEnd] = dateDrafts[r.periodEnd] ?? r.periodEnd
+            for f in QuarterlyField.allCases {
+                let key = CellKey(periodEnd: r.periodEnd, field: f)
+                newDrafts[key] = drafts[key] ?? formatDraft(r[keyPath: f.keyPath])
+            }
+        }
+        drafts = newDrafts
+        dateDrafts = newDates
+    }
+
+    /// 把已存数值转成紧凑可编辑文本 (整数无小数, 否则保留至多 12 位有效数字).
+    private func formatDraft(_ v: Double?) -> String {
+        guard let v else { return "" }
+        if v.truncatingRemainder(dividingBy: 1) == 0 { return String(format: "%.0f", v) }
+        return String(format: "%g", v)
+    }
+
+    private func parseNumber(_ s: String) -> Double? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: "−", with: "-")
+        guard !t.isEmpty else { return nil }
+        return Double(t)
+    }
+
+    // MARK: - 格式化
+
+    private static let moneyFmt: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        f.usesGroupingSeparator = true
+        return f
+    }()
+
+    private func money(_ v: Double?) -> String {
+        guard let v else { return "" }
+        return Self.moneyFmt.string(from: NSNumber(value: v)) ?? ""
+    }
+
+    private func pct(_ v: Double?) -> String {
+        guard let v else { return "" }
+        return String(format: "%.2f%%", v * 100)
+    }
+
+    private func signedPct(_ v: Double?) -> String {
+        guard let v else { return "" }
+        return String(format: "%+.2f%%", v * 100)
+    }
+
+    private func days(_ v: Int?) -> String {
+        guard let v else { return "" }
+        return String(v)
+    }
+
+    // MARK: - 行定义 (顺序与标签 1:1 对齐 xlsx)
+
+    /// 网格的一行: 左侧标签 + 每季一单元格.
+    private struct GridRow: Identifiable {
+        let id: String
+        let label: String
+        let indent: Int
+        let manual: QuarterlyField?
+        let emphasis: Bool
+        let isSection: Bool
+        let value: (QuarterComputed) -> String
+
+        static func manual(_ id: String, _ label: String, indent: Int = 0, _ field: QuarterlyField) -> GridRow {
+            GridRow(id: id, label: label, indent: indent, manual: field, emphasis: false, isSection: false, value: { _ in "" })
+        }
+
+        static func computed(_ id: String, _ label: String, indent: Int = 0,
+                              emphasis: Bool = false,
+                              _ value: @escaping (QuarterComputed) -> String) -> GridRow {
+            GridRow(id: id, label: label, indent: indent, manual: nil, emphasis: emphasis, isSection: false, value: value)
+        }
+
+        static func section(_ label: String) -> GridRow {
+            GridRow(id: "section-\(label)", label: label, indent: 0, manual: nil, emphasis: false, isSection: true, value: { _ in "" })
         }
     }
-    private func money(_ v: Double) -> String {
-        let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0
-        return f.string(from: NSNumber(value: v)) ?? "0"
+
+    /// 全部行, 顺序/标签与 投资组合情况.xlsx 一致.
+    private static var _rows: [GridRow] = [
+        .section("资产"),
+        .manual("mv", "总市值", .marketValue),
+        .manual("cost", "总成本", indent: 1, .totalCost),
+        .computed("principal", "本金", indent: 2) { m($0.principal) },
+        .computed("cumRealized", "累计已实现回报", indent: 2) { money0($0.cumRealizedReturn) },
+        .computed("cumInterest", "累计利息", indent: 3) { money0($0.cumInterest) },
+        .computed("cumDividend", "累计股息", indent: 3) { money0($0.cumDividend) },
+        .computed("cumGain", "累计已实现资本利得", indent: 3) { money0($0.cumRealizedGain) },
+        .computed("unrealized", "未实现资本利得", indent: 1) { m($0.unrealizedGain) },
+        .computed("cumNet", "累计净总回报", emphasis: true) { money0($0.cumNetReturn) },
+        .computed("cumNetRate", "累计净总回报率") { p($0.cumNetReturnRate) },
+        .computed("periodDays", "报告期") { d($0.periodDays) },
+
+        .section("现金流"),
+        .computed("interest", "利息") { m($0.interest) },
+        .computed("interestYoY", "YoY%", indent: 1) { sp($0.interestYoY) },
+        .manual("interestDom", "境内", indent: 1, .interestDomestic),
+        .manual("interestOvs", "境外", indent: 1, .interestOverseas),
+        .computed("dividend", "股息") { m($0.dividend) },
+        .computed("dividendYoY", "YoY%", indent: 1) { sp($0.dividendYoY) },
+        .manual("dividendDom", "境内", indent: 1, .dividendDomestic),
+        .manual("dividendOvs", "境外", indent: 1, .dividendOverseas),
+        .computed("capitalGain", "资本利得") { m($0.capitalGain) },
+        .computed("capitalGainYoY", "YoY%", indent: 1) { sp($0.capitalGainYoY) },
+        .manual("gainDom", "境内", indent: 1, .capitalGainDomestic),
+        .manual("gainOvs", "境外", indent: 1, .capitalGainOverseas),
+        .manual("taxes", "(红利税、资本利得税)", .taxes),
+        .computed("newInvest", "新投资") { m($0.newInvestment) },
+        .computed("primaryInvest", "一次投资", indent: 1) { m($0.primaryInvestment) },
+        .computed("secondaryInvest", "二次投资", indent: 1) { m($0.secondaryInvestment) },
+        .computed("secondaryPct", "%", indent: 1) { p($0.secondaryShare) },
+        .computed("netReturn", "净总回报", emphasis: true) {
+            ($0.index == 0 && $0.quarterNetReturn == 0) ? "" : money0($0.quarterNetReturn)
+        },
+        .computed("netReturnYoY", "YoY%", indent: 1) { sp($0.quarterNetReturnYoY) },
+        .computed("incomeShare", "(股息+利息)/净总回报", indent: 1) { p($0.incomeShare) },
+        .computed("quarterRate", "%") { p($0.quarterReturnRate) },
+        .computed("annualized", "年化 %") { p($0.annualizedRate) },
+        .computed("mean", "均值", indent: 1) { p($0.meanRate) },
+        .computed("stddev", "标准差", indent: 1) { p($0.stdDev) },
+        .computed("ciPlus", "+ 95% CI", indent: 1) { p($0.ciPlus) },
+        .computed("ciMinus", "- 95% CI", indent: 1) { p($0.ciMinus) },
+    ]
+
+    private var rows: [GridRow] { Self._rows }
+
+    // 行定义里用的轻量格式化助手 (static 上下文).
+    private static func m(_ v: Double?) -> String {
+        guard let v else { return "" }
+        return moneyFmt.string(from: NSNumber(value: v)) ?? ""
     }
-    private func signedMoney(_ v: Double) -> String {
-        (v >= 0 ? "+" : "-") + money(abs(v))
+    private static func money0(_ v: Double) -> String { m(v) }
+    private static func p(_ v: Double?) -> String {
+        guard let v else { return "" }
+        return String(format: "%.2f%%", v * 100)
     }
-    private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
+    private static func sp(_ v: Double?) -> String {
+        guard let v else { return "" }
+        return String(format: "%+.2f%%", v * 100)
+    }
+    private static func d(_ v: Int?) -> String {
+        guard let v else { return "" }
+        return String(v)
+    }
 }
 
-/// 添加/编辑一个收益期间汇总 (能力4 手动录入).
-public struct IncomeSummaryEditorSheet: View {
-    @Bindable var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    let existing: IncomeSummary?
-
-    @State private var period: FinancialPeriod
-    @State private var periodEnd: String
-    @State private var dividends: String
-    @State private var realizedPnl: String
-
-    public init(store: AppStore, existing: IncomeSummary? = nil) {
-        self.store = store
-        self.existing = existing
-        _period = State(initialValue: existing?.period ?? .quarter)
-        _periodEnd = State(initialValue: existing?.periodEnd ?? "")
-        _dividends = State(initialValue: existing.map { String(format: "%g", $0.dividends) } ?? "")
-        _realizedPnl = State(initialValue: existing.map { String(format: "%g", $0.realizedPnl) } ?? "")
-    }
-
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("收益期间（季度）").font(.headline)
-            Text("仅录入季度数据；半年度/年度由季度汇总派生。").font(.caption).foregroundStyle(.secondary)
-            TextField("季度截止日（如 2026-03-31 / 2026-06-30 / 2026-09-30 / 2026-12-31）", text: $periodEnd)
-                .textFieldStyle(.roundedBorder)
-            HStack(spacing: 10) {
-                numField("股息分红 (¥)", $dividends)
-                numField("交易损益 (¥)", $realizedPnl)
-            }
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("保存") { save() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-            }
-        }
-        .padding()
-        .frame(width: 460)
-    }
-
-    private func numField(_ label: String, _ text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            TextField(label, text: text).textFieldStyle(.roundedBorder)
-        }
-    }
-
-    private func save() {
-        let f = IncomeSummary(period: period, periodEnd: periodEnd,
-                             dividends: Double(dividends) ?? 0, realizedPnl: Double(realizedPnl) ?? 0,
-                             source: "manual")
-        store.upsertIncomeSummary(f)
-        dismiss()
-    }
-}
-
-/// 管理 (查看/编辑/删除) 所有收益期间记录.
-public struct IncomeSummaryManageSheet: View {
-    @Bindable var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var editing: IncomeSummary?
-
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("收益期间管理").font(.headline)
-            if store.incomeSummaries.isEmpty {
-                ContentUnavailableView("暂无记录", systemImage: "chart.bar.doc.horizontal",
-                    description: Text("点右上角「添加期间」录入。"))
-            } else {
-                List {
-                    ForEach(store.incomeSummaries.sorted { $0.periodEnd > $1.periodEnd }) { f in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(periodName(f.period) + " · " + f.periodEnd)
-                                    .font(.subheadline).fontWeight(.medium)
-                                Text("股息 " + money(f.dividends) + " · 交易损益 " + signedMoney(f.realizedPnl))
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button { editing = f } label: { Image(systemName: "pencil") }
-                                .buttonStyle(.borderless).help("编辑")
-                            Button(role: .destructive) { store.deleteIncomeSummary(id: f.id ?? 0) } label: {
-                                Image(systemName: "trash")
-                            }.buttonStyle(.borderless).help("删除")
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-            }
-            HStack {
-                Spacer()
-                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding()
-        .frame(width: 520, height: 420)
-        .sheet(item: $editing) { f in
-            IncomeSummaryEditorSheet(store: store, existing: f)
-        }
-    }
-
-    private func periodName(_ p: FinancialPeriod) -> String {
-        switch p {
-        case .quarter: return "季度"
-        case .halfYear: return "半年"
-        case .annual: return "年度"
-        }
-    }
-    private func money(_ v: Double) -> String {
-        let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0
-        return f.string(from: NSNumber(value: v)) ?? "0"
-    }
-    private func signedMoney(_ v: Double) -> String {
-        (v >= 0 ? "+" : "-") + money(abs(v))
-    }
+/// 网格单元格坐标: 季度列 × 手动字段.
+private struct CellKey: Hashable {
+    let periodEnd: String
+    let field: QuarterlyField
 }

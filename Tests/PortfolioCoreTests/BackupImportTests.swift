@@ -115,6 +115,33 @@ final class BackupImportTests: XCTestCase {
         XCTAssertEqual(try db.fetchAssets().map(\.key), ["B"])
     }
 
+    /// quarterly_reports (财务分析重做) must survive the export → import roundtrip,
+    /// including NULL manual fields (not yet filled quarters).
+    func testExportImportRoundtripQuarterlyReports() throws {
+        let db = try makeDB("q-export.db")
+        try db.upsertQuarterlyReports([
+            QuarterlyReport(periodEnd: "2026-03-31", marketValue: 10000, totalCost: 10000),
+            QuarterlyReport(periodEnd: "2026-06-30", marketValue: 10500, totalCost: 10200,
+                            interestDomestic: 100, taxes: 6),
+        ])
+        let jsonURL = tmpDir.appendingPathComponent("q-backup.json")
+        try BackupManager(db: db, backupDir: tmpDir).exportJSON(to: jsonURL)
+
+        let restored = try makeDB("q-restore.db")
+        try BackupManager(db: restored, backupDir: tmpDir).importJSON(from: jsonURL)
+        let rows = try restored.fetchQuarterlyReports()
+        XCTAssertEqual(rows.map(\.periodEnd), ["2026-03-31", "2026-06-30"])
+        XCTAssertEqual(rows[0].marketValue ?? 0, 10000, accuracy: 1e-9)
+        XCTAssertNil(rows[0].interestDomestic, "未填写字段必须保持 NULL")
+        XCTAssertEqual(rows[1].interestDomestic ?? 0, 100, accuracy: 1e-9)
+        XCTAssertEqual(rows[1].taxes ?? 0, 6, accuracy: 1e-9)
+
+        // 派生链在恢复后的库上照常工作.
+        let computed = QuarterlyMetrics.compute(rows)
+        XCTAssertEqual(computed[1].periodDays, 90)
+        XCTAssertEqual(computed[1].cumInterest, 100)
+    }
+
     /// Optional manual verification against a real user export:
     /// PM_BACKUP_JSON=~/Downloads/PortfolioBackup.json swift test --filter RealUser
     func testImportRealUserBackupFile() throws {

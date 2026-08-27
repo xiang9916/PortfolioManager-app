@@ -358,6 +358,10 @@ public final class Repository {
         try db.fetchIncomeSummaries()
     }
 
+    public func fetchQuarterlyReports() throws -> [QuarterlyReport] {
+        try db.fetchQuarterlyReports()
+    }
+
     public func fetchFinancialAnalysis() throws -> FinancialAnalysis {
         let ctx = try loadContext()
         let originalPrincipal = ctx.holdings.reduce(0.0) { $0 + $1.costBasis * (ctx.fx[$1.currency] ?? 1.0) }
