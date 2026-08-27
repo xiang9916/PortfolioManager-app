@@ -1,11 +1,12 @@
 import SwiftUI
 
-enum MainTab: Hashable { case overview, perspective, analysis }
+enum MainTab: String, Hashable { case overview, perspective, analysis }
 
 /// App shell: 3 tabs (资产管理 / 资产透视 / 财务报表) + bottom-right 运行/设置 pill.
 struct ContentView: View {
     @State private var store: AppStore? = nil
-    @State private var selectedTab: MainTab = .overview
+    /// 记住上次停留的标签页 (重新打开时回到原处).
+    @AppStorage("main.selectedTab") private var selectedTab: MainTab = .overview
 
     var body: some View {
         Group {

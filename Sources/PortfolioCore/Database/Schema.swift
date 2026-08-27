@@ -2,7 +2,7 @@ import Foundation
 
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 6
+    public static let version: Int = 7
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -203,6 +203,28 @@ public enum Schema {
             key TEXT PRIMARY KEY,
             value REAL NOT NULL,
             as_of_date TEXT NOT NULL,
+            source TEXT
+        );
+        """,
+        ]),
+        (7, [
+        // 能力4 重做: quarterly_reports — 逐季度财务分析底稿 (每季一列).
+        // 9 个手动字段 (总市值/总成本/境内境外利息股息资本利得/红利税资本利得税),
+        // 其余行 (本金/累计/新投资/净总回报/年化/均值/95%CI...) 由 QuarterlyMetrics 派生.
+        // 列可空 = 未填写; 旧 income_periods 表保留以兼容旧备份.
+        """
+        CREATE TABLE IF NOT EXISTS quarterly_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_end TEXT NOT NULL UNIQUE,
+            market_value REAL,
+            total_cost REAL,
+            interest_domestic REAL,
+            interest_overseas REAL,
+            dividend_domestic REAL,
+            dividend_overseas REAL,
+            capital_gain_domestic REAL,
+            capital_gain_overseas REAL,
+            taxes REAL,
             source TEXT
         );
         """,

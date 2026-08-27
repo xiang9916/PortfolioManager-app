@@ -48,6 +48,7 @@ public final class BackupManager {
         out["holdings"] = try queryRows("SELECT asset_key, quantity, cost_basis, currency, as_of_date FROM holdings ORDER BY asset_key")
         out["snapshots"] = try queryRows("SELECT date, total_value, domestic_value, overseas_value FROM snapshots ORDER BY date")
         out["income_periods"] = try queryRows("SELECT id, period, period_end, dividends, realized_pnl, source FROM income_periods ORDER BY period_end")
+        out["quarterly_reports"] = try queryRows("SELECT id, period_end, market_value, total_cost, interest_domestic, interest_overseas, dividend_domestic, dividend_overseas, capital_gain_domestic, capital_gain_overseas, taxes, source FROM quarterly_reports ORDER BY period_end")
         out["fx_rates"] = try queryRows("SELECT currency, rate_to_cny, as_of_date, source FROM fx_rates ORDER BY currency")
         out["quotes"] = try queryRows("SELECT asset_key, price, date, currency, source FROM quotes ORDER BY asset_key")
         let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
@@ -139,6 +140,27 @@ public final class BackupManager {
                                                source: asString(r["source"])))
             }
             if !summaries.isEmpty { try db.upsertIncomeSummaries(summaries) }
+        }
+
+        if let rows = obj["quarterly_reports"] as? [[String: Any]] {
+            var reports: [QuarterlyReport] = []
+            for r in rows {
+                guard let periodEnd = asString(r["period_end"]) else { continue }
+                reports.append(QuarterlyReport(
+                    id: nil,
+                    periodEnd: periodEnd,
+                    marketValue: asDouble(r["market_value"]),
+                    totalCost: asDouble(r["total_cost"]),
+                    interestDomestic: asDouble(r["interest_domestic"]),
+                    interestOverseas: asDouble(r["interest_overseas"]),
+                    dividendDomestic: asDouble(r["dividend_domestic"]),
+                    dividendOverseas: asDouble(r["dividend_overseas"]),
+                    capitalGainDomestic: asDouble(r["capital_gain_domestic"]),
+                    capitalGainOverseas: asDouble(r["capital_gain_overseas"]),
+                    taxes: asDouble(r["taxes"]),
+                    source: asString(r["source"])))
+            }
+            if !reports.isEmpty { try db.upsertQuarterlyReports(reports) }
         }
 
         if let rows = obj["fx_rates"] as? [[String: Any]] {

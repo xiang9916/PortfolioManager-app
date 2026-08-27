@@ -453,6 +453,93 @@ public final class Database {
         try exec("DELETE FROM income_periods WHERE id = " + String(id))
     }
 
+    // MARK: 能力4 — quarterly_reports (逐季度财务分析底稿)
+
+    private static let quarterlyColumns = ["period_end", "market_value", "total_cost",
+        "interest_domestic", "interest_overseas", "dividend_domestic", "dividend_overseas",
+        "capital_gain_domestic", "capital_gain_overseas", "taxes", "source"]
+
+    public func fetchQuarterlyReports() throws -> [QuarterlyReport] {
+        let sql = "SELECT id, period_end, market_value, total_cost, interest_domestic, interest_overseas, dividend_domestic, dividend_overseas, capital_gain_domestic, capital_gain_overseas, taxes, source FROM quarterly_reports ORDER BY period_end"
+        let stmt = try prepared(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [QuarterlyReport] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            func col(_ i: Int32) -> Double? {
+                sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, i)
+            }
+            out.append(QuarterlyReport(
+                id: sqlite3_column_int64(stmt, 0),
+                periodEnd: String(cString: sqlite3_column_text(stmt, 1)),
+                marketValue: col(2),
+                totalCost: col(3),
+                interestDomestic: col(4),
+                interestOverseas: col(5),
+                dividendDomestic: col(6),
+                dividendOverseas: col(7),
+                capitalGainDomestic: col(8),
+                capitalGainOverseas: col(9),
+                taxes: col(10),
+                source: colText(stmt, 11)))
+        }
+        return out
+    }
+
+    /// Upsert by period_end (一列一季, 手动字段录入后可反复修改).
+    public func upsertQuarterlyReports(_ items: [QuarterlyReport]) throws {
+        try inTransaction {
+            let stmt = try prepared("""
+                INSERT INTO quarterly_reports(period_end, market_value, total_cost, interest_domestic,
+                    interest_overseas, dividend_domestic, dividend_overseas, capital_gain_domestic,
+                    capital_gain_overseas, taxes, source)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(period_end) DO UPDATE SET
+                    market_value=excluded.market_value, total_cost=excluded.total_cost,
+                    interest_domestic=excluded.interest_domestic, interest_overseas=excluded.interest_overseas,
+                    dividend_domestic=excluded.dividend_domestic, dividend_overseas=excluded.dividend_overseas,
+                    capital_gain_domestic=excluded.capital_gain_domestic, capital_gain_overseas=excluded.capital_gain_overseas,
+                    taxes=excluded.taxes, source=excluded.source
+                """)
+            defer { sqlite3_finalize(stmt) }
+            for q in items {
+                bindText(stmt, 1, q.periodEnd)
+                bindOptDouble(stmt, 2, q.marketValue)
+                bindOptDouble(stmt, 3, q.totalCost)
+                bindOptDouble(stmt, 4, q.interestDomestic)
+                bindOptDouble(stmt, 5, q.interestOverseas)
+                bindOptDouble(stmt, 6, q.dividendDomestic)
+                bindOptDouble(stmt, 7, q.dividendOverseas)
+                bindOptDouble(stmt, 8, q.capitalGainDomestic)
+                bindOptDouble(stmt, 9, q.capitalGainOverseas)
+                bindOptDouble(stmt, 10, q.taxes)
+                bindText(stmt, 11, q.source)
+                try stepAndReset(stmt)
+            }
+        }
+    }
+
+    public func deleteQuarterlyReport(periodEnd: String) throws {
+        let stmt = try prepared("DELETE FROM quarterly_reports WHERE period_end = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, periodEnd)
+        try stepAndReset(stmt)
+    }
+
+    /// Rename a quarter column (change its period_end); no-op conflict if target exists.
+    public func renameQuarterlyReport(from oldEnd: String, to newEnd: String) throws {
+        let stmt = try prepared("UPDATE quarterly_reports SET period_end = ? WHERE period_end = ? AND NOT EXISTS(SELECT 1 FROM quarterly_reports WHERE period_end = ?)")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, newEnd)
+        bindText(stmt, 2, oldEnd)
+        bindText(stmt, 3, newEnd)
+        try stepAndReset(stmt)
+    }
+
+    /// Bind an optional Double as NULL when nil (manual field not yet filled).
+    private func bindOptDouble(_ stmt: OpaquePointer?, _ idx: Int32, _ v: Double?) {
+        if let v { sqlite3_bind_double(stmt, idx, v) } else { sqlite3_bind_null(stmt, idx) }
+    }
+
     @discardableResult
     public func insertRun(_ run: OptimizationRun) throws -> Int64 {
         let stmt = try prepared("INSERT INTO optimization_runs(started_at, finished_at, status, params_hash, result_json, log_path) VALUES(?,?,?,?,?,?)")
