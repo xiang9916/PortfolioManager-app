@@ -42,3 +42,16 @@ pm-cli financials [db]                                # 财务报表
 pm-cli report [db] [out.pdf]                          # 生成 PDF 报告
 pm-cli backup|list|restore|export|import-json|export-csv|daily-backup  # 数据安全
 ```
+
+## License（GPL-3.0）
+
+Copyright (C) 2025 xiang9916
+
+本程序为自由软件：你可以按照 Free Software Foundation 发布的
+**GNU General Public License 第 3 版**的条款将其再分发和/或修改。
+本程序不附带任何担保，适用条款见许可证第 15、16 条。
+
+许可证全文见仓库根目录 [LICENSE](LICENSE)（官方版本：<https://www.gnu.org/licenses/gpl-3.0.txt>）。
+
+打包产物中随附的第三方组件（例如 `Optimizer/.venv` 内的 Python 库）
+归其原作者所有，仍适用各自的原始开源许可证。
