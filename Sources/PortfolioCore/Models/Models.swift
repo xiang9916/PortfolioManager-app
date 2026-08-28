@@ -218,11 +218,23 @@ public struct Benchmark: Codable, Hashable {
     public let weights: [String: Double]?
 }
 
+/// 新标的测试: 单个测试标的的估算参数 (Python 侧 test_assets 透传)。
+public struct TestAssetEstimate: Codable, Hashable {
+    public let key: String
+    public let ticker: String
+    public let source: String
+    public let pool: String
+    public let mu: Double
+    public let vol: Double
+    public let nDays: Int
+}
+
 public struct OptimizationResult: Codable {
     public let generatedAt: String?
     public let portfolio: PortfolioSummary
     public let assets: [OptimizedAsset]
     public let benchmark: Benchmark?
+    public let testAssets: [TestAssetEstimate]?
     public let sourceDetail: String?
 }
 
