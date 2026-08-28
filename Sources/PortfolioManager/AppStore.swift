@@ -115,6 +115,13 @@ public final class AppStore {
     public var lastOptimization: OptimizationResult?
     public var optimizeError: String?
 
+    // 能力2 新标的测试 (临时标的重跑优化; 结果独立于 lastOptimization, 不触碰资产管理数据)
+    public var isTestOptimizing = false
+    public var testOptimization: OptimizationResult?
+    public var testOptimizeError: String?
+    public var testSteps: [OptimizationStep] = []
+    public var testTickersUsed: [String] = []
+
     public var statusMessage: String?
     public var lastUpdated: String?
 
@@ -704,7 +711,7 @@ public final class AppStore {
     }
 
     public func runOptimization() {
-        guard !isOptimizing else { return }
+        guard !isOptimizing, !isTestOptimizing else { return }
         let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: extract.path) else {
             optimizeError = "未找到提取文件：\(extract.path)。请先导入 .numbers 数据。"
@@ -747,6 +754,56 @@ public final class AppStore {
         pollTask = nil
         // note: the subprocess is not killed here; it finishes on its own and is finalized lazily
         isOptimizing = false
+    }
+
+    // MARK: 能力2 — 新标的测试
+
+    /// 临时加入标的重跑一次优化。结果写入 testOptimization（「测试结果」弹窗），
+    /// 不影响 lastOptimization 与资产管理数据; 仅 optimization_runs 留痕
+    /// (paramsDesc 带 test=...)。与普通优化互斥。
+    public func runTestOptimization(tickers: [String]) {
+        guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }
+        let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
+        guard FileManager.default.fileExists(atPath: extract.path) else {
+            testOptimizeError = "未找到提取文件：\(extract.path)。请先导入 .numbers 数据。"
+            return
+        }
+        isTestOptimizing = true
+        testSteps = []
+        testOptimizeError = nil
+        testOptimization = nil
+        testTickersUsed = tickers
+
+        do {
+            _ = try optimizer.start(extractJSON: extract, targetReturn: targetReturn,
+                                    testTickers: tickers)
+            pollTask = Task { [weak self] in
+                guard let self else { return }
+                while self.optimizer.isRunning {
+                    let fresh = self.optimizer.pollSteps()
+                    if !fresh.isEmpty { self.testSteps.append(contentsOf: fresh) }
+                    try? await Task.sleep(for: .milliseconds(300))
+                }
+                do {
+                    let out = try self.optimizer.finalize()
+                    self.testOptimization = out.result
+                    self.testOptimizeError = out.error
+                    if !out.steps.isEmpty { self.testSteps = out.steps }
+                } catch {
+                    self.testOptimizeError = String(describing: error)
+                }
+                self.isTestOptimizing = false
+            }
+        } catch {
+            testOptimizeError = String(describing: error)
+            isTestOptimizing = false
+        }
+    }
+
+    public func cancelTestOptimization() {
+        pollTask?.cancel()
+        pollTask = nil
+        isTestOptimizing = false
     }
 
     // MARK: 能力3 — PDF export

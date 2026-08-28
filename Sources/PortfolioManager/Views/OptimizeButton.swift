@@ -30,7 +30,7 @@ public struct OptimizeButton: View {
         }
         .sheet(isPresented: $showResult) {
             if let r = store.lastOptimization {
-                OptimizationResultView(result: r)
+                OptimizationResultView(result: r, store: store)
             }
         }
         .onChange(of: store.isOptimizing) { old, new in

@@ -46,6 +46,7 @@ from fund_pipeline import (
     ensure_work_dir,
     filter_available_assets,
 )
+from test_tickers import parse_test_tickers, resolve_test_assets
 
 
 
@@ -486,6 +487,7 @@ def build_result_summary(output, hsbc_pool=None):
         },
         "assets": assets,
         "benchmark": _build_benchmark(output, final),
+        "test_assets": (output.get("test") or {}).get("assets"),
         "source_detail": None,
     }
     return summary
@@ -557,6 +559,14 @@ def main():
         type=float,
         default=None,
         help="目标预期收益率覆盖 (如 0.20=20%%)；缺省用 params.TARGET_RETURN",
+    )
+    parser.add_argument(
+        "--test-tickers",
+        dest="test_tickers",
+        default=None,
+        help="逗号分隔的临时测试标的 (如 AAPL,0700.HK,510300)；"
+             "以 100%% 历史年化估算 μ、历史波动估算 σ、与宽基代理序列估算相关性,"
+             "作为新增资产参与优化 (T_ 前缀); 6 位纯数字按境内池处理。",
     )
     parser.add_argument(
         "--work-dir",
@@ -682,10 +692,45 @@ def main():
         )
         sys.exit(1)
 
+    # ---- 新标的测试: 临时标的作为新增资产注入第一阶段 (在可投性过滤之后, 不受其约束) ----
+    test_estimates, test_skipped = [], []
+    if args.test_tickers:
+        test_assets, test_corr_pairs, test_skipped, test_estimates = resolve_test_assets(
+            args.test_tickers,
+            work_dir,
+            existing_keys={a["key"] for a in assets},
+            internal_keys=set(US_INTERNAL.keys()),
+            log=lambda msg, level="info": log_step(
+                "test_tickers", msg, level=level, log_path=args.log_path),
+        )
+        for t, reason in test_skipped:
+            warnings.append(f"测试标的 {t} 已跳过: {reason}")
+        if test_assets:
+            assets = assets + test_assets
+            for a in test_assets:
+                if a["pool"] == "domestic":
+                    warnings.append(
+                        f"测试标的 {a['name']} 按境内池约束参与优化 (what-if 口径, "
+                        f"不经汇丰在售校验, 也不出现在境内基金执行清单)。")
+            log_step(
+                "test_tickers",
+                f"新增 {len(test_assets)} 个测试资产: "
+                + ", ".join(a["key"] for a in test_assets),
+                log_path=args.log_path)
+        else:
+            detail = "; ".join(f"{t}: {r}" for t, r in test_skipped) or "无有效标的"
+            print(json.dumps(
+                {"error": "所有测试标的均不可用", "detail": detail, "warnings": warnings},
+                ensure_ascii=False))
+            sys.exit(3)
+
     keys = [a["key"] for a in assets]
     mu = np.array([a["mu"] for a in assets])
     vols = np.array([a["vol"] for a in assets])
-    cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], BROAD_CORR)
+    cov = build_broad_cov(
+        [{"key": a["key"], "vol": a["vol"]} for a in assets],
+        {**BROAD_CORR, **(test_corr_pairs if args.test_tickers else {})},
+    )
     dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
     ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
 
@@ -806,6 +851,13 @@ def main():
         "final": final,
         "warnings": warnings,
     }
+
+    if args.test_tickers:
+        output["test"] = {
+            "tickers": parse_test_tickers(args.test_tickers),
+            "assets": test_estimates,
+            "skipped": [{"ticker": t, "reason": r} for t, r in test_skipped],
+        }
 
     if internal is not None:
         x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal

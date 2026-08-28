@@ -186,15 +186,21 @@ if args.count >= 2 && args[1] == "optimize" {
     let extractJSON = args.count >= 3 ? args[2] : "tmp/extract_app.json"
     let dbPath = "tmp/portfolio.db"
     var totalAssets: Double? = nil
+    var testTickers: [String]? = nil
     for i in 2..<args.count where args[i] == "--total-assets" && i + 1 < args.count {
         totalAssets = Double(args[i + 1])
+    }
+    for i in 2..<args.count where args[i] == "--test-tickers" && i + 1 < args.count {
+        testTickers = args[i + 1].split(whereSeparator: { ",，;； \t".contains($0) })
+            .map { $0.uppercased() }
     }
     do {
         let db = try Database(path: dbPath)
         let svc = OptimizationService(db: db, sidecar: sidecar(), logsDir: URL(fileURLWithPath: "tmp/optimizer_logs"))
         // CLI 一次性运行: 优化结束即删除联网管线临时文件 (App 内则等关闭优化器再删)。
         // 注意 exit() 不执行 defer, 必须在每个退出点显式清理。
-        let out = try svc.runSync(extractJSON: URL(fileURLWithPath: extractJSON), totalAssets: totalAssets)
+        let out = try svc.runSync(extractJSON: URL(fileURLWithPath: extractJSON), totalAssets: totalAssets,
+                                  testTickers: testTickers)
         OptimizationService.cleanupWorkDir()
         if let r = out.result {
             print("优化完成 (run \(out.runID)):")
@@ -202,6 +208,13 @@ if args.count >= 2 && args[1] == "optimize" {
             print("  波动: \(String(format: "%.2f%%", r.portfolio.volatility * 100))")
             print("  夏普: \(String(format: "%.3f", r.portfolio.sharpe))")
             for a in r.assets { print(String(format: "  %-8@ %-32@ %6.2f%%", a.key, a.name, a.weight * 100)) }
+            if let ta = r.testAssets, !ta.isEmpty {
+                print("  测试标的估算参数:")
+                for e in ta {
+                    print(String(format: "    %@ μ=%.2f%% σ=%.2f%% n=%d (%@/%@)",
+                                 e.ticker, e.mu * 100, e.vol * 100, e.nDays, e.source, e.pool))
+                }
+            }
             print("步骤日志: \(out.logPath)")
         } else {
             FileHandle.standardError.write(("优化失败: " + (out.error ?? "未知")).data(using: .utf8)!)

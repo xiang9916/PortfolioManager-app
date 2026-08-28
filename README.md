@@ -37,6 +37,7 @@ pm-cli extract [投资组合情况.numbers]                 # 从 .numbers 提�
 pm-cli import [db] [extract.json]                     # 导入持仓到 SQLite
 pm-cli refresh [db] [keys...]                         # 抓行情落库
 pm-cli optimize [extract.json] [--total-assets N]     # 运行优化器
+pm-cli optimize [extract.json] --test-tickers NFLX,0700.HK  # 新标的测试: 临时加入标的重跑优化 (μ=100%历史年化)
 pm-cli overview [db]                                  # 资产分布/历史表现
 pm-cli financials [db]                                # 财务报表
 pm-cli report [db] [out.pdf]                          # 生成 PDF 报告

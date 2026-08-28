@@ -68,7 +68,8 @@ public final class OptimizationService {
     /// 中间产物写入共享临时目录 (cleanupWorkDir 在优化器关闭时删除)。
     @discardableResult
     public func start(extractJSON: URL, totalAssets: Double? = nil,
-                      targetReturn: Double = 0.10) throws -> Int64 {
+                      targetReturn: Double = 0.10,
+                      testTickers: [String]? = nil) throws -> Int64 {
         guard process == nil || process?.isRunning == false else {
             throw SidecarError.nonZeroExit(code: -1, stderr: "an optimization is already running")
         }
@@ -92,6 +93,7 @@ public final class OptimizationService {
         // capture run params hash
         var paramsDesc = "target=\(targetReturn);extract=\(extractJSON.lastPathComponent)"
         if let t = totalAssets { paramsDesc += ";total=\(t)" }
+        if let tt = testTickers, !tt.isEmpty { paramsDesc += ";test=\(tt.joined(separator: ","))" }
         try db.updateRun(id: id, finishedAt: nil, status: "running", resultJSON: nil)
 
         var args = [
@@ -106,6 +108,7 @@ public final class OptimizationService {
             "--target-return", String(targetReturn),
         ]
         if let t = totalAssets { args += ["--total-assets", String(t)] }
+        if let tt = testTickers, !tt.isEmpty { args += ["--test-tickers", tt.joined(separator: ",")] }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sidecar.interpreterPath)
@@ -190,9 +193,10 @@ public final class OptimizationService {
 
     /// Convenience: run synchronously to completion (used by pm-cli).
     public func runSync(extractJSON: URL, totalAssets: Double? = nil,
-                        targetReturn: Double = 0.10) throws -> OptimizationOutcome {
+                        targetReturn: Double = 0.10,
+                        testTickers: [String]? = nil) throws -> OptimizationOutcome {
         _ = try start(extractJSON: extractJSON, totalAssets: totalAssets,
-                      targetReturn: targetReturn)
+                      targetReturn: targetReturn, testTickers: testTickers)
         while isRunning {
             _ = pollSteps()
             Thread.sleep(forTimeInterval: 0.3)
