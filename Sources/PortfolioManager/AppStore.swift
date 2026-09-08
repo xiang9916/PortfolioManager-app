@@ -806,30 +806,18 @@ public final class AppStore {
         isTestOptimizing = false
     }
 
-    // MARK: 能力3 — PDF export
-
-    public func exportPDF(to url: URL) throws {
-        guard let alloc = allocation, let summary = performanceSummary else {
-            throw PDFError.context
-        }
-        try PDFExporter.writeReport(
-            to: url,
-            allocation: alloc,
-            performance: summary,
-            rows: perspectives,
-            generatedAt: DateFormatters.nowISO())
-    }
-
     // MARK: 能力3 — 备份数据导入/导出 (可移植 JSON)
 
     public func exportBackup(to url: URL) throws {
+        // 财务分析字段是防抖落盘 (0.6s), 导出前先 flush, 避免刚录入的数据丢在内存里.
+        flushQuarterlyPersist()
         let bm = BackupManager(db: db, backupDir: AppPaths.backupsURL())
         try bm.exportJSON(to: url)
     }
 
-    public func importBackup(from url: URL) async throws {
+    public func importBackup(from url: URL, clearAssets: Bool, clearFinancials: Bool) async throws {
         let bm = BackupManager(db: db, backupDir: AppPaths.backupsURL())
-        try bm.importJSON(from: url)
+        try bm.importJSON(from: url, clearAssets: clearAssets, clearFinancials: clearFinancials)
         loadAll()
         await startupRefresh()
     }

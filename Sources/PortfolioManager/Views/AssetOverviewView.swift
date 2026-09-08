@@ -8,6 +8,13 @@ import PortfolioCore
 public struct AssetOverviewView: View {
     @Bindable var store: AppStore
 
+    /// 待导入的备份文件 (选中后先弹确认, 确认后才真正导入).
+    @State private var pendingImportURL: URL?
+    /// 导入前是否清空旧资产数据 (默认关 = 合并).
+    @State private var clearAssetsOnImport = false
+    /// 导入前是否清空旧财务数据 (默认关 = 合并).
+    @State private var clearFinancialsOnImport = false
+
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -37,13 +44,6 @@ public struct AssetOverviewView: View {
                 .help("自动抓取公开行情数据（能力1）")
 
                 Button {
-                    exportPDF()
-                } label: {
-                    Label("导出 PDF", systemImage: "doc.richtext")
-                }
-                .help("导出投资组合报告（能力3）")
-
-                Button {
                     exportBackup()
                 } label: {
                     Label("导出备份", systemImage: "square.and.arrow.up")
@@ -67,6 +67,40 @@ public struct AssetOverviewView: View {
                     .padding(.top, 8)
             }
         }
+        .sheet(isPresented: Binding(
+            get: { pendingImportURL != nil },
+            set: { if !$0 { pendingImportURL = nil } }
+        )) {
+            importOptionsSheet
+        }
+    }
+
+    /// 导入确认面板: 勾选是否清空旧资产 / 旧财务数据后再导入.
+    private var importOptionsSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("导入备份", systemImage: "square.and.arrow.down")
+                .font(.headline)
+            Text("备份文件: \(pendingImportURL?.lastPathComponent ?? "")")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Divider()
+            Toggle("清空旧的资产数据", isOn: $clearAssetsOnImport)
+                .help("持仓 / 历史价格 / 报价 / 市值快照 / 标的 / 汇率将先被清空，再写入备份内容")
+            Toggle("清空旧的财务数据", isOn: $clearFinancialsOnImport)
+                .help("财务分析逐季度底稿与收益期间将先被清空，再写入备份内容")
+            Text("勾选对应项 = 先清空本机该类数据，使导入后与备份完全一致；\n不勾选 = 只合并备份中的条目，保留本机其余数据。")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            HStack {
+                Spacer()
+                Button("取消") { pendingImportURL = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("导入") { performImport() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
     }
 
     // MARK: summary cards
@@ -203,21 +237,6 @@ public struct AssetOverviewView: View {
         String(format: "%.2f%%", v * 100)
     }
 
-    private func exportPDF() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType.pdf]
-        panel.nameFieldStringValue = "PortfolioReport.pdf"
-        panel.begin { resp in
-            guard resp == .OK, let url = panel.url else { return }
-            do {
-                try store.exportPDF(to: url)
-                store.statusMessage = "已导出: \(url.lastPathComponent)"
-            } catch {
-                store.statusMessage = "导出失败: \(error)"
-            }
-        }
-    }
-
     private func exportBackup() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType.json]
@@ -239,13 +258,23 @@ public struct AssetOverviewView: View {
         panel.allowsMultipleSelection = false
         panel.begin { resp in
             guard resp == .OK, let url = panel.url else { return }
-            Task {
-                do {
-                    try await store.importBackup(from: url)
-                    store.statusMessage = "已导入备份: \(url.lastPathComponent)"
-                } catch {
-                    store.statusMessage = "导入备份失败: \(error)"
-                }
+            // 先弹确认框: 用户选择是否清空旧资产/旧财务数据后再导入.
+            pendingImportURL = url
+        }
+    }
+
+    /// 按用户在确认框中的选择真正执行导入.
+    private func performImport() {
+        guard let url = pendingImportURL else { return }
+        let clearAssets = clearAssetsOnImport
+        let clearFinancials = clearFinancialsOnImport
+        pendingImportURL = nil
+        Task {
+            do {
+                try await store.importBackup(from: url, clearAssets: clearAssets, clearFinancials: clearFinancials)
+                store.statusMessage = "已导入备份: \(url.lastPathComponent)"
+            } catch {
+                store.statusMessage = "导入备份失败: \(error)"
             }
         }
     }
