@@ -83,6 +83,10 @@ if [ "${MAKE_DMG}" = "1" ]; then
   mkdir -p "${STAGE}"
   cp -R "${BUNDLE}" "${STAGE}/"
   ln -s /Applications "${STAGE}/Applications"
+  # 一键安装脚本: 在 DMG 里双击安装并清除隔离标记，免去"仍要打开"。
+  INSTALLER="${STAGE}/一键安装.command"
+  cp "scripts/install_dmg.sh" "${INSTALLER}"
+  chmod +x "${INSTALLER}"
   VOLNAME="投资组合管家 ${VERSION}"
   # Preferred: compressed UDZO in one step. Fails in some sandboxes
   # (newfs_apfs: Operation not permitted) -> fall back to makehybrid
