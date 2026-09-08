@@ -2,7 +2,7 @@ import SwiftUI
 import PortfolioCore
 
 /// 能力4 (重做): 财务分析 — 结构 1:1 对齐 投资组合情况(模拟数据).xlsx.
-/// 顶部: 统计图预留区 (暂不绘制); 下方: 逐季度数据网格, 一列 = 一个季度.
+/// 顶部: 统计图面板 (FinancialChartPanel, 5 张图分段切换); 下方: 逐季度数据网格, 一列 = 一个季度.
 /// 9 个手动字段 (总市值 / 总成本 / 境内·境外利息 / 股息 / 资本利得 / (红利税、资本利得税))
 /// 在网格内联编辑, 录入后仍可修改; 其余行全部由 QuarterlyMetrics 公式链自动派生.
 public struct FinancialAnalysisView: View {
@@ -20,7 +20,7 @@ public struct FinancialAnalysisView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                chartPlaceholder
+                FinancialChartPanel(columns: columns)
                 quarterlyCard
             }
             .padding()
@@ -38,29 +38,6 @@ public struct FinancialAnalysisView: View {
 
     /// 派生列 (按季末升序).
     private var columns: [QuarterComputed] { QuarterlyMetrics.compute(store.quarterlyReports) }
-
-    // MARK: - 统计图预留区
-
-    private var chartPlaceholder: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text("统计图展示区")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-            Text("预留 · 后续版本将在此绘制累计回报 / 年化收益等统计图")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, minHeight: 210)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [7, 5]))
-                .foregroundStyle(.quaternary)
-        )
-    }
 
     // MARK: - 逐季度数据区
 
