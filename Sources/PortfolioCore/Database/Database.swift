@@ -232,6 +232,27 @@ public final class Database {
         }
     }
 
+    /// 清空全部资产域数据 (持仓 / 历史价格 / 最新报价 / 市值快照 / 标的 / 汇率),
+    /// 用于「导入备份」前可选择的重置, 使库内资产数据与备份文件完全一致.
+    /// 汇率 (fx_rates) 随资产一并清空: 备份 JSON 含汇率, 不清则残留旧汇率产生 merge 不一致.
+    public func clearAssetsData() throws {
+        try inTransaction {
+            for t in ["holdings", "prices", "quotes", "snapshots", "assets", "fx_rates"] {
+                try exec("DELETE FROM " + t)
+            }
+        }
+    }
+
+    /// 清空全部财务分析域数据 (逐季度底稿 + 旧版收益期间表),
+    /// 用于「导入备份」前可选择的重置.
+    public func clearFinancialData() throws {
+        try inTransaction {
+            for t in ["quarterly_reports", "income_periods"] {
+                try exec("DELETE FROM " + t)
+            }
+        }
+    }
+
     public func upsertFxRates(_ rates: [FxRate]) throws {
         try inTransaction {
             let stmt = try prepared("INSERT OR REPLACE INTO fx_rates(currency, rate_to_cny, as_of_date, source) VALUES(?,?,?,?)")

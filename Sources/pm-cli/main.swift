@@ -150,8 +150,11 @@ if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "r
             try bm.exportJSON(to: out)
             print("已导出: " + out.path)
         case "import-json":
-            guard args.count >= 4 else { print("用法: pm-cli import-json <db> <export.json>"); exit(1) }
-            try bm.importJSON(from: URL(fileURLWithPath: args[3]))
+            guard args.count >= 4 else { print("用法: pm-cli import-json <db> <export.json> [--clear-assets] [--clear-financials]"); exit(1) }
+            let clearAssets = args.contains("--clear-assets")
+            let clearFinancials = args.contains("--clear-financials")
+            try bm.importJSON(from: URL(fileURLWithPath: args[3]),
+                              clearAssets: clearAssets, clearFinancials: clearFinancials)
             print("已导入: " + args[3])
         case "export-csv":
             let csv = URL(fileURLWithPath: args.count >= 4 ? args[3] : "tmp/holdings.csv")
@@ -271,24 +274,6 @@ if args.count >= 2 && args[1] == "financials" {
     }
 }
 
-if args.count >= 2 && args[1] == "report" {
-    let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
-    let outPath = args.count >= 4 ? args[3] : "tmp/report.pdf"
-    do {
-        let db = try Database(path: dbPath)
-        let repo = Repository(db: db)
-        let alloc = try repo.fetchAllocation()
-        let perf = try repo.fetchPerformance()
-        let rows = try repo.fetchAssetPerspectives()
-        try PDFExporter.writeReport(to: URL(fileURLWithPath: outPath), allocation: alloc, performance: perf.summary, rows: rows, generatedAt: ISO8601DateFormatter().string(from: Date()))
-        print("已生成报告: \(outPath)")
-        exit(0)
-    } catch {
-        FileHandle.standardError.write(("report 失败: " + String(describing: error)).data(using: .utf8)!)
-        exit(1)
-    }
-}
-
 print("用法:")
 print("  pm-cli summarize <portfolio_result.json>")
 print("  pm-cli extract [投资组合情况.numbers]")
@@ -296,9 +281,8 @@ print("  pm-cli fetch <yahoo|fund> [symbol]")
 print("  pm-cli optimize [extract.json] [--total-assets N]")
 print("  pm-cli overview [db]")
 print("  pm-cli financials [db]")
-print("  pm-cli report [db] [out.pdf]")
 print("  pm-cli backup [db] / list [db] / restore <db> <backup.db>")
-print("  pm-cli export [db] [out.json] / import-json <db> <export.json>")
+print("  pm-cli export [db] [out.json] / import-json <db> <export.json> [--clear-assets] [--clear-financials]")
 print("  pm-cli export-csv [db] [out.csv] / daily-backup [db]")
 print("  pm-cli --self-test")
 exit(1)

@@ -80,8 +80,15 @@ public final class BackupManager {
         return rows
     }
 
-    /// Import JSON previously written by `exportJSON`. Upserts assets / holdings / snapshots.
-    public func importJSON(from url: URL) throws {
+    /// Import JSON previously written by `exportJSON`.
+    /// Upserts assets / holdings / snapshots.
+    /// - Parameters:
+    ///   - clearAssets: 先清空现有资产域数据 (持仓/价格/报价/快照/标的/汇率), 使导入后与备份完全一致.
+    ///   - clearFinancials: 先清空现有财务分析数据 (逐季度底稿/收益期间), 使导入后与备份完全一致.
+    /// 默认均 false = 纯合并 (只 upsert, 保留库中备份未覆盖的数据).
+    public func importJSON(from url: URL, clearAssets: Bool = false, clearFinancials: Bool = false) throws {
+        if clearAssets { try db.clearAssetsData() }
+        if clearFinancials { try db.clearFinancialData() }
         let data = try Data(contentsOf: url)
         guard let obj = (try JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw DatabaseError.exec("invalid JSON root (expected object)")

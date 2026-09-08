@@ -142,6 +142,59 @@ final class BackupImportTests: XCTestCase {
         XCTAssertEqual(computed[1].cumInterest, 100)
     }
 
+    /// 默认导入 = 合并: 备份中没有的本机数据必须保留.
+    func testImportWithoutClearMergesAndKeepsLocalData() throws {
+        // 源库: 只有 asset A 和季度 Q1.
+        let src = try makeDB("src.db")
+        try src.upsertAssets([Asset(key: "A", name: "A", pool: .domestic, currency: "CNY")])
+        try src.upsertQuarterlyReports([QuarterlyReport(periodEnd: "2026-03-31", marketValue: 100)])
+        let jsonURL = tmpDir.appendingPathComponent("merge.json")
+        try BackupManager(db: src, backupDir: tmpDir).exportJSON(to: jsonURL)
+
+        // 目标库: 额外 asset B + 额外季度 Q2 (备份里没有).
+        let dst = try makeDB("dst.db")
+        try dst.upsertAssets([Asset(key: "B", name: "B", pool: .domestic, currency: "CNY")])
+        try dst.upsertQuarterlyReports([QuarterlyReport(periodEnd: "2026-06-30", marketValue: 200)])
+
+        // 默认不清空 → 合并: A、B 都在; Q1、Q2 都在.
+        try BackupManager(db: dst, backupDir: tmpDir).importJSON(from: jsonURL)
+        XCTAssertEqual(try dst.fetchAssets().map(\.key).sorted(), ["A", "B"])
+        XCTAssertEqual(try dst.fetchQuarterlyReports().map(\.periodEnd).sorted(),
+                       ["2026-03-31", "2026-06-30"])
+    }
+
+    /// 导入带 clearAssets/clearFinancials = 恢复: 本机未在备份中的数据必须先清空,
+    /// 使导入后的库与备份完全一致.
+    func testImportWithClearReplacesLocalData() throws {
+        // 源库: 只有 asset A 和季度 Q1.
+        let src = try makeDB("src2.db")
+        try src.upsertAssets([Asset(key: "A", name: "A", pool: .domestic, currency: "CNY")])
+        try src.upsertHoldings([Holding(assetKey: "A", quantity: 10, costBasis: 5, currency: "CNY", asOfDate: "2026-01-01")])
+        try src.upsertQuarterlyReports([QuarterlyReport(periodEnd: "2026-03-31", marketValue: 100)])
+        let jsonURL = tmpDir.appendingPathComponent("replace.json")
+        try BackupManager(db: src, backupDir: tmpDir).exportJSON(to: jsonURL)
+
+        // 目标库: 预置本机独有数据 —— 资产 B/C、持仓 B、季度 Q2 (都不在备份里).
+        let dst = try makeDB("dst2.db")
+        try dst.upsertAssets([
+            Asset(key: "A", name: "A-old", pool: .domestic, currency: "CNY"),
+            Asset(key: "B", name: "B", pool: .domestic, currency: "CNY"),
+        ])
+        try dst.upsertHoldings([Holding(assetKey: "B", quantity: 99, costBasis: 1, currency: "CNY", asOfDate: "2026-01-01")])
+        try dst.upsertQuarterlyReports([QuarterlyReport(periodEnd: "2026-06-30", marketValue: 200)])
+
+        // 双清空导入.
+        try BackupManager(db: dst, backupDir: tmpDir)
+            .importJSON(from: jsonURL, clearAssets: true, clearFinancials: true)
+
+        // 本机独有的 B 被清掉; 备份里的 A 成为唯一资产, 且持仓也只剩备份中的 A.
+        XCTAssertEqual(try dst.fetchAssets().map(\.key), ["A"])
+        XCTAssertEqual(try dst.fetchHoldings().map(\.assetKey), ["A"])
+        XCTAssertEqual(try dst.fetchHoldings().first?.quantity ?? 0, 10, accuracy: 1e-9)
+        // 本机独有的季度 Q2 被清掉; 只剩备份的 Q1.
+        XCTAssertEqual(try dst.fetchQuarterlyReports().map(\.periodEnd), ["2026-03-31"])
+    }
+
     /// Optional manual verification against a real user export:
     /// PM_BACKUP_JSON=~/Downloads/PortfolioBackup.json swift test --filter RealUser
     func testImportRealUserBackupFile() throws {
