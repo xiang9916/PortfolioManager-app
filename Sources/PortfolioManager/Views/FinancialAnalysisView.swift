@@ -5,6 +5,9 @@ import PortfolioCore
 /// 顶部: 统计图面板 (FinancialChartPanel, 5 张图分段切换); 下方: 逐季度数据网格, 一列 = 一个季度.
 /// 9 个手动字段 (总市值 / 总成本 / 境内·境外利息 / 股息 / 资本利得 / (红利税、资本利得税))
 /// 在网格内联编辑, 录入后仍可修改; 其余行全部由 QuarterlyMetrics 公式链自动派生.
+///
+/// 网格: 最左侧「字段名列」冻结不动, 只有数据列横向滚动; 数据列按季末**降序**排列 (最新季度在最左,
+/// 期初基准列在最右), 因此新增季度总是出现在最左侧。派生指标本身仍按季末升序计算 (见 QuarterlyMetrics)。
 public struct FinancialAnalysisView: View {
     @Bindable var store: AppStore
 
@@ -16,6 +19,11 @@ public struct FinancialAnalysisView: View {
     private let labelWidth: CGFloat = 212
     private let columnWidth: CGFloat = 150
     private let rowHeight: CGFloat = 30
+    /// 表头高度与区块标题行高度 —— 冻结列与滚动区靠这两个常量保证逐行对齐.
+    private let headerHeight: CGFloat = 40
+    private let sectionHeight: CGFloat = 32
+    /// 数据区内容宽度 (所有季度列 + 尾部 16pt 余量), 区块标题的灰色横幅按它拉满.
+    private var dataWidth: CGFloat { CGFloat(displayColumns.count) * columnWidth + 16 }
 
     public var body: some View {
         ScrollView {
@@ -29,15 +37,18 @@ public struct FinancialAnalysisView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button { store.addQuarter() } label: { Label("添加季度", systemImage: "plus") }
-                    .help("追加一个季度列 (自动取下一个季末日期)")
+                    .help("在最左侧新增一个季度列 (自动取下一个季末日期)")
             }
         }
         .onAppear { syncDrafts() }
         .onChange(of: store.quarterlyReports.map(\.periodEnd)) { _, _ in syncDrafts() }
     }
 
-    /// 派生列 (按季末升序).
+    /// 派生列 (按季末升序 —— 公式链与统计图都依赖这个顺序).
     private var columns: [QuarterComputed] { QuarterlyMetrics.compute(store.quarterlyReports) }
+
+    /// 网格展示顺序: 季末降序, 最新季度在最左, 新增列即出现在左侧.
+    private var displayColumns: [QuarterComputed] { columns.reversed() }
 
     // MARK: - 逐季度数据区
 
@@ -48,16 +59,20 @@ public struct FinancialAnalysisView: View {
                 ContentUnavailableView {
                     Label("暂无季度数据", systemImage: "tablecells")
                 } description: {
-                    Text("点右上角「添加季度」建立第一列 (期初: 总市值 = 总成本)，之后每个季度结束后添加一列并补录 9 项数据。")
+                    Text("点右上角「添加季度」建立第一列 (期初: 总市值 = 总成本)，之后每个季度结束后添加一列 (加在最左侧) 并补录 9 项数据。")
                 } actions: {
                     Button("添加第一个季度") { store.addQuarter() }
                         .buttonStyle(.borderedProminent)
                 }
             } else {
-                ScrollView(.horizontal, showsIndicators: true) {
-                    grid
-                        .padding(.vertical, 4)
+                // 冻结列 + 横向滚动数据区: 两列各自独立成列, 行高由上面的常量统一, 因此逐行天然对齐.
+                HStack(alignment: .top, spacing: 0) {
+                    frozenColumn
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        dataArea
+                    }
                 }
+                .padding(.vertical, 4)
                 legend
             }
         }
@@ -65,14 +80,51 @@ public struct FinancialAnalysisView: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private var grid: some View {
+    // MARK: - 左侧冻结列 (字段名, 横向滚动时始终可见)
+
+    private var frozenColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            headerRow
+            Text("季度截止日")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .frame(width: labelWidth, height: headerHeight, alignment: .leading)
+                .padding(.bottom, 6)
             ForEach(rows) { row in
                 if row.isSection {
-                    sectionRow(row.label)
+                    frozenSectionCell(row.label)
                 } else {
-                    dataRow(row)
+                    rowLabel(row)
+                }
+            }
+        }
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(width: 1)
+        }
+    }
+
+    private func frozenSectionCell(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.weight(.bold))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .frame(width: labelWidth, height: sectionHeight, alignment: .leading)
+            .background(Color.gray.opacity(0.14))
+    }
+
+    // MARK: - 横向滚动的数据区 (表头 + 单元格)
+
+    private var dataArea: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerDates
+            ForEach(rows) { row in
+                if row.isSection {
+                    Color.gray.opacity(0.14)
+                        .frame(width: dataWidth, height: sectionHeight)
+                } else {
+                    dataCells(row)
                 }
             }
         }
@@ -80,14 +132,9 @@ public struct FinancialAnalysisView: View {
 
     // MARK: 表头 (季度日期, 可编辑 / 右键删除)
 
-    private var headerRow: some View {
+    private var headerDates: some View {
         HStack(spacing: 0) {
-            Text("季度截止日")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: labelWidth, alignment: .leading)
-                .padding(.horizontal, 8)
-            ForEach(columns, id: \.report.periodEnd) { c in
+            ForEach(displayColumns, id: \.report.periodEnd) { c in
                 let pe = c.report.periodEnd
                 VStack(spacing: 1) {
                     Text(QuarterlyMetrics.quarterLabel(pe))
@@ -100,8 +147,7 @@ public struct FinancialAnalysisView: View {
                         .frame(width: columnWidth - 20)
                         .onSubmit { commitDateEdit(pe) }
                 }
-                .frame(width: columnWidth)
-                .padding(.vertical, 4)
+                .frame(width: columnWidth, height: headerHeight)
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 4))
                 .contextMenu {
                     Button("删除该季度", role: .destructive) {
@@ -127,24 +173,11 @@ public struct FinancialAnalysisView: View {
         store.renameQuarter(from: oldEnd, to: newText)
     }
 
-    // MARK: 区块标题行 (资产 / 现金流)
-
-    private func sectionRow(_ title: String) -> some View {
-        Text(title)
-            .font(.subheadline.weight(.bold))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(Color.gray.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
-            .padding(.vertical, 3)
-    }
-
     // MARK: 数据行
 
-    private func dataRow(_ row: GridRow) -> some View {
+    private func dataCells(_ row: GridRow) -> some View {
         HStack(spacing: 0) {
-            rowLabel(row)
-            ForEach(columns, id: \.report.periodEnd) { c in
+            ForEach(displayColumns, id: \.report.periodEnd) { c in
                 if let field = row.manual {
                     manualCell(c.report.periodEnd, field)
                 } else {
@@ -169,11 +202,15 @@ public struct FinancialAnalysisView: View {
             Text(row.label)
                 .font(.system(size: 12, weight: row.emphasis ? .semibold : .regular))
                 .foregroundStyle(row.emphasis ? .primary : .secondary)
+                .lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.leading, 8 + CGFloat(row.indent) * 14)
         .padding(.trailing, 8)
-        .frame(width: labelWidth, alignment: .leading)
+        .frame(width: labelWidth, height: rowHeight, alignment: .leading)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
+        }
     }
 
     /// 手动字段单元格: 蓝底内联输入框, 值解析后实时驱动派生行, 落盘防抖.
@@ -223,7 +260,7 @@ public struct FinancialAnalysisView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("其余行均由公式自动计算; 表头日期可点击编辑, 右键表头删除该季度; 第一列为期初基准列 (总市值 = 总成本)。")
+            Text("其余行均由公式自动计算; 表头日期可点击编辑, 右键表头删除该季度; 最右一列为期初基准列 (总市值 = 总成本); 数据列从近到早排列, 新季度总是加在最左侧。")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
@@ -233,7 +270,6 @@ public struct FinancialAnalysisView: View {
     // MARK: - 草稿同步 (仅在列集合变化时重置, 不打断输入中的单元格)
 
     private func syncDrafts() {
-        let keys = Set(store.quarterlyReports.map(\.periodEnd))
         var newDrafts: [CellKey: String] = [:]
         var newDates: [String: String] = [:]
         for r in store.quarterlyReports {
