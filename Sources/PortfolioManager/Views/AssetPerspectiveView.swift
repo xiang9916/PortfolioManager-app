@@ -20,18 +20,25 @@ public struct AssetPerspectiveView: View {
             }
             .navigationTitle("资产透视")
             .help("列表行可直接拖动调整顺序，排序自动保存")
-            .toolbar {
-                ToolbarItemGroup {
-                    Button { showAddAsset = true } label: { Label("添加标的", systemImage: "plus") }
-                    Button { showFxRates = true } label: { Label("汇率", systemImage: "dollarsign.arrow.circlepath") }
-                    Button { Task { await store.refreshPrices() } } label: { Label("数据更新", systemImage: "arrow.clockwise") }
+        } detail: {
+            Group {
+                if let key = selectedKey, let row = store.perspectives.first(where: { $0.assetKey == key }) {
+                    AssetDetailView(row: row, store: store)
+                } else {
+                    ContentUnavailableView("选择一项资产", systemImage: "list.bullet.rectangle")
                 }
             }
-        } detail: {
-            if let key = selectedKey, let row = store.perspectives.first(where: { $0.assetKey == key }) {
-                AssetDetailView(row: row, store: store)
-            } else {
-                ContentUnavailableView("选择一项资产", systemImage: "list.bullet.rectangle")
+            // 右上角: 模块专属按钮 ｜ 全局按钮.
+            // 工具栏挂在 detail 上 (而不是侧边栏 List), 这样左上角只留侧边栏按钮.
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button { showAddAsset = true } label: { Label("添加标的", systemImage: "plus") }
+                        .help("新增一个标的")
+                    Button { showFxRates = true } label: { Label("汇率", systemImage: "dollarsign.arrow.circlepath") }
+                        .help("查看 / 编辑各币种兑人民币汇率")
+                    ToolbarDivider()
+                }
+                GlobalToolbarContent(store: store)
             }
         }
         .sheet(isPresented: $showAddAsset) { AddAssetSheet(store: store) }

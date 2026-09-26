@@ -133,6 +133,12 @@ public final class AppStore {
     // 隐私: 隐藏数字 (默认关闭 = 显示; 每次启动恢复为显示, 不持久化).
     public var hideNumbers = false
 
+    // 备份导入确认面板的状态. 「导入备份」是全局工具条按钮 (三大模块共用),
+    // 面板本身由 ContentView 统一挂载一次, 因此状态放在 store 里而不是某个模块的 @State.
+    public var pendingImportURL: URL?
+    public var clearAssetsOnImport = false
+    public var clearFinancialsOnImport = false
+
     public init(db: Database, optimizer: OptimizationService) {
         self.db = db
         self.repository = Repository(db: db)
@@ -827,5 +833,21 @@ public final class AppStore {
         try bm.importJSON(from: url, clearAssets: clearAssets, clearFinancials: clearFinancials)
         loadAll()
         await startupRefresh()
+    }
+
+    /// 用户在导入确认面板点「导入」后执行; 清空与否取面板里勾选的状态.
+    public func performImportBackup() {
+        guard let url = pendingImportURL else { return }
+        let clearAssets = clearAssetsOnImport
+        let clearFinancials = clearFinancialsOnImport
+        pendingImportURL = nil
+        Task {
+            do {
+                try await importBackup(from: url, clearAssets: clearAssets, clearFinancials: clearFinancials)
+                statusMessage = "已导入备份: \(url.lastPathComponent)"
+            } catch {
+                statusMessage = "导入备份失败: \(error)"
+            }
+        }
     }
 }

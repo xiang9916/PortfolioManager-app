@@ -41,6 +41,14 @@ struct ContentView: View {
                 .tag(MainTab.analysis)
         }
         .frame(minWidth: 900, minHeight: 600)
+        // 导入备份确认面板: 「导入备份」是三大模块共用的全局工具条按钮,
+        // 因此面板在窗口层挂载一次 (state 在 store 上), 而不是各模块各挂一份.
+        .sheet(isPresented: Binding(
+            get: { store.pendingImportURL != nil },
+            set: { if !$0 { store.pendingImportURL = nil } }
+        )) {
+            ImportOptionsSheet(store: store)
+        }
         .overlay(alignment: .bottomTrailing) {
             Group {
                 if selectedTab == .overview {

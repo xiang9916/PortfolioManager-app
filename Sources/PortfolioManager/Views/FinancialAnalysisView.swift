@@ -34,11 +34,14 @@ public struct FinancialAnalysisView: View {
             .padding()
         }
         .navigationTitle("财务分析")
+        // 右上角: 模块专属按钮 ｜ 全局按钮.
         .toolbar {
-            ToolbarItemGroup {
+            ToolbarItemGroup(placement: .primaryAction) {
                 Button { store.addQuarter() } label: { Label("添加季度", systemImage: "plus") }
                     .help("在最左侧新增一个季度列 (自动取下一个季末日期)")
+                ToolbarDivider()
             }
+            GlobalToolbarContent(store: store)
         }
         .onAppear { syncDrafts() }
         .onChange(of: store.quarterlyReports.map(\.periodEnd)) { _, _ in syncDrafts() }
