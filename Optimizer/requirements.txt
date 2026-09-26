@@ -1,5 +1,7 @@
 # Python sidecar 依赖（优化器 + .numbers 导入）
+# 说明: 宏观数据抓取 (scripts/fetch_macro_rates.py) 已改为纯标准库 urllib, 不需要 akshare;
+#       futu-api 已移除 —— 代码中无任何 `import futu`, 且它会带入 pycryptodome / simplejson /
+#       sortedcontainers 等约 30MB 依赖 (旧 DMG 里 futu 21MB + Crypto 11MB).
 numbers_parser>=4.0
 numpy>=2.0
 scipy>=1.14
-futu-api>=10.10
