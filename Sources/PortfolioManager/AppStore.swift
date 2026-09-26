@@ -717,7 +717,9 @@ public final class AppStore {
         guard !isOptimizing, !isTestOptimizing else { return }
         let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: extract.path) else {
-            optimizeError = "未找到提取文件：\(extract.path)。请先导入 .numbers 数据。"
+            optimizeError = "未找到优化器输入文件 extract_app.json：\n\(extract.path)\n\n"
+                + "请先用 .numbers 生成提取文件（终端执行 pm-cli extract \"portfolio.numbers\"），"
+                + "再把生成的 extract_app.json 放到上面这个目录后重试。"
             return
         }
         isOptimizing = true
@@ -768,7 +770,9 @@ public final class AppStore {
         guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }
         let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: extract.path) else {
-            testOptimizeError = "未找到提取文件：\(extract.path)。请先导入 .numbers 数据。"
+            testOptimizeError = "未找到优化器输入文件 extract_app.json：\n\(extract.path)\n\n"
+                + "请先用 .numbers 生成提取文件（终端执行 pm-cli extract \"portfolio.numbers\"），"
+                + "再把生成的 extract_app.json 放到上面这个目录后重试。"
             return
         }
         isTestOptimizing = true

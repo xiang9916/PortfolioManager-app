@@ -38,6 +38,21 @@ public struct OptimizeButton: View {
                 showResult = true
             }
         }
+        // 优化失败必须可见: 之前 optimizeError 只写进 store、界面上没有任何出口,
+        // 于是"点运行没反应"(例如缺少 extract_app.json 时直接 return).
+        .alert("优化器无法运行", isPresented: optimizeErrorBinding) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(store.optimizeError ?? "")
+        }
+    }
+
+    /// 把 store.optimizeError 变成可关闭的 alert 绑定 (关闭即清空).
+    private var optimizeErrorBinding: Binding<Bool> {
+        Binding(
+            get: { store.optimizeError != nil },
+            set: { if !$0 { store.optimizeError = nil } }
+        )
     }
 
     // MARK: idle — 运行 / 设置 dual pill
