@@ -88,10 +88,14 @@ if [ "${MAKE_DMG}" = "1" ]; then
   cp "scripts/install_dmg.sh" "${INSTALLER}"
   chmod +x "${INSTALLER}"
   VOLNAME="投资组合管家 ${VERSION}"
+  # 必须显式 -fs HFS+: 新版 macOS 下 hdiutil create 默认生成 APFS 镜像, 同样内容
+  # 压缩后比 HFS+ 大约 50% (实测 261MB bundle: APFS 130MB vs HFS+ 86MB)。以前在
+  # DSH 沙箱里 hdiutil create 会失败并走下面的 makehybrid 回退 (产出 HFS+/ISO),
+  # 所以旧版反而更小; 一旦 create 成功就会得到臃肿的 APFS 镜像 —— 故在此固定 HFS+。
   # Preferred: compressed UDZO in one step. Fails in some sandboxes
   # (newfs_apfs: Operation not permitted) -> fall back to makehybrid
   # (HFS+/ISO hybrid) then convert to compressed UDZO.
-  if ! hdiutil create -volname "${VOLNAME}" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}" 2>/dev/null; then
+  if ! hdiutil create -volname "${VOLNAME}" -srcfolder "${STAGE}" -ov -format UDZO -fs HFS+ "${DMG}" 2>/dev/null; then
     echo "==> hdiutil create blocked, falling back to makehybrid + convert"
     rm -f "${DMG}"
     # hdiutil convert recognizes images by extension -> keep .dmg.
@@ -106,7 +110,7 @@ if [ "${MAKE_DMG}" = "1" ]; then
   fi
   rm -rf "${STAGE}"
   hdiutil verify "${DMG}" >/dev/null 2>&1 || echo "    (verify skipped: hybrid-derived image has no checksum)"
-  echo "==> dmg: ${DMG}"
+  echo "==> dmg: ${DMG} ($(du -h "${DMG}" | cut -f1))"
 fi
 
 echo "==> done: ${BUNDLE}"
