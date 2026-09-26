@@ -22,8 +22,22 @@ for a in "$@"; do
 done
 
 echo "==> swift build -c release"
+# 必须显式传 -platform_version: SwiftPM 会把 deployment target 当成 SDK 版本写进
+# LC_BUILD_VERSION (实测 minos/sdk 都是 14.0)。macOS 会据此把 app 当成"用旧 SDK 构建"
+# 而启用兼容外观 —— TabView 标签栏落到标题下方、窗口标题常显, 与 0.3-beta2 (其 sdk 记录
+# 为 26.5) 的观感完全不同。显式指定真实 SDK 版本后即与 beta2 一致 (minos 仍为 14.0,
+# 与 Package.swift 的 .macOS(.v14) 对齐)。
+MACOS_DEPLOY="14.0"
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)"
+if [ -z "${SDK_VERSION}" ]; then
+  echo "    (warning: xcrun 取不到 SDK 版本, 退回 deployment target ${MACOS_DEPLOY})"
+  SDK_VERSION="${MACOS_DEPLOY}"
+fi
+echo "    linking with -platform_version macos ${MACOS_DEPLOY} ${SDK_VERSION}"
 # --disable-sandbox flags make it work inside nested sandboxes (e.g. DSH); harmless elsewhere.
-swift build -c release --disable-sandbox -Xswiftc -Xfrontend -Xswiftc -disable-sandbox
+swift build -c release --disable-sandbox \
+  -Xswiftc -Xfrontend -Xswiftc -disable-sandbox \
+  -Xlinker -platform_version -Xlinker macos -Xlinker "${MACOS_DEPLOY}" -Xlinker "${SDK_VERSION}"
 
 echo "==> assembling bundle at ${BUNDLE}"
 rm -rf "${BUNDLE}"
