@@ -48,8 +48,10 @@ public struct AssetPerspectiveView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text(CurrencyStyle.symbol(row.currency) + money(row.value)).font(.subheadline).monospacedDigit()
-                Text(pct(row.weight)).font(.caption).foregroundStyle(.secondary)
+                Text(store.hideNumbers ? PrivacyStyle.masked : CurrencyStyle.symbol(row.currency) + money(row.value))
+                    .font(.subheadline).monospacedDigit()
+                Text(store.hideNumbers ? PrivacyStyle.masked : pct(row.weight))
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 2)
@@ -83,14 +85,17 @@ public struct AssetDetailView: View {
                 detailRow("资产类别", AssetClassStyle.displayName(row.assetClass))
                 detailRow("池", AssetClassStyle.poolName(row.pool))
                 detailRow("币种", row.currency)
-                detailRow("权重", pct(row.weight))
-                if let p = row.latestPrice { detailRow("最后价", String(format: "%.4f", p)) }
+                detailRow("权重", store.hideNumbers ? PrivacyStyle.masked : pct(row.weight))
+                if let p = row.latestPrice {
+                    detailRow("最后价", store.hideNumbers ? PrivacyStyle.masked : String(format: "%.4f", p))
+                }
                 if let d = row.latestDate { detailRow("最后日期", d) }
-                detailRow("市值 (" + row.currency + ")", CurrencyStyle.symbol(row.currency) + money(row.value))
-                detailRow("市值 (折人民币)", money(row.valueCny) + " ¥")
-                detailRow("本金 (折人民币)", money(row.costCny) + " ¥")
+                detailRow("市值 (" + row.currency + ")",
+                          store.hideNumbers ? PrivacyStyle.masked : CurrencyStyle.symbol(row.currency) + money(row.value))
+                detailRow("市值 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.valueCny) + " ¥")
+                detailRow("本金 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.costCny) + " ¥")
                 pnlRow("浮盈浮亏", row.unrealizedPnl)
-                detailRow("收益率", pct(row.returnRate))
+                detailRow("收益率", store.hideNumbers ? PrivacyStyle.masked : pct(row.returnRate))
 
                 GroupBox("编辑持仓（改完点右下角「保存」）") {
                     VStack(alignment: .leading, spacing: 12) {
@@ -127,11 +132,18 @@ public struct AssetDetailView: View {
         HStack {
             Text(label).foregroundStyle(.secondary)
             Spacer()
-            TextField("", value: value, format: .number)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .monospacedDigit()
-                .frame(width: 200)
+            if store.hideNumbers {
+                Text(PrivacyStyle.masked)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 200, alignment: .trailing)
+            } else {
+                TextField("", value: value, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .frame(width: 200)
+            }
         }
     }
 
@@ -152,8 +164,12 @@ public struct AssetDetailView: View {
         HStack {
             Text(label).foregroundStyle(.secondary)
             Spacer()
-            Text(signedMoney(v) + " ¥").monospacedDigit()
-                .foregroundStyle(v >= 0 ? .green : .red)
+            if store.hideNumbers {
+                Text(PrivacyStyle.masked).monospacedDigit().foregroundStyle(.secondary)
+            } else {
+                Text(signedMoney(v) + " ¥").monospacedDigit()
+                    .foregroundStyle(v >= 0 ? .green : .red)
+            }
         }
         .padding(.vertical, 4)
     }

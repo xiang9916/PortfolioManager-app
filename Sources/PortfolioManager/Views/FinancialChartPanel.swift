@@ -16,6 +16,8 @@ import PortfolioCore
 struct FinancialChartPanel: View {
     /// 按季末升序的派生列 (调用方已 compute).
     let columns: [QuarterComputed]
+    /// 是否隐藏数字 (隐私): 为 true 时整块图表替换为 "***" 占位.
+    let hideNumbers: Bool
 
     // MARK: - 状态
 
@@ -34,12 +36,18 @@ struct FinancialChartPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            if filtered.isEmpty {
-                emptyState
+        Group {
+            if hideNumbers {
+                PrivacyPlaceholder().frame(height: 280)
             } else {
-                chartArea
+                VStack(alignment: .leading, spacing: 10) {
+                    header
+                    if filtered.isEmpty {
+                        emptyState
+                    } else {
+                        chartArea
+                    }
+                }
             }
         }
         .padding()

@@ -44,6 +44,13 @@ public struct AssetOverviewView: View {
                 .help("自动抓取公开行情数据（能力1）")
 
                 Button {
+                    store.hideNumbers.toggle()
+                } label: {
+                    Label("隐藏数字", systemImage: store.hideNumbers ? "eye.slash" : "eye")
+                }
+                .help(store.hideNumbers ? "已隐藏数字，点击恢复显示" : "隐藏所有数字（隐私）")
+
+                Button {
                     exportBackup()
                 } label: {
                     Label("导出备份", systemImage: "square.and.arrow.up")
@@ -136,16 +143,20 @@ public struct AssetOverviewView: View {
     private func allocationSection(_ alloc: AllocationSnapshot) -> some View {
         HStack(alignment: .top, spacing: 24) {
             // Donut
-            Chart(alloc.slices) { slice in
-                SectorMark(
-                    angle: .value("占比", slice.weight),
-                    innerRadius: .ratio(0.62),
-                    angularInset: 1.5
-                )
-                .cornerRadius(3)
-                .foregroundStyle(AssetClassStyle.color(slice.assetClass))
+            if store.hideNumbers {
+                PrivacyPlaceholder().frame(width: 260, height: 260)
+            } else {
+                Chart(alloc.slices) { slice in
+                    SectorMark(
+                        angle: .value("占比", slice.weight),
+                        innerRadius: .ratio(0.62),
+                        angularInset: 1.5
+                    )
+                    .cornerRadius(3)
+                    .foregroundStyle(AssetClassStyle.color(slice.assetClass))
+                }
+                .frame(width: 260, height: 260)
             }
-            .frame(width: 260, height: 260)
 
             // Legend + values
             VStack(alignment: .leading, spacing: 8) {
@@ -173,68 +184,78 @@ public struct AssetOverviewView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("模拟历史财务表现（加权净值，近3年）").font(.headline)
                 .help("口径：以当前持仓市值权重，将各标的累计净值在近3年窗口内归一为1.0后加权合成；不含汇率、不含历史调仓。基金用累计净值（含分红再投），股票用收盘价。基准=沪深300+标普500按当前境内/境外池占比加权（与优化器一致）。")
-            let pts = store.performancePoints.chartPoints(series: "组合")
-            let benchPts = store.benchmarkPoints.chartPoints(series: "基准")
-            // 显式 y 域: 避免自动域撑到 0..3 导致顶部浮出无意义网格线.
-            let allValues = (store.performancePoints + store.benchmarkPoints).map { $0.value }
-            let lo = (allValues.min() ?? 1.0) - 0.03
-            let hi = (allValues.max() ?? 1.0) + 0.03
-            // 多系列必须用 foregroundStyle(by:) + chartForegroundStyleScale 区分系列:
-            // 直接给第二个 ForEach 的 LineMark 设静态颜色会被 Charts 忽略,
-            // 基准线会回落到默认调色板第一色(蓝) —— 勿改回静态前景色写法.
-            Chart {
-                ForEach(pts) { p in
-                    LineMark(x: .value("日期", p.date), y: .value("净值", p.value))
-                        .foregroundStyle(by: .value("系列", "组合"))
-                        .lineStyle(StrokeStyle(lineWidth: 1.8))
-                }
-                ForEach(benchPts) { p in
-                    LineMark(x: .value("日期", p.date), y: .value("净值", p.value))
-                        .foregroundStyle(by: .value("系列", "基准"))
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                }
+            if store.hideNumbers {
+                PrivacyPlaceholder().frame(height: 260)
+            } else {
+                performanceChart
             }
-            .chartForegroundStyleScale(["组合": .blue, "基准": .green])
-            .chartYScale(domain: lo...hi)
-            .chartYAxis {
-                // 只留刻度文字, 不画水平网格线 —— 悬在数据上方的横线曾被误认为"多余的直线".
-                AxisMarks { _ in
-                    AxisValueLabel()
-                }
-            }
-            .chartLegend(.hidden)
-            .overlay(alignment: .topTrailing) {
-                // 右上角图例: 自绘 overlay (chartLegend 自定义内容不渲染, 勿改回).
-                HStack(spacing: 12) {
-                    HStack(spacing: 4) {
-                        Rectangle().fill(.blue).frame(width: 12, height: 3)
-                        Text("回测数据（组合）").font(.caption).foregroundStyle(.secondary)
-                    }
-                    HStack(spacing: 4) {
-                        Rectangle().fill(.green).frame(width: 12, height: 3)
-                        Text("基准数据（沪深300+标普500）").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 6))
-                .padding(6)
-            }
-            .frame(height: 260)
         }
         .padding()
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
     }
 
+    private var performanceChart: some View {
+        let pts = store.performancePoints.chartPoints(series: "组合")
+        let benchPts = store.benchmarkPoints.chartPoints(series: "基准")
+        // 显式 y 域: 避免自动域撑到 0..3 导致顶部浮出无意义网格线.
+        let allValues = (store.performancePoints + store.benchmarkPoints).map { $0.value }
+        let lo = (allValues.min() ?? 1.0) - 0.03
+        let hi = (allValues.max() ?? 1.0) + 0.03
+        // 多系列必须用 foregroundStyle(by:) + chartForegroundStyleScale 区分系列:
+        // 直接给第二个 ForEach 的 LineMark 设静态颜色会被 Charts 忽略,
+        // 基准线会回落到默认调色板第一色(蓝) —— 勿改回静态前景色写法.
+        return Chart {
+            ForEach(pts) { p in
+                LineMark(x: .value("日期", p.date), y: .value("净值", p.value))
+                    .foregroundStyle(by: .value("系列", "组合"))
+                    .lineStyle(StrokeStyle(lineWidth: 1.8))
+            }
+            ForEach(benchPts) { p in
+                LineMark(x: .value("日期", p.date), y: .value("净值", p.value))
+                    .foregroundStyle(by: .value("系列", "基准"))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            }
+        }
+        .chartForegroundStyleScale(["组合": .blue, "基准": .green])
+        .chartYScale(domain: lo...hi)
+        .chartYAxis {
+            // 只留刻度文字, 不画水平网格线 —— 悬在数据上方的横线曾被误认为"多余的直线".
+            AxisMarks { _ in
+                AxisValueLabel()
+            }
+        }
+        .chartLegend(.hidden)
+        .overlay(alignment: .topTrailing) {
+            // 右上角图例: 自绘 overlay (chartLegend 自定义内容不渲染, 勿改回).
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Rectangle().fill(.blue).frame(width: 12, height: 3)
+                    Text("回测数据（组合）").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 4) {
+                    Rectangle().fill(.green).frame(width: 12, height: 3)
+                    Text("基准数据（沪深300+标普500）").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 6))
+            .padding(6)
+        }
+        .frame(height: 260)
+    }
+
     // MARK: helpers
 
     private func money(_ v: Double) -> String {
+        if store.hideNumbers { return PrivacyStyle.masked }
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.maximumFractionDigits = 0
         return "¥" + (f.string(from: NSNumber(value: v)) ?? "0")
     }
     private func pct(_ v: Double) -> String {
-        String(format: "%.2f%%", v * 100)
+        if store.hideNumbers { return PrivacyStyle.masked }
+        return String(format: "%.2f%%", v * 100)
     }
 
     private func exportBackup() {

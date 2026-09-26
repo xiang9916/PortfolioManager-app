@@ -91,6 +91,29 @@ public enum CurrencyStyle {
     }
 }
 
+/// 隐私「隐藏数字」: 隐藏状态下所有数字以 "***" 显示.
+public enum PrivacyStyle {
+    /// 数字隐藏时用于替代所有数值的占位文本.
+    public static let masked = "***"
+}
+
+/// 数字隐藏时替代图表的占位视图 (眼睛关闭图标 + "***").
+public struct PrivacyPlaceholder: View {
+    public init() {}
+
+    public var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(PrivacyStyle.masked)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 /// macOS 原生"红绿灯"风格的关闭按钮：12pt 红色圆点，悬停时显示 ×。
 /// 用于弹窗标题左侧，模拟原生窗口标题栏的关闭按钮。
 public struct MacCloseButton: View {

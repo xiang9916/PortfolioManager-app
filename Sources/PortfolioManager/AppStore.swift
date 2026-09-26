@@ -130,6 +130,9 @@ public final class AppStore {
     @ObservationIgnored private var backupTask: Task<Void, Never>?
     public var lastBackupAt: String?
 
+    // 隐私: 隐藏数字 (默认关闭 = 显示; 每次启动恢复为显示, 不持久化).
+    public var hideNumbers = false
+
     public init(db: Database, optimizer: OptimizationService) {
         self.db = db
         self.repository = Repository(db: db)

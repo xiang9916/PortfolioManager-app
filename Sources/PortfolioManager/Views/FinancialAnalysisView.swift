@@ -28,7 +28,7 @@ public struct FinancialAnalysisView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                FinancialChartPanel(columns: columns)
+                FinancialChartPanel(columns: columns, hideNumbers: store.hideNumbers)
                 quarterlyCard
             }
             .padding()
@@ -178,7 +178,9 @@ public struct FinancialAnalysisView: View {
     private func dataCells(_ row: GridRow) -> some View {
         HStack(spacing: 0) {
             ForEach(displayColumns, id: \.report.periodEnd) { c in
-                if let field = row.manual {
+                if store.hideNumbers {
+                    maskedCell(emphasis: row.emphasis)
+                } else if let field = row.manual {
                     manualCell(c.report.periodEnd, field)
                 } else {
                     computedCell(row.value(c), emphasis: row.emphasis)
@@ -190,6 +192,15 @@ public struct FinancialAnalysisView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
         }
+    }
+
+    /// 数字隐藏时替代单元格的 "***" (与计算单元格相同的排版).
+    private func maskedCell(emphasis: Bool) -> some View {
+        Text(PrivacyStyle.masked)
+            .font(.system(size: 12, weight: emphasis ? .semibold : .regular, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .frame(width: columnWidth - 14, alignment: .trailing)
+            .padding(.horizontal, 7)
     }
 
     private func rowLabel(_ row: GridRow) -> some View {
