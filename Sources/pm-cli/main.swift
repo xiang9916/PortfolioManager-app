@@ -33,6 +33,24 @@ func sidecar() -> PythonSidecar {
                          currentDirectoryURL: URL(fileURLWithPath: cwd))
 }
 
+/// 安装版 App (AppPaths.isBundled) 只认
+/// `~/Library/Application Support/PortfolioManager/extract_app.json`, 而本命令生成在仓库
+/// `tmp/` —— 以前必须手动拷贝, 忘拷就表现为"点运行没反应"。这里顺手安装一份。
+/// 路径与 AppStore.AppPaths.supportDir() 一致 (pm-cli 只依赖 PortfolioCore, 无法直接引用)。
+func installExtractForApp(_ data: Data) -> URL? {
+    guard let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                 in: .userDomainMask).first else { return nil }
+    let dir = support.appendingPathComponent("PortfolioManager", isDirectory: true)
+    do {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dst = dir.appendingPathComponent("extract_app.json")
+        try data.write(to: dst, options: .atomic)
+        return dst
+    } catch {
+        return nil
+    }
+}
+
 func runExtract(numbersPath: String) -> Int32 {
     do {
         let outPath = "tmp/extract_app.json"
@@ -48,6 +66,13 @@ func runExtract(numbersPath: String) -> Int32 {
             if let warnings = obj["warnings"] as? [String] {
                 for w in warnings { print("  警告: \(w)") }
             }
+        }
+        if let dst = installExtractForApp(data) {
+            print("  已同步给 App: \(dst.path)")
+        } else {
+            FileHandle.standardError.write(
+                "提示: 未能写入 Application Support, 安装版 App 需手动拷贝 extract_app.json\n"
+                    .data(using: .utf8)!)
         }
         return 0
     } catch {
