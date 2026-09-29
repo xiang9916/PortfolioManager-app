@@ -2,7 +2,7 @@ import Foundation
 
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 7
+    public static let version: Int = 8
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -226,6 +226,31 @@ public enum Schema {
             capital_gain_overseas REAL,
             taxes REAL,
             source TEXT
+        );
+        """,
+        ]),
+        (8, [
+        // 全资产股息 / 全资产股息率: 自动抓取的逐笔每股(每份)现金股息 + 抓取元数据.
+        // dividends: 主键 (asset_key, ex_date) — 一年多次派息按除息日逐笔存, 按自然年求和.
+        //   amount = 每股/每份税前金额, 币种 = 标的报价币种 (Yahoo 会把跨币种派息折算进报价币种).
+        // dividend_fetch_meta: 每个标的的抓取状态, 支撑「0(确认无分红) / NULL(数据源无覆盖或抓取失败) / 有值」
+        //   三态展示与 7 天缓存; 从不抓取 = 无行 = NULL 态.
+        """
+        CREATE TABLE IF NOT EXISTS dividends (
+            asset_key TEXT NOT NULL,
+            ex_date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'CNY',
+            source TEXT,
+            PRIMARY KEY (asset_key, ex_date)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS dividend_fetch_meta (
+            asset_key TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            source TEXT,
+            fetched_at TEXT NOT NULL
         );
         """,
         ]),

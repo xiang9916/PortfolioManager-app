@@ -104,6 +104,29 @@ public struct AssetDetailView: View {
                 pnlRow("浮盈浮亏", row.unrealizedPnl)
                 detailRow("收益率", store.hideNumbers ? PrivacyStyle.masked : pct(row.returnRate))
 
+                // 股息 (自动抓取, 不可手改): 四个指定字段 + 对照/依据行.
+                if let d = row.dividend {
+                    Divider()
+                    dividendCurrencyRow(
+                        "前年股息", amount: d.prevPrevTotal, d: d,
+                        help: "\(d.yearPrevPrev) 年按除息日归入的每股股息合计 × 份额（\(d.currency)，税前）。")
+                    dividendCurrencyRow(
+                        "去年股息", amount: d.prevTotal, d: d,
+                        help: "\(d.yearPrev) 年按除息日归入的每股股息合计 × 份额（\(d.currency)，税前）。")
+                    dividendCurrencyRow(
+                        "今年预计股息 (" + d.currency + ")", amount: d.estimatedTotal, d: d,
+                        help: "= max(0, 2×去年每股股息 − 前年每股股息) × 份额（\(d.currency)，税前）；负值按 0 计。")
+                    dividendCnyRow(
+                        "今年预计股息 (折人民币)", value: d.estimatedTotalCny, d: d,
+                        help: "= 今年预计股息（\(d.currency)，税前）× 汇率 × (1 − 股息税率)。")
+                    dividendCnyRow(
+                        "今年已发生股息 (折人民币)", value: d.actualYtdCny, d: d,
+                        help: "\(d.yearCurrent) 年已除息的股息合计 × 份额 × 汇率 × (1 − 股息税率)，用于对照「今年预计」的偏差。")
+                    detailRow("去年每股股息 (\(d.yearPrev), \(d.currency))", perShareText(d.perSharePrev, d: d))
+                    detailRow("前年每股股息 (\(d.yearPrevPrev), \(d.currency))", perShareText(d.perSharePrevPrev, d: d))
+                    detailRow("股息数据来源", dividendSourceText(d))
+                }
+
                 GroupBox("编辑持仓（改完点右下角「保存」）") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -157,6 +180,61 @@ public struct AssetDetailView: View {
     private func detailRow(_ label: String, _ value: String) -> some View {
         HStack { Text(label).foregroundStyle(.secondary); Spacer(); Text(value).monospacedDigit() }
         .padding(.vertical, 4)
+    }
+
+    // MARK: 股息 (只读, 自动抓取)
+
+    /// 原币金额行 — nil (数据源无覆盖 / 抓取失败) 显示「—」.
+    private func dividendCurrencyRow(_ label: String, amount: Double?,
+                                     d: AssetDividend, help: String) -> some View {
+        let text: String
+        if let amount {
+            text = store.hideNumbers ? PrivacyStyle.masked
+                                     : CurrencyStyle.symbol(d.currency) + amount2(amount)
+        } else {
+            text = "—"
+        }
+        return detailRow(label, text).help(Text(help))
+    }
+
+    /// 折人民币金额行 — 缺汇率时明确显示「缺汇率」而不是静默按 1.0 折算.
+    private func dividendCnyRow(_ label: String, value: Double?,
+                                d: AssetDividend, help: String) -> some View {
+        let text: String
+        if let value {
+            text = store.hideNumbers ? PrivacyStyle.masked : amount2(value) + " ¥"
+        } else if d.fxMissing {
+            text = "缺汇率"
+        } else {
+            text = "—"
+        }
+        return detailRow(label, text).help(Text(help))
+    }
+
+    private func perShareText(_ v: Double, d: AssetDividend) -> String {
+        guard d.status == .ok else { return "—" }
+        if store.hideNumbers { return PrivacyStyle.masked }
+        return CurrencyStyle.symbol(d.currency) + String(format: "%.4f", v)
+    }
+
+    private func dividendSourceText(_ d: AssetDividend) -> String {
+        switch d.status {
+        case .ok:
+            var s = (d.source ?? "未知来源") + " · " + (d.fetchedAt ?? "—")
+            s += " · 税率 " + DividendTax.label(d.taxRate)
+            if d.fxMissing { s += " · 缺汇率" }
+            return s
+        case .unavailable:
+            return "数据源无该标的历史（按 — 计, 汇总按 0）"
+        case .failed:
+            return "抓取失败（按 — 计, 汇总按 0）"
+        }
+    }
+
+    private func amount2(_ v: Double) -> String {
+        let f = NumberFormatter(); f.numberStyle = .decimal
+        f.minimumFractionDigits = 2; f.maximumFractionDigits = 2
+        return f.string(from: NSNumber(value: v)) ?? "0.00"
     }
     private func money(_ v: Double) -> String {
         let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0

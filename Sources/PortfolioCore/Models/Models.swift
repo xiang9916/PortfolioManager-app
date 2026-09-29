@@ -76,7 +76,7 @@ public struct Snapshot: Codable, Identifiable, Hashable {
     }
 }
 
-public struct PricePoint: Codable, Identifiable, Hashable {
+public struct PricePoint: Codable, Identifiable, Hashable, Sendable {
     public var id: Int64?
     public let assetKey: String
     public let date: String

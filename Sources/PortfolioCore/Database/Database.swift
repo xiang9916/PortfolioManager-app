@@ -218,10 +218,10 @@ public final class Database {
         try upsertAssets([a])
     }
 
-    /// Delete an asset target and its holdings / prices / financials (资产透视 删除标的).
+    /// Delete an asset target and its holdings / prices / dividends (资产透视 删除标的).
     public func deleteAsset(key: String) throws {
         try inTransaction {
-            for table in ["holdings", "prices", "assets"] {
+            for table in ["holdings", "prices", "dividends", "assets"] {
                 let col = (table == "assets") ? "key" : "asset_key"
                 let sql = "DELETE FROM " + table + " WHERE " + col + " = ?"
                 let stmt = try prepared(sql)
@@ -229,15 +229,21 @@ public final class Database {
                 bindText(stmt, 1, key)
                 try stepOnce(stmt)
             }
+            let metaStmt = try prepared("DELETE FROM dividend_fetch_meta WHERE asset_key = ?")
+            defer { sqlite3_finalize(metaStmt) }
+            bindText(metaStmt, 1, key)
+            try stepOnce(metaStmt)
         }
     }
 
-    /// 清空全部资产域数据 (持仓 / 历史价格 / 最新报价 / 市值快照 / 标的 / 汇率),
+    /// 清空全部资产域数据 (持仓 / 历史价格 / 最新报价 / 股息 / 市值快照 / 标的 / 汇率),
     /// 用于「导入备份」前可选择的重置, 使库内资产数据与备份文件完全一致.
     /// 汇率 (fx_rates) 随资产一并清空: 备份 JSON 含汇率, 不清则残留旧汇率产生 merge 不一致.
+    /// 股息 (dividends / dividend_fetch_meta) 属资产域, 同样清空 (否则换标的后会残留旧股息).
     public func clearAssetsData() throws {
         try inTransaction {
-            for t in ["holdings", "prices", "quotes", "snapshots", "assets", "fx_rates"] {
+            for t in ["holdings", "prices", "quotes", "dividends", "dividend_fetch_meta",
+                      "snapshots", "assets", "fx_rates"] {
                 try exec("DELETE FROM " + t)
             }
         }
@@ -312,6 +318,87 @@ public final class Database {
             let cur = String(cString: sqlite3_column_text(stmt, 3))
             let src = String(cString: sqlite3_column_text(stmt, 4))
             out[key] = Quote(symbol: key, price: price, currency: cur, date: date, source: src)
+        }
+        return out
+    }
+
+    /// 用一次抓取结果覆盖某标的的股息记录 + 写入抓取元数据 (同一事务).
+    /// 抓取失败时保留已有记录, 只更新状态为 failed (决策 Q28: NULL 态展示, 数据不丢).
+    public func replaceDividends(assetKey: String, records: [DividendRecord],
+                                 meta: DividendFetchMeta) throws {
+        try replaceDividendsBatch([(assetKey: assetKey, records: records, meta: meta)])
+    }
+
+    /// 批量版: 并发抓取完成后一次性落库 (决策 Q34: 网络并发, 落库串行批量).
+    public func replaceDividendsBatch(_ updates: [(assetKey: String, records: [DividendRecord],
+                                                   meta: DividendFetchMeta)]) throws {
+        guard !updates.isEmpty else { return }
+        try inTransaction {
+            let del = try prepared("DELETE FROM dividends WHERE asset_key = ?")
+            defer { sqlite3_finalize(del) }
+            let ins = try prepared("INSERT OR REPLACE INTO dividends(asset_key, ex_date, amount, currency, source) VALUES(?,?,?,?,?)")
+            defer { sqlite3_finalize(ins) }
+            let metaSQL = """
+                INSERT INTO dividend_fetch_meta(asset_key, status, source, fetched_at) VALUES(?,?,?,?)
+                ON CONFLICT(asset_key) DO UPDATE SET
+                    status=excluded.status, source=excluded.source, fetched_at=excluded.fetched_at
+                """
+            let metaStmt = try prepared(metaSQL)
+            defer { sqlite3_finalize(metaStmt) }
+            for u in updates {
+                // 只有成功抓取才覆盖记录; unavailable/failed 保留上一次的有效数据.
+                if u.meta.status == .ok {
+                    bindText(del, 1, u.assetKey)
+                    try stepAndReset(del)
+                    for r in u.records {
+                        bindText(ins, 1, r.assetKey)
+                        bindText(ins, 2, r.exDate)
+                        sqlite3_bind_double(ins, 3, r.amount)
+                        bindText(ins, 4, r.currency)
+                        bindText(ins, 5, r.source)
+                        try stepAndReset(ins)
+                    }
+                }
+                bindText(metaStmt, 1, u.meta.assetKey)
+                bindText(metaStmt, 2, u.meta.status.rawValue)
+                bindText(metaStmt, 3, u.meta.source)
+                bindText(metaStmt, 4, u.meta.fetchedAt)
+                try stepAndReset(metaStmt)
+            }
+        }
+    }
+
+    /// All dividend records (逐笔), ordered by asset + 除息日.
+    public func fetchDividends() throws -> [DividendRecord] {
+        let sql = "SELECT asset_key, ex_date, amount, currency, source FROM dividends ORDER BY asset_key, ex_date"
+        let stmt = try prepared(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [DividendRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(DividendRecord(
+                assetKey: String(cString: sqlite3_column_text(stmt, 0)),
+                exDate: String(cString: sqlite3_column_text(stmt, 1)),
+                amount: sqlite3_column_double(stmt, 2),
+                currency: String(cString: sqlite3_column_text(stmt, 3)),
+                source: colText(stmt, 4) ?? ""))
+        }
+        return out
+    }
+
+    /// Per-asset dividend fetch metadata (状态 + 来源 + 抓取时间).
+    public func fetchDividendFetchMetas() throws -> [String: DividendFetchMeta] {
+        let sql = "SELECT asset_key, status, source, fetched_at FROM dividend_fetch_meta"
+        let stmt = try prepared(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [String: DividendFetchMeta] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let key = String(cString: sqlite3_column_text(stmt, 0))
+            let raw = String(cString: sqlite3_column_text(stmt, 1))
+            out[key] = DividendFetchMeta(
+                assetKey: key,
+                status: DividendFetchStatus(rawValue: raw) ?? .failed,
+                source: colText(stmt, 2),
+                fetchedAt: String(cString: sqlite3_column_text(stmt, 3)))
         }
         return out
     }

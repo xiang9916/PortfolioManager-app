@@ -51,6 +51,8 @@ public final class BackupManager {
         out["quarterly_reports"] = try queryRows("SELECT id, period_end, market_value, total_cost, interest_domestic, interest_overseas, dividend_domestic, dividend_overseas, capital_gain_domestic, capital_gain_overseas, taxes, source FROM quarterly_reports ORDER BY period_end")
         out["fx_rates"] = try queryRows("SELECT currency, rate_to_cny, as_of_date, source FROM fx_rates ORDER BY currency")
         out["quotes"] = try queryRows("SELECT asset_key, price, date, currency, source FROM quotes ORDER BY asset_key")
+        out["dividends"] = try queryRows("SELECT asset_key, ex_date, amount, currency, source FROM dividends ORDER BY asset_key, ex_date")
+        out["dividend_fetch_meta"] = try queryRows("SELECT asset_key, status, source, fetched_at FROM dividend_fetch_meta ORDER BY asset_key")
         let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url)
     }
@@ -194,6 +196,46 @@ public final class BackupManager {
             }
             if !quotes.isEmpty { try db.upsertQuotes(quotes) }
         }
+
+        // 股息 (逐笔每股/每份 + 抓取元数据). 合并导入, 按标的一次性替换:
+        // 与其它表一样是「upert by key」语义, 备份里没有的标的不受影响.
+        try importDividends(obj)
+    }
+
+    /// 导入 dividends / dividend_fetch_meta (旧备份没有这两块 → 跳过, 保持向后兼容).
+    private func importDividends(_ obj: [String: Any]) throws {
+        var byAsset: [String: [DividendRecord]] = [:]
+        if let rows = obj["dividends"] as? [[String: Any]] {
+            for r in rows {
+                guard let key = asString(r["asset_key"]),
+                      let ex = asString(r["ex_date"]) else { continue }
+                byAsset[key, default: []].append(DividendRecord(
+                    assetKey: key, exDate: ex,
+                    amount: asDouble(r["amount"]) ?? 0,
+                    currency: asString(r["currency"]) ?? "CNY",
+                    source: asString(r["source"]) ?? "backup"))
+            }
+        }
+        var metas: [String: DividendFetchMeta] = [:]
+        if let rows = obj["dividend_fetch_meta"] as? [[String: Any]] {
+            for r in rows {
+                guard let key = asString(r["asset_key"]) else { continue }
+                let status = DividendFetchStatus(rawValue: asString(r["status"]) ?? "") ?? .ok
+                metas[key] = DividendFetchMeta(assetKey: key, status: status,
+                                               source: asString(r["source"]),
+                                               fetchedAt: asString(r["fetched_at"]) ?? "")
+            }
+        }
+        // 只有记录、没有元数据的备份: 补一条 ok 元数据, 否则记录会被当作 NULL 态忽略.
+        for key in Set(byAsset.keys).subtracting(metas.keys) {
+            metas[key] = DividendFetchMeta(assetKey: key, status: .ok,
+                                           source: nil, fetchedAt: "")
+        }
+        guard !metas.isEmpty else { return }
+        let updates = metas.keys.sorted().map { key in
+            (assetKey: key, records: byAsset[key] ?? [], meta: metas[key]!)
+        }
+        try db.replaceDividendsBatch(updates)
     }
 
     /// Export holdings (joined with asset metadata) to a CSV for spreadsheet interop.

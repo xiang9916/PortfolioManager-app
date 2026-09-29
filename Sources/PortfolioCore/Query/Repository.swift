@@ -80,6 +80,9 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let latestDate: String?
     /// 手动排序序号 (资产透视拖动排序).
     public let sortOrder: Double
+    /// 股息派生块 (前年/去年/今年预计/今年已发生 + 来源与抓取时间).
+    /// nil = 该标的既无资产行也无持仓 (理论上不出现)。
+    public let dividend: AssetDividend?
     public var id: String { assetKey }
 }
 
@@ -316,6 +319,7 @@ public final class Repository {
     public func fetchAssetPerspectives() throws -> [AssetPerspectiveRow] {
         let ctx = try loadContext()
         let total = ctx.totalValueCny
+        let divInputs = dividendInputs()
 
         return ctx.holdings.compactMap { h -> AssetPerspectiveRow? in
             guard let a = ctx.byKey[h.assetKey] else { return nil }
@@ -344,12 +348,112 @@ public final class Repository {
                 weight: total > 0 ? valueCny / total : 0,
                 latestPrice: latestPrice,
                 latestDate: latestDate,
-                sortOrder: a.sortOrder ?? 0)
+                sortOrder: a.sortOrder ?? 0,
+                dividend: assetDividend(asset: a, quantity: h.quantity,
+                                        currency: h.currency, fx: ctx.fx,
+                                        inputs: divInputs))
         }.sorted {
             // 手动排序优先 (拖动后持久化); 未排序 (全部 0) 时按市值降序展示.
             if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
             return $0.valueCny > $1.valueCny
         }
+    }
+
+    // MARK: 全资产股息 / 全资产股息率
+
+    /// 一次抓取到的股息记录 + 元数据 (避免逐个资产查库).
+    private struct DividendInputs {
+        let recordsByAsset: [String: [DividendRecord]]
+        let metas: [String: DividendFetchMeta]
+        let currentYear: Int
+    }
+
+    private func dividendInputs() -> DividendInputs {
+        let records = (try? db.fetchDividends()) ?? []
+        let metas = (try? db.fetchDividendFetchMetas()) ?? [:]
+        return DividendInputs(
+            recordsByAsset: Dictionary(grouping: records, by: { $0.assetKey }),
+            metas: metas,
+            currentYear: Calendar.current.component(.year, from: Date()))
+    }
+
+    /// 单个资产的股息派生 (口径见决策 Q5/Q14/Q18/Q21/Q28/Q35).
+    ///
+    /// - 前年股息 = 前年除息的每股股息合计 × 份额 (原币, 税前)
+    /// - 去年股息 = 去年除息的每股股息合计 × 份额 (原币, 税前)
+    /// - 今年预计股息(原币, 税前) = max(0, 2×去年 − 前年) × 份额 (负值截断)
+    /// - 今年预计股息(折人民币, 税后) = 上式 × 汇率 × (1 − 税率)
+    /// - 今年已发生股息(折人民币, 税后) = 本自然年已除息合计 × 份额 × 汇率 × (1 − 税率)
+    ///
+    /// 状态非 `ok` (数据源无覆盖 / 抓取失败 / 从未抓取) 时, 四个金额字段全为 nil
+    /// (详情显示「—」)。注意: 新上市标的只要**任一抓取窗口**有数据就算 `ok` ——
+    /// 例如 2026-04 才上市的 1111.HK 会命中当年窗口, 因此显示 ¥0.00 而不是「—」
+    /// (它在 2024/2025 确实没有派息, 数值上与 NULL 态一样按 0 计入)。
+    private func assetDividend(asset: Asset, quantity: Double, currency: String,
+                               fx: [String: Double], inputs: DividendInputs) -> AssetDividend {
+        let meta = inputs.metas[asset.key]
+        let status = meta?.status ?? .unavailable
+        let ok = (status == .ok)
+        let records = ok ? (inputs.recordsByAsset[asset.key] ?? []) : []
+        let yearPrevPrev = inputs.currentYear - 2
+        let yearPrev = inputs.currentYear - 1
+        let yearCurrent = inputs.currentYear
+
+        func perShare(_ year: Int) -> Double {
+            records.filter { $0.year == year }.reduce(0) { $0 + $1.amount }
+        }
+        let psPrevPrev = perShare(yearPrevPrev)
+        let psPrev = perShare(yearPrev)
+        let estPerShare = max(0, 2 * psPrev - psPrevPrev)
+
+        let taxRate = DividendTax.rate(market: asset.market, currency: currency)
+        let fxRate = fx[currency]
+        var fxMissing = false
+        var estimatedCny: Double?
+        var actualCny: Double?
+        if ok {
+            if let fxRate, fxRate > 0 {
+                let net = 1 - (taxRate ?? 0)
+                estimatedCny = estPerShare * quantity * fxRate * net
+                actualCny = perShare(yearCurrent) * quantity * fxRate * net
+            } else {
+                fxMissing = true
+            }
+        }
+
+        return AssetDividend(
+            status: status,
+            source: meta?.source,
+            fetchedAt: meta?.fetchedAt,
+            yearPrevPrev: yearPrevPrev, yearPrev: yearPrev, yearCurrent: yearCurrent,
+            perSharePrevPrev: psPrevPrev, perSharePrev: psPrev,
+            prevPrevTotal: ok ? psPrevPrev * quantity : nil,
+            prevTotal: ok ? psPrev * quantity : nil,
+            estimatedTotal: ok ? estPerShare * quantity : nil,
+            estimatedTotalCny: estimatedCny,
+            actualYtdCny: actualCny,
+            taxRate: taxRate, fxMissing: fxMissing,
+            quantity: quantity, currency: currency)
+    }
+
+    /// 全资产股息 = Σ 各资产今年预计股息 (税后, 折人民币); NULL 态与缺汇率按 0 计入.
+    /// 覆盖率只统计非 NULL 态 (决策 Q12), 因为 NULL 计 0 会系统性低估该指标。
+    public func fetchDividendSummary() throws -> DividendSummary {
+        let ctx = try loadContext()
+        let inputs = dividendInputs()
+        var total = 0.0
+        var covered = 0
+        var latest: String?
+        for h in ctx.holdings {
+            guard let a = ctx.byKey[h.assetKey] else { continue }
+            let d = assetDividend(asset: a, quantity: h.quantity,
+                                  currency: h.currency, fx: ctx.fx, inputs: inputs)
+            if d.status == .ok { covered += 1 }
+            total += d.estimatedTotalCny ?? 0
+            if let f = d.fetchedAt, f > (latest ?? "") { latest = f }
+        }
+        return DividendSummary(totalNetCny: total, coveredCount: covered,
+                               assetCount: ctx.holdings.count, fetchedAt: latest)
     }
 
     // MARK: 能力4 — 财务分析 (个人资产/收益结构)

@@ -61,15 +61,27 @@ tmp/extract_app.json ──▶ optimize_portfolio.py ──▶ JSON 结果
 ### 行情自动抓取（能力1）
 ```
 YahooFinanceSource / EastmoneySource ──▶ quotes(最新价) + prices(历史K线)
-        │
-        ▼
+        │                                    │
+        │                                    └─▶ dividends(逐笔每股/每份股息)
+        ▼                                         + dividend_fetch_meta(抓取状态)
   市值 = 份额 × 最新价 (派生, 不落库)
+
+全资产股息 = Σ max(0, 2×去年每股股息 − 前年每股股息) × 份额 × 汇率 × (1 − 税率)
+全资产股息率 = 全资产股息 ÷ 总资产
 ```
+- 抓取: Yahoo chart `events=div`(逐年窗口求和, 不用 range=max), 境内基金用
+  天天基金 `fhsp_{code}.html`(每10份 ÷10, 只取现金分红)。
+- 年份: 按**除息日**归入自然年; 窗口 = 2024-01-01 至今, 全量入库。
+- 状态三态: `ok`(含“确认无分红”=0) / `unavailable`(数据源无覆盖) / `failed`(抓取失败);
+  后两者详情显示「—」, 汇总按 0 计入, 覆盖率提示只统计它们。
+- 税率: `market` 优先、为空回退 `currency`; 美股 10% / 港股 28% / A股 0%, 其余 0%(标注未配置)。
+- 刷新: 与「更新行情」同一按钮, 网络并发(限流 5) + 串行批量落库, 股息按标的 7 天缓存(跨年重抓)。
 
 ### 备份/恢复（能力3）
 ```
 exportJSON ──▶ 可移植 JSON (assets/holdings/snapshots/quarterly_reports/
-                              income_periods/fx_rates/quotes + schema_version)
+                              income_periods/fx_rates/quotes/dividends/
+                              dividend_fetch_meta + schema_version)
 importJSON ──▶ 可选 clearAssets / clearFinancials (先清空再导入 = 真正恢复)
 每日快照 ──▶ backups/portfolio-<ts>.db (WAL checkpoint 后整库复制)
 ```
@@ -80,10 +92,11 @@ importJSON ──▶ 可选 clearAssets / clearFinancials (先清空再导入 = 
 - AppStore 持有 `db / repository / optimizer` 三个 Core 对象，UI 订阅其 observable 属性
 - Python 只通过 `PythonSidecar`（Process 子进程）单向调用，无反向 IPC
 
-## 关键表（Schema v7）
+## 关键表（Schema v8）
 | 域 | 表 |
 |---|---|
 | 资产 | assets / holdings / quotes(最新价) / prices(历史) |
+| 股息 | dividends(逐笔每股/每份) / dividend_fetch_meta(抓取状态+缓存时间) |
 | 历史 | snapshots(市值快照) |
 | 财务 | quarterly_reports(逐季度底稿) / income_periods(旧版, 兼容) |
 | 汇率 | fx_rates / macro_rates |

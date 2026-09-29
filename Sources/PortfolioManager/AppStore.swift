@@ -95,6 +95,8 @@ public final class AppStore {
     public var performancePoints: [PerformancePoint] = []
     public var performanceSummary: PerformanceSummary?
     public var benchmarkPoints: [PerformancePoint] = []  // 比较基准 (沪深300+标普500加权)
+    /// 全资产股息聚合 (今年预计股息税后折人民币 + 覆盖率).
+    public var dividendSummary: DividendSummary?
 
     // 模块2
     public var perspectives: [AssetPerspectiveRow] = []
@@ -196,6 +198,7 @@ public final class AppStore {
             let perf = try repository.fetchPerformance()
             performancePoints = perf.points
             performanceSummary = perf.summary
+            dividendSummary = try repository.fetchDividendSummary()
             perspectives = try repository.fetchAssetPerspectives()
             holdingDrafts = Dictionary(uniqueKeysWithValues: perspectives.map {
                 ($0.assetKey, HoldingDraft(quantity: $0.quantity, costBasis: $0.costBasis,
@@ -236,6 +239,8 @@ public final class AppStore {
         do {
             try db.exec("DELETE FROM quotes")
             try db.exec("DELETE FROM prices")
+            try db.exec("DELETE FROM dividends")
+            try db.exec("DELETE FROM dividend_fetch_meta")
             try db.exec("DELETE FROM holdings")
             try db.exec("DELETE FROM assets")
             try db.exec("DELETE FROM snapshots")
@@ -520,32 +525,79 @@ public final class AppStore {
         return nil
     }
 
+    /// 刷新行情 + 股息 (能力1)。
+    ///
+    /// 全网请求并发 (限流 5), **子任务只 fetch 不碰数据库**, 全部完成后回到
+    /// MainActor 串行批量落库 —— `Database` 没有队列/锁, 并发写 SQLite 会
+    /// `SQLITE_BUSY` / 事务交错 (决策 Q31/Q33/Q34)。
+    /// 股息是低频数据: 7 天内且同一年抓过就跳过 (缓存), 跨年自动重抓 (决策 Q17/Q24)。
+    /// 失败计数与 statusMessage 语义保持与改造前一致。
     public func refreshPrices() async {
         statusMessage = "正在更新行情…"
-        var updated = 0
-        var failed: [String] = []
-        var newQuotes: [Quote] = []
         let assets = (try? db.fetchAssets()) ?? []
         let assetByKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
+        let metas = (try? db.fetchDividendFetchMetas()) ?? [:]
+        let years = dividendYears()
+
+        var jobs: [RefreshJob] = []
         for row in perspectives {
             guard let a = assetByKey[row.assetKey],
                   let (source, symbol) = resolveDataSource(asset: a) else { continue }
-            do {
-                // History (cumulative NAV for funds, K-line for stocks) → prices table (chart).
-                let hist = try await source.fetchHistory(symbol: symbol)
-                let points = hist.map { PricePoint(assetKey: row.assetKey, date: $0.date, close: $0.close, currency: $0.currency) }
-                try db.upsertPrices(points)
-                updated += points.count
-                // Quote (unit NAV for funds, latest price for stocks) → quotes table (market value).
-                if let q = try? await source.fetchQuote(symbol: symbol) {
-                    newQuotes.append(Quote(symbol: row.assetKey, price: q.price,
-                                           currency: q.currency, date: q.date, source: q.source))
+            let skipDividends = metas[row.assetKey].map { dividendCacheFresh($0) } ?? false
+            jobs.append(RefreshJob(assetKey: row.assetKey, source: source,
+                                   symbol: symbol, skipDividends: skipDividends))
+        }
+
+        // 网络阶段: 并发 (限流), 无数据库访问.
+        let outcomes = await withTaskGroup(of: RefreshOutcome.self) { group -> [RefreshOutcome] in
+            var collected: [RefreshOutcome] = []
+            var next = 0
+            let limit = min(refreshConcurrency, jobs.count)
+            while next < limit {
+                let job = jobs[next]; next += 1
+                group.addTask { await runRefreshJob(job, years: years) }
+            }
+            while let out = await group.next() {
+                collected.append(out)
+                if next < jobs.count {
+                    let job = jobs[next]; next += 1
+                    group.addTask { await runRefreshJob(job, years: years) }
                 }
-            } catch {
-                failed.append(row.assetKey)
+            }
+            return collected
+        }
+
+        // 落库阶段: 单线程批量写入.
+        var updated = 0
+        var failed: [String] = []
+        var newQuotes: [Quote] = []
+        var dividendUpdates: [(assetKey: String, records: [DividendRecord],
+                               meta: DividendFetchMeta)] = []
+        for out in outcomes {
+            var writeFailed = false
+            updated += out.points.count
+            if !out.points.isEmpty {
+                // 落库失败也要计入失败数 (与改造前 try db.upsertPrices 的语义一致).
+                do { try db.upsertPrices(out.points) } catch { writeFailed = true }
+            }
+            if out.priceFailed || writeFailed { failed.append(out.assetKey) }
+            if let q = out.quote { newQuotes.append(q) }
+            if let status = out.dividendStatus {
+                let records = (out.dividends ?? []).map {
+                    DividendRecord(assetKey: out.assetKey, exDate: $0.exDate,
+                                   amount: $0.amount, currency: $0.currency,
+                                   source: out.dividendSource ?? "")
+                }
+                dividendUpdates.append((
+                    assetKey: out.assetKey,
+                    records: records,
+                    meta: DividendFetchMeta(assetKey: out.assetKey, status: status,
+                                            source: out.dividendSource,
+                                            fetchedAt: out.dividendStamp ?? dividendStampNow())))
             }
         }
         if !newQuotes.isEmpty { try? db.upsertQuotes(newQuotes) }
+        if !dividendUpdates.isEmpty { try? db.replaceDividendsBatch(dividendUpdates) }
         statusMessage = "行情更新完成：\(updated) 个数据点" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个")
         loadAll()
         await refreshMacroRates()
@@ -850,4 +902,101 @@ public final class AppStore {
             }
         }
     }
+}
+
+// MARK: - 行情 / 股息刷新辅助 (文件作用域: 不继承 @MainActor, 可在子任务里执行)
+
+/// 股息抓取覆盖的自然年起点 (决策 Q20/Q26: 2024-01-01 至今, 全量入库).
+private let dividendStartYear = 2024
+/// 并发上限 (决策 Q33): 公开接口短时几十个并发容易被限流.
+private let refreshConcurrency = 5
+/// 股息缓存有效期 7 天 (决策 Q17/Q24).
+private let dividendCacheTTL: TimeInterval = 7 * 86_400
+
+/// 一次刷新的网络任务 (只带发请求需要的东西).
+private struct RefreshJob: Sendable {
+    let assetKey: String
+    let source: any DataSource
+    let symbol: String
+    /// 命中缓存 → 本次不抓股息 (行情照抓).
+    let skipDividends: Bool
+}
+
+/// 一个标的的网络结果 —— 落库一律回到主上下文串行完成 (决策 Q34).
+private struct RefreshOutcome: Sendable {
+    let assetKey: String
+    let points: [PricePoint]
+    let quote: Quote?
+    let priceFailed: Bool
+    /// nil 的 dividendStatus = 命中缓存, 本次不写股息.
+    let dividends: [DividendEvent]?
+    let dividendStatus: DividendFetchStatus?
+    let dividendSource: String?
+    let dividendStamp: String?
+}
+
+/// 每次新建 formatter —— DateFormatter 不是线程安全的, 不能跨并发任务共享.
+private func dividendStampNow() -> String {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    f.timeZone = TimeZone.current
+    return f.string(from: Date())
+}
+
+/// 缓存新鲜: 7 天内 **且** 与当前同一自然年 —— 跨年后目标年份变化, 必须重抓,
+/// 否则「去年」会缺最新一年 (决策 Q24)。
+private func dividendCacheFresh(_ meta: DividendFetchMeta) -> Bool {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    f.timeZone = TimeZone.current
+    guard let d = f.date(from: meta.fetchedAt) else { return false }
+    let cal = Calendar.current
+    guard cal.component(.year, from: d) == cal.component(.year, from: Date()) else { return false }
+    return Date().timeIntervalSince(d) < dividendCacheTTL
+}
+
+/// 需要覆盖的自然年: 2024 ... 今年.
+private func dividendYears(now: Date = Date()) -> [Int] {
+    let y = Calendar.current.component(.year, from: now)
+    guard y >= dividendStartYear else { return [y] }
+    return Array(dividendStartYear...y)
+}
+
+/// 单标的网络抓取 (历史行情 + 最新价 + 股息), 不触碰数据库.
+private func runRefreshJob(_ job: RefreshJob, years: [Int]) async -> RefreshOutcome {
+    var points: [PricePoint] = []
+    var quote: Quote?
+    var priceFailed = false
+    do {
+        let hist = try await job.source.fetchHistory(symbol: job.symbol)
+        points = hist.map { PricePoint(assetKey: job.assetKey, date: $0.date,
+                                       close: $0.close, currency: $0.currency) }
+        if let q = try? await job.source.fetchQuote(symbol: job.symbol) {
+            quote = Quote(symbol: job.assetKey, price: q.price, currency: q.currency,
+                          date: q.date, source: q.source)
+        }
+    } catch {
+        priceFailed = true
+    }
+
+    var dividends: [DividendEvent]?
+    var status: DividendFetchStatus?
+    var stamp: String?
+    if !job.skipDividends {
+        do {
+            dividends = try await job.source.fetchDividends(symbol: job.symbol, years: years)
+            status = .ok
+        } catch {
+            // `empty` = 数据源对该标的无历史覆盖 (如新上市标的) → NULL 态;
+            // 其它错误 = 抓取失败 → 也是 NULL 态, 但已抓到记录保留不删.
+            status = (error as? DataSourceError)?.isUnavailable == true ? .unavailable : .failed
+        }
+        stamp = status == nil ? nil : dividendStampNow()
+    }
+
+    return RefreshOutcome(assetKey: job.assetKey, points: points, quote: quote,
+                          priceFailed: priceFailed, dividends: dividends,
+                          dividendStatus: status,
+                          dividendSource: status == nil ? nil : job.source.name,
+                          dividendStamp: stamp)
 }

@@ -43,29 +43,69 @@ public struct AssetOverviewView: View {
     // MARK: summary cards
 
     private func summaryCards(_ alloc: AllocationSnapshot) -> some View {
-        HStack(spacing: 16) {
-            metricCard("总资产", money(alloc.totalValue), "chart.pie.fill", .blue)
-            metricCard("境内", money(alloc.domesticValue), "house.fill", .teal)
-            metricCard("境外", money(alloc.overseasValue), "globe", .indigo)
-            if alloc.crossValue > 0 {
-                metricCard("跨池", money(alloc.crossValue), "arrow.triangle.swap", .yellow)
+        let s = store.performanceSummary
+        let div = store.dividendSummary
+        let dividendTotal = div?.totalNetCny ?? 0
+        // 全资产股息率 = 全资产股息 ÷ 总资产 (分母与顶部「总资产」同值, 含跨池 → 分子分母同口径).
+        let dividendYield = alloc.totalValue > 0 ? dividendTotal / alloc.totalValue : 0
+        let coverage = (div?.coveredCount ?? 0).description + "/" + (div?.assetCount ?? store.perspectives.count).description
+        let dividendHelp = """
+        全资产股息 = Σ 各资产「今年预计股息（折人民币，税后）」。
+        口径：按除息日归入自然年；今年预计每股股息 = max(0, 2×去年每股股息 − 前年每股股息)；
+        再 × 份额 × 汇率 × (1 − 股息税率)。美股 10% / 港股 28% / A股 0%。
+        数据源 Yahoo + 天天基金，逐年窗口抓取。
+        覆盖 \(coverage) 个资产（「—」= 数据源无覆盖或抓取失败，按 0 计入）。
+        更新：\(div?.fetchedAt ?? "尚未抓取")
+        """
+        let yieldHelp = """
+        全资产股息率 = 全资产股息 ÷ 总资产。
+        分母与顶部「总资产」一致（含跨池），分子分母同口径。
+        覆盖 \(coverage) 个资产；未覆盖的资产按 0 计入，会低估该比率。
+        """
+        return VStack(alignment: .leading, spacing: 16) {
+            // 4 列 2 行: 总资产/境内/境外/全资产股息 · 近三年收益/年化波动/最大回撤/全资产股息率
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: 4),
+                      spacing: 16) {
+                metricCard("总资产", money(alloc.totalValue), "chart.pie.fill", .blue)
+                metricCard("境内", money(alloc.domesticValue), "house.fill", .teal)
+                metricCard("境外", money(alloc.overseasValue), "globe", .indigo)
+                metricCard("全资产股息", money2(dividendTotal), "banknote", .mint, help: dividendHelp)
+                metricCard("近3年收益", perf(s?.totalReturn), "chart.line.uptrend.xyaxis",
+                           (s?.totalReturn ?? 0) >= 0 ? .green : .red)
+                metricCard("年化波动", perf(s?.annualizedVolatility), "waveform.path.ecg", .orange)
+                metricCard("最大回撤", perf(s?.maxDrawdown), "arrow.down.right", .purple)
+                metricCard("全资产股息率", pct(dividendYield), "percent", .pink, help: yieldHelp)
             }
-            if let s = store.performanceSummary {
-                metricCard("近3年收益", pct(s.totalReturn), "chart.line.uptrend.xyaxis", s.totalReturn >= 0 ? .green : .red)
-                metricCard("年化波动", pct(s.annualizedVolatility), "waveform.path.ecg", .orange)
-                metricCard("最大回撤", pct(s.maxDrawdown), "arrow.down.right", .purple)
+            // 「跨池」不在 4×2 主网格里: 跨池是资产大类层面的属性, 标的级 pool=cross 才有金额。
+            // 条件性附加行 — 不占你指定的 8 个位, 也不静默丢信息 (当前数据 cross=0, 不显示)。
+            if alloc.crossValue > 0 {
+                metricCard("跨池", money(alloc.crossValue), "arrow.triangle.swap", .yellow,
+                           help: "标的级 pool=跨池 的持仓市值合计（相当于现金，不计入境内/境外）。")
             }
         }
     }
 
-    private func metricCard(_ title: String, _ value: String, _ icon: String, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    /// 绩效卡缺数据时显示「—」, 保持 4×2 网格形状稳定.
+    private func perf(_ v: Double?) -> String {
+        guard let v else { return "—" }
+        return pct(v)
+    }
+
+    @ViewBuilder
+    private func metricCard(_ title: String, _ value: String, _ icon: String, _ color: Color,
+                            help: String? = nil) -> some View {
+        let card = VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: icon).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.title2).fontWeight(.semibold).monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        if let help {
+            card.help(Text(help))
+        } else {
+            card
+        }
     }
 
     // MARK: allocation
@@ -182,6 +222,15 @@ public struct AssetOverviewView: View {
         f.numberStyle = .decimal
         f.maximumFractionDigits = 0
         return "¥" + (f.string(from: NSNumber(value: v)) ?? "0")
+    }
+    /// 股息金额用两位小数 (金额小, 取整会看不出差别).
+    private func money2(_ v: Double) -> String {
+        if store.hideNumbers { return PrivacyStyle.masked }
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        return "¥" + (f.string(from: NSNumber(value: v)) ?? "0.00")
     }
     private func pct(_ v: Double) -> String {
         if store.hideNumbers { return PrivacyStyle.masked }
