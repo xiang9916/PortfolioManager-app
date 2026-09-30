@@ -200,7 +200,7 @@ if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "r
     }
 }
 if args.count >= 2 && args[1] == "extract" {
-    let numbersPath = args.count >= 3 ? args[2] : "../Finance/portfolio.numbers"
+    let numbersPath = args.count >= 3 ? args[2] : "portfolio.numbers"
     exit(runExtract(numbersPath: numbersPath))
 }
 if args.count >= 2 && args[1] == "summarize" && args.count >= 3 {
