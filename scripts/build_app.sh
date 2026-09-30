@@ -47,6 +47,25 @@ cp "${BUILD_DIR}/${APP_NAME}" "${BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp "scripts/Info.plist" "${BUNDLE}/Contents/Info.plist"
 printf 'APPL????' > "${BUNDLE}/Contents/PkgInfo"
 
+# 隐私: release 二进制里会带上构建机绝对路径 (/Users/<user>/Documents/Github/... 与
+# .build/out/... 的 debug info 记录)。发布出去等于公开用户名与目录结构; -file-prefix-map
+# 只能覆盖一部分(还会干扰 pcm 查找), 所以这里做**等长**中性替换: 只改调试元数据里的字节,
+# 不动 Mach-O 任何偏移/大小, 且必须在 codesign 之前执行(改完再签名)。
+echo "==> scrubbing build-machine paths inside binary"
+python3 - "${BUNDLE}/Contents/MacOS/${APP_NAME}" "${HOME}" <<'PY'
+import sys
+binary, home = sys.argv[1], sys.argv[2].encode()
+neutral = b'/tmp/pmbuild'          # 与 /Users/<user> 等长(12 字节)
+data = open(binary, 'rb').read()
+if len(neutral) != len(home):
+    print(f'    skipped: home prefix is {len(home)} bytes, neutral is {len(neutral)}')
+    sys.exit(0)
+n = data.count(home)
+if n:
+    open(binary, 'wb').write(data.replace(home, neutral))
+print(f'    replaced {n} occurrences of the build-machine home path')
+PY
+
 # Optimizer scripts (small, pure python) always bundled.
 mkdir -p "${BUNDLE}/Contents/Resources/Optimizer"
 cp -R "Optimizer/scripts" "${BUNDLE}/Contents/Resources/Optimizer/scripts"
@@ -79,6 +98,17 @@ if [ "${WITH_VENV}" = "1" ]; then
   echo "==> bundling venv (this-machine relocatable)"
   rm -rf "${BUNDLE}/Contents/Resources/Optimizer/.venv"
   cp -R "Optimizer/.venv" "${BUNDLE}/Contents/Resources/Optimizer/.venv"
+
+  # 隐私: 拷进来的 venv 里到处是构建机绝对路径（bin/activate、pyvenv.cfg 的 command 行、
+  # __pycache__ 里 .pyc 嵌的源码路径）。统一重写成 /build 并删掉字节码缓存 —— 运行时只直接
+  # 执行 bin/python3（真正的二进制），不依赖这些文本里的路径，删缓存只会让首跑重新编译。
+  echo "==> scrubbing build-machine paths inside venv"
+  VENV="${BUNDLE}/Contents/Resources/Optimizer/.venv"
+  find "${VENV}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" 2>/dev/null | while IFS= read -r f; do
+    perl -pi -e 's#/Users/[A-Za-z0-9_.-]+/#/build/#g' "$f"
+  done
+  echo "    remaining /Users references: $(grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" 2>/dev/null | wc -l | tr -d ' ')"
 fi
 
 if [ "${CODESIGN}" = "1" ]; then
