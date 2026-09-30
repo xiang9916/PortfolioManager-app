@@ -60,7 +60,7 @@ func runExtract(numbersPath: String) -> Int32 {
         let data = try Data(contentsOf: URL(fileURLWithPath: outPath))
         if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
             print("提取成功")
-            print("  总资产: \(obj["total_value"] ?? "?")")
+            print("  总市值: \(obj["total_value"] ?? "?")")
             print("  境内: \(obj["domestic_value"] ?? "?")  境外: \(obj["overseas_value"] ?? "?")")
             print("  pool_mode: \(obj["pool_mode"] ?? "?")")
             if let warnings = obj["warnings"] as? [String] {
@@ -263,8 +263,10 @@ if args.count >= 2 && args[1] == "overview" {
         let repo = Repository(db: db)
         let alloc = try repo.fetchAllocation()
         let perf = try repo.fetchPerformance()
-        print("总资产: \(alloc.totalValue)")
+        print("总市值: \(alloc.totalValue)")
         print("境内: \(alloc.domesticValue)  境外: \(alloc.overseasValue)")
+        print("总成本: \(alloc.totalCost)")
+        print("境内成本: \(alloc.domesticCost)  境外成本: \(alloc.overseasCost)")
         print("配置 (按资产类别):")
         for s in alloc.slices {
             print(String(format: "  %-20@ %12.0f  %6.2f%%", s.assetClass, s.value, s.weight * 100))

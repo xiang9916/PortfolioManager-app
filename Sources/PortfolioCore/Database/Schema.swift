@@ -192,7 +192,7 @@ public enum Schema {
         """,
         ]),
         (5, [
-        // 模块2: assets.sort_order — 资产透视列表手动拖动排序 (0 = 未排序, 按 key 字典序回退).
+        // 模块2: assets.sort_order — 资产明细列表手动拖动排序 (0 = 未排序, 按 key 字典序回退).
         "ALTER TABLE assets ADD COLUMN sort_order REAL NOT NULL DEFAULT 0;",
         ]),
         (6, [

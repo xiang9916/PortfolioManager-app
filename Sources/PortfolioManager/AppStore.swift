@@ -69,7 +69,7 @@ public enum AppPaths {
     }
 }
 
-/// Editable draft of a holding's fields (资产透视 editing).
+/// Editable draft of a holding's fields (资产明细 editing).
 public struct HoldingDraft: Hashable {
     public var quantity: Double
     public var costBasis: Double
@@ -117,7 +117,7 @@ public final class AppStore {
     public var lastOptimization: OptimizationResult?
     public var optimizeError: String?
 
-    // 能力2 新标的测试 (临时标的重跑优化; 结果独立于 lastOptimization, 不触碰资产管理数据)
+    // 能力2 新标的测试 (临时标的重跑优化; 结果独立于 lastOptimization, 不触碰资产总览数据)
     public var isTestOptimizing = false
     public var testOptimization: OptimizationResult?
     public var testOptimizeError: String?
@@ -329,6 +329,29 @@ public final class AppStore {
         }
     }
 
+    // MARK: 能力4 — 「总市值 / 总成本」一键填入当前值 (Q6=C / Q7=A / Q8=A / Q10=B / Q15=B)
+
+    /// 财务分析里「总市值」「总成本」两格可一键填入的**当前**值。
+    /// 规则本体在 `QuarterlyFill`（PortfolioCore，有单测锁口径），这里只负责把状态喂进去。
+    /// ⚠️ 填的是当下实时值，不是该季末的历史值 —— 见 `docs/adr/0001`。
+    public func quarterlyFillValue(periodEnd: String, field: QuarterlyField) -> Double? {
+        QuarterlyFill.value(field: field, periodEnd: periodEnd,
+                            reports: quarterlyReports, allocation: allocation)
+    }
+
+    /// 执行填入：走与手输完全相同的路径（`updateQuarterlyField` → 同样防抖落盘），
+    /// 因此派生行会立刻跟着重算。返回填进去的数值，供视图同步单元格草稿。
+    @discardableResult
+    public func applyQuarterlyFill(periodEnd: String, field: QuarterlyField) -> Double? {
+        guard let v = quarterlyFillValue(periodEnd: periodEnd, field: field) else {
+            statusMessage = "暂无可填入的当前值（行情或成本为空）"
+            return nil
+        }
+        updateQuarterlyField(periodEnd: periodEnd, field: field, value: v)
+        statusMessage = "已填入当前\(field.label)：¥" + String(format: "%.2f", v)
+        return v
+    }
+
     /// 修改季度列的截止日 (表头编辑).
     public func renameQuarter(from oldEnd: String, to newEnd: String) {
         let trimmed = newEnd.trimmingCharacters(in: .whitespaces)
@@ -404,14 +427,18 @@ public final class AppStore {
         }
     }
 
-    /// Add a new asset target (with a zero holding so it shows up in 资产透视).
-    public func addAsset(key: String, name: String, ticker: String?, market: String?,
-                         assetClass: String, pool: Pool, currency: String) {
+    /// Add a new asset target (with a zero holding so it shows up in 资产明细).
+    /// 池不再由调用方传入：它由市场派生（Q27 删掉了手选池的入口）。
+    public func addAsset(key: String, name: String, ticker: String?, market: AssetMarket?,
+                         assetClass: String, currency: String) {
         do {
             // New targets get sort_order = max+1 → appended at the end of the list.
             let nextOrder = ((try? db.fetchAssets())?.compactMap { $0.sortOrder }.max() ?? 0) + 1
             let asset = Asset(key: key, name: name, ticker: ticker, market: market,
-                              assetClass: assetClass, pool: pool, currency: currency, source: "manual",
+                              assetClass: assetClass,
+                              pool: AssetMarket.pool(market: market?.rawValue, ticker: ticker ?? key,
+                                                     currency: currency),
+                              currency: currency, source: "manual",
                               sortOrder: nextOrder)
             try db.insertAsset(asset)
             try db.upsertHoldings([Holding(assetKey: key, quantity: 0, costBasis: 0,
@@ -424,7 +451,7 @@ public final class AppStore {
         }
     }
 
-    /// Persist drag-to-reorder of the 资产透视 list (module 2).
+    /// Persist drag-to-reorder of the 资产明细 list (module 2).
     /// Rewrites every asset's sort_order to 0..n-1 following the new arrangement.
     public func moveAsset(from source: IndexSet, to destination: Int) {
         var rows = perspectives
@@ -643,20 +670,20 @@ public final class AppStore {
 
     // MARK: 能力1 — 比较基准 (沪深300 + 标普500 加权, 与优化器基准一致)
 
-    /// 境内/境外池权重 — 来自资产管理的实时统计 (每个标的自身的 pool 归属),
+    /// 境内/境外池权重 — 来自资产总览的实时统计 (池由每个标的的**市场**派生),
     /// 不再使用 .numbers 提取文件的预填比例; 无持仓数据时回退 50/50.
+    /// 池只有境内/境外两种, 因此两者必然归一 (旧的「跨池余量」已随 cross 一起废除)。
     public var livePoolWeights: (domestic: Double, overseas: Double) {
         guard let alloc = allocation, alloc.totalValue > 0 else { return (0.5, 0.5) }
         let dom = alloc.domesticValue / alloc.totalValue
         let ov = alloc.overseasValue / alloc.totalValue
-        // 跨池部分不计入基准 (相当于现金), 剩余比例归一化使用.
         let used = dom + ov
         guard used > 0 else { return (0.5, 0.5) }
         return (dom / used, ov / used)
     }
 
     /// Fetch and store benchmark history (SPY + 000300.SS weighted by the live
-    /// domestic/overseas pool split from 资产管理). Falls back to 50/50 when no data.
+    /// domestic/overseas pool split from 资产总览). Falls back to 50/50 when no data.
     public func fetchBenchmark() async {
         let w = livePoolWeights
         let domW = w.domestic
@@ -704,8 +731,8 @@ public final class AppStore {
     // MARK: 能力2 — optimizer
 
     /// Copy of extract_app.json with pool stats + us_equity + domestic_holdings + rf
-    /// overwritten by LIVE 资产管理/资产透视 statistics — 优化器不再使用 .numbers 冻结快照.
-    /// - 境内/境外权重 = 占总资产比例 (未归一化), 跨池余量由优化器自由分配.
+    /// overwritten by LIVE 资产总览/资产明细 statistics — 优化器不再使用 .numbers 冻结快照.
+    /// - 境内/境外权重 = 占总市值比例 (未归一化); 池由每个标的的市场派生, 只有两种, 必然归一.
     /// - us_equity.holdings = 实时美股持仓 (替代 .numbers 导入日冻结值 → O_US_CORE 聚合 mu/vol + stage2 优先级).
     /// - domestic_holdings = 实时境内基金持仓 (动态锚定, 替代 params.py 写死的 fund_code).
     /// - rf = 池比例加权中美10年国债收益率 (替代 params.py 写死的 0.025).
@@ -822,7 +849,7 @@ public final class AppStore {
     // MARK: 能力2 — 新标的测试
 
     /// 临时加入标的重跑一次优化。结果写入 testOptimization（「测试结果」弹窗），
-    /// 不影响 lastOptimization 与资产管理数据; 仅 optimization_runs 留痕
+    /// 不影响 lastOptimization 与资产总览数据; 仅 optimization_runs 留痕
     /// (paramsDesc 带 test=...)。与普通优化互斥。
     public func runTestOptimization(tickers: [String]) {
         guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }

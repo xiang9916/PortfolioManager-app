@@ -12,23 +12,29 @@ public struct AllocationSlice: Codable, Hashable, Identifiable {
 }
 
 /// Current portfolio allocation snapshot.
-/// 境内/境外/跨池 按每个标的自身的 pool 字段统计 (与资产透视中填写的一致),
-/// 不再按资产大类分组取整组归属.
+/// 境内/境外按每个标的的**市场**派生（`AssetMarket` → 池，见 Q26=C / Q31），
+/// 与资产明细里显示的「池」一致；不再按资产大类分组取整组归属。
 public struct AllocationSnapshot: Codable, Hashable {
     public let asOfDate: String?
     public let totalValue: Double
     public let domesticValue: Double
     public let overseasValue: Double
-    public let crossValue: Double
+    /// 总成本 = Σ 各持仓「成本（折人民币）」；总市值 = totalValue。两者同口径（都含全部持仓）。
+    public let totalCost: Double
+    public let domesticCost: Double
+    public let overseasCost: Double
     public let slices: [AllocationSlice]
 
     public init(asOfDate: String?, totalValue: Double, domesticValue: Double,
-                overseasValue: Double, crossValue: Double = 0, slices: [AllocationSlice]) {
+                overseasValue: Double, totalCost: Double = 0, domesticCost: Double = 0,
+                overseasCost: Double = 0, slices: [AllocationSlice]) {
         self.asOfDate = asOfDate
         self.totalValue = totalValue
         self.domesticValue = domesticValue
         self.overseasValue = overseasValue
-        self.crossValue = crossValue
+        self.totalCost = totalCost
+        self.domesticCost = domesticCost
+        self.overseasCost = overseasCost
         self.slices = slices
     }
 }
@@ -60,6 +66,8 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let assetKey: String
     public let name: String
     public let assetClass: String
+    /// 解析后的市场（闭集）。nil = 未设置且 ticker 推断不出。
+    public let market: AssetMarket?
     public let pool: Pool
     /// Holding currency (the currency `costBasis` is entered in; the derived value shares it).
     public let currency: String
@@ -67,18 +75,19 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let value: Double
     /// 市值折人民币 (value × FX rate) — 权重计算基准.
     public let valueCny: Double
-    /// 成本/本金折人民币 (costBasis × FX rate).
+    /// 成本（折人民币）(costBasis × FX rate).
     public let costCny: Double
-    /// 浮盈浮亏 = 市值 - 本金 (人民币).
+    /// 浮盈浮亏 = 市值 − 成本 (人民币).
     public let unrealizedPnl: Double
-    /// 收益率 = 浮盈浮亏 / 本金 (本金为 0 时记 0).
+    /// 收益率 = 浮盈浮亏 / 成本 (成本为 0 时记 0).
     public let returnRate: Double
     public let quantity: Double
+    /// 手工录入的持仓成本（原币, 与 `currency` 同币种）。
     public let costBasis: Double
     public let weight: Double
     public let latestPrice: Double?
     public let latestDate: String?
-    /// 手动排序序号 (资产透视拖动排序).
+    /// 手动排序序号 (资产明细拖动排序).
     public let sortOrder: Double
     /// 股息派生块 (前年/去年/今年预计/今年已发生 + 来源与抓取时间).
     /// nil = 该标的既无资产行也无持仓 (理论上不出现)。
@@ -184,31 +193,48 @@ public final class Repository {
         derivedValue(h, latest: ctx.latest) * (ctx.fx[h.currency] ?? 1.0)
     }
 
+    // MARK: 市场 / 池 — 唯一解析入口 (Q26=C, Q31)
+
+    /// 标的的市场（闭集）: 已填 market → ticker 推断 → nil。
+    private func market(_ a: Asset) -> AssetMarket? {
+        AssetMarket.resolve(market: a.market?.rawValue, ticker: a.ticker ?? a.key)
+    }
+
+    /// 标的的池归属: 由市场派生，市场解析不出来时按币种回退。
+    /// **不再读 `assets.pool` 列** —— 那一列只是写入时的缓存，读时派生才能保证
+    /// 池与股息税率永远从同一个市场结论出发。
+    private func pool(_ a: Asset) -> Pool {
+        AssetMarket.pool(market: a.market?.rawValue, ticker: a.ticker ?? a.key, currency: a.currency)
+    }
+
     // MARK: 模块1 — asset allocation
 
     public func fetchAllocation() throws -> AllocationSnapshot {
         let ctx = try loadContext()
         let total = ctx.totalValueCny
         var groups: [String: (value: Double, pool: Pool)] = [:]
-        // 池统计按「每个标的自身的 pool」累计 — 修复: 之前按大类分组且组池被同组
+        // 池统计按「每个标的自身的市场」累计 — 修复: 之前按大类分组且组池被同组
         // 最后一个标的覆盖, 导致同大类中境内标的 (如 000001) 被计入境外池.
         var domestic = 0.0
         var overseas = 0.0
-        var cross = 0.0
+        var totalCost = 0.0
+        var domesticCost = 0.0
+        var overseasCost = 0.0
         for h in ctx.holdings {
             let a = ctx.byKey[h.assetKey]
             let cls = a?.assetClass ?? "其他"
-            let pool = a?.pool ?? .overseas
+            let p = a.map { pool($0) } ?? .overseas
             let v = valueCny(h, ctx: ctx)
+            let c = h.costBasis * (ctx.fx[h.currency] ?? 1.0)
             if let cur = groups[cls] {
                 groups[cls] = (cur.value + v, cur.pool)
             } else {
-                groups[cls] = (v, pool)
+                groups[cls] = (v, p)
             }
-            switch pool {
-            case .domestic: domestic += v
-            case .overseas: overseas += v
-            case .cross: cross += v
+            totalCost += c
+            switch p {
+            case .domestic: domestic += v; domesticCost += c
+            case .overseas: overseas += v; overseasCost += c
             }
         }
         let slices = groups.map { (cls, v) in
@@ -221,7 +247,9 @@ public final class Repository {
             totalValue: total,
             domesticValue: domestic,
             overseasValue: overseas,
-            crossValue: cross,
+            totalCost: totalCost,
+            domesticCost: domesticCost,
+            overseasCost: overseasCost,
             slices: slices)
     }
 
@@ -336,7 +364,8 @@ public final class Repository {
                 assetKey: h.assetKey,
                 name: a.name,
                 assetClass: a.assetClass ?? "其他",
-                pool: a.pool,
+                market: market(a),
+                pool: pool(a),
                 currency: h.currency,
                 value: value,
                 valueCny: valueCny,
@@ -351,7 +380,7 @@ public final class Repository {
                 sortOrder: a.sortOrder ?? 0,
                 dividend: assetDividend(asset: a, quantity: h.quantity,
                                         currency: h.currency, fx: ctx.fx,
-                                        inputs: divInputs))
+                                        market: market(a), inputs: divInputs))
         }.sorted {
             // 手动排序优先 (拖动后持久化); 未排序 (全部 0) 时按市值降序展示.
             if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
@@ -390,7 +419,8 @@ public final class Repository {
     /// 例如 2026-04 才上市的 1111.HK 会命中当年窗口, 因此显示 ¥0.00 而不是「—」
     /// (它在 2024/2025 确实没有派息, 数值上与 NULL 态一样按 0 计入)。
     private func assetDividend(asset: Asset, quantity: Double, currency: String,
-                               fx: [String: Double], inputs: DividendInputs) -> AssetDividend {
+                               fx: [String: Double], market: AssetMarket?,
+                               inputs: DividendInputs) -> AssetDividend {
         let meta = inputs.metas[asset.key]
         let status = meta?.status ?? .unavailable
         let ok = (status == .ok)
@@ -406,7 +436,8 @@ public final class Repository {
         let psPrev = perShare(yearPrev)
         let estPerShare = max(0, 2 * psPrev - psPrevPrev)
 
-        let taxRate = DividendTax.rate(market: asset.market, currency: currency)
+        // 税率与池归属共用同一个解析结果 (Q31): market 来自 AssetMarket，币种回退只在解析不出市场时发生。
+        let taxRate = DividendTax.rate(market: market?.rawValue, currency: currency)
         let fxRate = fx[currency]
         var fxMissing = false
         var estimatedCny: Double?
@@ -447,7 +478,8 @@ public final class Repository {
         for h in ctx.holdings {
             guard let a = ctx.byKey[h.assetKey] else { continue }
             let d = assetDividend(asset: a, quantity: h.quantity,
-                                  currency: h.currency, fx: ctx.fx, inputs: inputs)
+                                  currency: h.currency, fx: ctx.fx,
+                                  market: market(a), inputs: inputs)
             if d.status == .ok { covered += 1 }
             total += d.estimatedTotalCny ?? 0
             if let f = d.fetchedAt, f > (latest ?? "") { latest = f }

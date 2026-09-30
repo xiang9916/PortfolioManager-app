@@ -158,8 +158,8 @@ public struct OptimizeButton: View {
                 Text(String(format: "%.1f%% / %.1f%%", w.domestic * 100, w.overseas * 100))
                     .monospacedDigit().foregroundStyle(.secondary)
             }
-            .help("取自资产管理的实时统计（按每个标的的池归属折人民币计算），优化器与基准线均使用该比例。")
-            Text("约束：境内池未达 50 万前只买汇丰中国开放申购基金；黄金与大中华权益可跨池分配。")
+            .help("取自资产总览的实时统计（池由每个标的的「市场」派生，折人民币计算），优化器与基准线均使用该比例。")
+            Text("约束：境内池未达 50 万前只买汇丰中国开放申购基金；黄金与大中华权益可由优化器在两个池之间分配。")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             HStack {

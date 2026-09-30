@@ -78,48 +78,41 @@ public struct DividendFetchMeta: Codable, Hashable, Identifiable {
 
 // MARK: - 股息税 (决策 Q4 / Q36 / Q38)
 
-/// 按市场固定税率。判定顺序: `assets.market` 优先, 为空/未识别则回退 `currency`。
-/// 两者都无法判定 → nil (未配置, 按 0% 计并在详情标注)。
+/// 按市场固定税率。市场判定一律经 `AssetMarket`（闭集，别名表只有那一份），
+/// 因此「池归属」与「股息税率」永远从同一个市场结论派生，不可能分叉（Q26/C 后的要求）。
+/// 判定顺序: market → 为空/不在闭集内则回退 currency；两者都无法判定 → nil
+/// (未配置, 按 0% 计并在详情标注)。
 ///
-/// 税率表 (用户确认): 美股 10% / 港股 28% / A股 0%。
+/// 税率表 (用户确认): 美股 10% / 港股 28% / A股 0%；日本/新加坡未配置。
 public enum DividendTax {
     public static let usRate = 0.10
     public static let hkRate = 0.28
     public static let cnRate = 0.0
 
-    private static let usMarkets: Set<String> = [
-        "US", "USA", "U.S.", "U.S", "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS",
-        "US_MARKET", "UNITED_STATES",
-    ]
-    private static let hkMarkets: Set<String> = [
-        "HK", "HKEX", "SEHK", "HONGKONG", "HONG_KONG", "港股",
-    ]
-    private static let cnMarkets: Set<String> = [
-        "CN", "SH", "SZ", "SS", "SSE", "SZSE", "CHINA", "A", "ASHARE",
-        "A_SHARE", "A股", "中国",
-    ]
-
-    /// nil = 未配置税率 (调用方按 0 处理并标注)。
-    public static func rate(market: String?, currency: String) -> Double? {
-        if let raw = market?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-            let m = raw.uppercased()
-            if usMarkets.contains(m) || m.contains("NASDAQ") || m.contains("NYSE")
-                || m.contains("AMEX") {
-                return usRate
-            }
-            if hkMarkets.contains(m) || m.contains("HKEX") || m.contains("SEHK") {
-                return hkRate
-            }
-            if cnMarkets.contains(m) || m.contains("SHANGHAI") || m.contains("SHENZHEN") {
-                return cnRate
-            }
+    /// 闭集市场 → 税率；`.jp` / `.sg` 未配置 → nil；`.cn` 为 0（不是「未配置」）。
+    public static func rate(market: AssetMarket) -> Double? {
+        switch market {
+        case .us: return usRate
+        case .hk: return hkRate
+        case .cn: return cnRate
+        case .jp, .sg: return nil
         }
+    }
+
+    /// 币种回退表（market 缺失或未配置时用）。
+    public static func rate(currency: String) -> Double? {
         switch currency.uppercased() {
         case "USD": return usRate
         case "HKD": return hkRate
         case "CNY": return cnRate
         default: return nil
         }
+    }
+
+    /// nil = 未配置税率 (调用方按 0 处理并标注)。
+    public static func rate(market: String?, currency: String) -> Double? {
+        if let m = AssetMarket.canonical(from: market), let r = rate(market: m) { return r }
+        return rate(currency: currency)
     }
 
     /// 描述用 (详情 tooltip): "未配置" / "10%" ...

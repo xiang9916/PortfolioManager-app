@@ -1,7 +1,7 @@
 import SwiftUI
 import PortfolioCore
 
-/// 模块2：资产透视 — 单个资产状态 + 数据更新 + 标的增删。
+/// 模块2：资产明细 — 单个资产状态 + 数据更新 + 标的增删。
 public struct AssetPerspectiveView: View {
     @Bindable var store: AppStore
     @State private var selectedKey: String?
@@ -18,7 +18,7 @@ public struct AssetPerspectiveView: View {
                     store.moveAsset(from: source, to: destination)
                 }
             }
-            .navigationTitle("资产透视")
+            .navigationTitle("资产明细")
             .help("列表行可直接拖动调整顺序，排序自动保存")
         } detail: {
             Group {
@@ -90,6 +90,8 @@ public struct AssetDetailView: View {
                 }
                 detailRow("标的代码", row.assetKey)
                 detailRow("资产类别", AssetClassStyle.displayName(row.assetClass))
+                detailRow("市场", marketText(row.market))
+                    .help(Text("市场是闭集（US/HK/CN/JP/SG），从标的代码推断或由你指定；「池」由它派生：中国内地 → 境内，其余 → 境外。"))
                 detailRow("池", AssetClassStyle.poolName(row.pool))
                 detailRow("币种", row.currency)
                 detailRow("权重", store.hideNumbers ? PrivacyStyle.masked : pct(row.weight))
@@ -100,7 +102,7 @@ public struct AssetDetailView: View {
                 detailRow("市值 (" + row.currency + ")",
                           store.hideNumbers ? PrivacyStyle.masked : CurrencyStyle.symbol(row.currency) + money(row.value))
                 detailRow("市值 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.valueCny) + " ¥")
-                detailRow("本金 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.costCny) + " ¥")
+                detailRow("成本 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.costCny) + " ¥")
                 pnlRow("浮盈浮亏", row.unrealizedPnl)
                 detailRow("收益率", store.hideNumbers ? PrivacyStyle.masked : pct(row.returnRate))
 
@@ -141,7 +143,7 @@ public struct AssetDetailView: View {
                         }
                         let ccy = store.holdingDrafts[row.assetKey]?.currency ?? row.currency
                         editableField("份额 / 数量", store.holdingBinding(row.assetKey, \.quantity))
-                        editableField("总成本 (" + ccy + ")", store.holdingBinding(row.assetKey, \.costBasis))
+                        editableField("成本 (" + ccy + ")", store.holdingBinding(row.assetKey, \.costBasis))
                         Text("市值 = 份额 × 最后价，自动抓取计算，无需手填").font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(6)
@@ -183,6 +185,11 @@ public struct AssetDetailView: View {
     }
 
     // MARK: 股息 (只读, 自动抓取)
+
+    /// 市场行 — nil = 未设置且从代码推断不出，池随即回退到币种口径。
+    private func marketText(_ m: AssetMarket?) -> String {
+        m?.displayLabel ?? "未设置（按币种回退）"
+    }
 
     /// 原币金额行 — nil (数据源无覆盖 / 抓取失败) 显示「—」.
     private func dividendCurrencyRow(_ label: String, amount: Double?,

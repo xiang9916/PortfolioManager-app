@@ -65,8 +65,9 @@ final class LiveDividendPipelineTests: XCTestCase {
         let rows = try repo.fetchAssetPerspectives()
 
         print("\n===== 全资产股息实测 (\(years.first!)–\(years.last!)) =====")
-        print(String(format: "全资产股息 = ¥%.2f | 总资产 = ¥%.0f | 股息率 = %.2f%% | 覆盖 %d/%d",
+        print(String(format: "全资产股息 = ¥%.2f | 总市值 = ¥%.0f | 总成本 = ¥%.0f | 股息率 = %.2f%% | 覆盖 %d/%d",
                      summary.totalNetCny, try repo.fetchAllocation().totalValue,
+                     try repo.fetchAllocation().totalCost,
                      summary.totalNetCny / max(1, try repo.fetchAllocation().totalValue) * 100,
                      summary.coveredCount, summary.assetCount))
         for row in rows {

@@ -100,13 +100,17 @@ public final class BackupManager {
             var assets: [Asset] = []
             for r in rows {
                 guard let key = asString(r["key"]), let name = asString(r["name"]) else { continue }
-                let pool = Pool(rawValue: asString(r["pool"]) ?? "overseas") ?? .overseas
+                let ticker = asString(r["ticker"])
+                let currency = asString(r["currency"]) ?? "CNY"
+                // 兼容旧备份：pool 里的 'cross'（已废除）与自由文本 market 一律按
+                // 「market 归一 → ticker 推断 → 币种回退」重新解析（Q20=C / Q32）。
+                let marketRaw = asString(r["market"])
                 assets.append(Asset(key: key, name: name,
-                                    ticker: asString(r["ticker"]),
-                                    market: asString(r["market"]),
+                                    ticker: ticker,
+                                    market: AssetMarket.resolve(market: marketRaw, ticker: ticker),
                                     assetClass: asString(r["asset_class"]),
-                                    pool: pool,
-                                    currency: asString(r["currency"]) ?? "CNY",
+                                    pool: AssetMarket.pool(market: marketRaw, ticker: ticker, currency: currency),
+                                    currency: currency,
                                     source: asString(r["source"]),
                                     feeRate: asDouble(r["fee_rate"]),
                                     sortOrder: asDouble(r["sort_order"])))

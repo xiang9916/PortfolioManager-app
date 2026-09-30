@@ -47,7 +47,6 @@ public enum AssetClassStyle {
         switch p {
         case .domestic: return "境内"
         case .overseas: return "境外"
-        case .cross: return "跨池"
         }
     }
 

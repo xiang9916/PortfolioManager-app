@@ -13,9 +13,11 @@ public struct AddAssetSheet: View {
 
     @State private var name = ""
     @State private var ticker = ""
-    @State private var market = ""
+    /// 市场是闭集（`AssetMarket`），也是「池」的唯一来源 —— 不再有手选池的入口。
+    @State private var market: AssetMarket? = nil
+    /// 当前 market 是不是「按代码自动推断」填的；用户手选过就不再被覆盖。
+    @State private var autoFilledMarket: AssetMarket? = nil
     @State private var assetClass = "us_equity"
-    @State private var pool: Pool = .overseas
     @State private var currency = "USD"
     @State private var validating = false
     @State private var validationMessage = ""
@@ -26,19 +28,21 @@ public struct AddAssetSheet: View {
             Form {
                 TextField("名称", text: $name)
                 TextField("标的代码", text: $ticker)
-                Text("如 AAPL / 00700.HK / BTC-USD\n境内基金填 6 位代码，如 000001")
+                    .onChange(of: ticker) { _, newTicker in marketFromTicker(newTicker) }
+                Text("如 AAPL / 00700.HK / BTC-USD\n境内基金填 6 位代码，如 000001\n市场会按代码自动推断（.HK→香港、.T→日本、.SI→新加坡、6 位数字/CN_FUND→中国内地、纯字母→美国），可手动改。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                TextField("市场（可选，如 NASDAQ / HKEX）", text: $market)
+                Picker("市场", selection: $market) {
+                    Text("未设置").tag(AssetMarket?.none)
+                    ForEach(AssetMarket.allCases, id: \.self) { m in
+                        Text(m.displayLabel).tag(AssetMarket?.some(m))
+                    }
+                }
+                .help("池由市场派生：中国内地 → 境内，其余四个市场 → 境外；未设置时按币种回退。")
                 Picker("资产类别", selection: $assetClass) {
                     ForEach(AssetClassKeys.all, id: \.self) { k in
                         Text(AssetClassStyle.displayName(k)).tag(k)
                     }
-                }
-                Picker("池", selection: $pool) {
-                    Text("境内").tag(Pool.domestic)
-                    Text("境外").tag(Pool.overseas)
-                    Text("跨池").tag(Pool.cross)
                 }
                 Picker("币种", selection: $currency) {
                     ForEach(AppStore.currencyOptions, id: \.self) { c in Text(c).tag(c) }
@@ -66,6 +70,15 @@ public struct AddAssetSheet: View {
         .frame(width: 620)
     }
 
+    /// 代码变化时按 ticker 推断市场（Q33）。只在「市场还没被手选过」时覆盖：
+    /// 当前值仍是上一次自动填的结果（或为空）才更新，用户手选后就不再动它。
+    private func marketFromTicker(_ raw: String) {
+        guard market == nil || market == autoFilledMarket else { return }
+        let m = AssetMarket.infer(ticker: raw.trimmingCharacters(in: .whitespaces))
+        market = m
+        autoFilledMarket = m
+    }
+
     private func validate() async {
         validating = true
         validationMessage = ""
@@ -86,8 +99,8 @@ public struct AddAssetSheet: View {
         let rawTicker = ticker.trimmingCharacters(in: .whitespaces)
         store.addAsset(key: rawTicker.uppercased(), name: name.trimmingCharacters(in: .whitespaces),
                        ticker: rawTicker,
-                       market: market.trimmingCharacters(in: .whitespaces).isEmpty ? nil : market.trimmingCharacters(in: .whitespaces),
-                       assetClass: assetClass, pool: pool, currency: currency)
+                       market: market,
+                       assetClass: assetClass, currency: currency)
         dismiss()
     }
 }

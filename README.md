@@ -3,9 +3,11 @@
 原生 macOS（SwiftUI）个人投资组合管理应用，把 Finance 工作软件化。
 
 ## 模块与能力
-- 模块1 资产管理：大类资产分布、历史财务、图表
-- 模块2 资产透视：每个标的状态
-- 能力1 自动抓数 / 能力2 优化集成 / 能力3 数据安全 / 能力4 财务报表
+- 模块1 资产总览：总市值 / 总成本（境内·境外各一套）、大类资产分布、历史财务、图表
+- 模块2 资产明细：每个标的状态（含市场 / 池 / 成本 / 股息明细）
+- 能力1 自动抓数 / 能力2 优化集成 / 能力3 数据安全 / 能力4 财务分析
+
+> 领域术语表见 [CONTEXT.md](CONTEXT.md)，架构决策见 [docs/adr/](docs/adr/)。
 
 ## 结构
 - Sources/PortfolioCore —— 纯逻辑库（模型 / SQLite / 数据源 / 备份 / 优化器 sidecar）
@@ -38,8 +40,8 @@ pm-cli import [db] [extract.json]                     # 导入持仓到 SQLite
 pm-cli refresh [db] [keys...]                         # 抓行情落库
 pm-cli optimize [extract.json] [--total-assets N]     # 运行优化器
 pm-cli optimize [extract.json] --test-tickers NFLX,0700.HK  # 新标的测试: 临时加入标的重跑优化 (μ=100%历史年化)
-pm-cli overview [db]                                  # 资产分布/历史表现
-pm-cli financials [db]                                # 财务报表
+pm-cli overview [db]                                  # 总市值/总成本 + 资产分布/历史表现
+pm-cli financials [db]                                # 财务分析
 pm-cli backup|list|restore|export|import-json|export-csv|daily-backup  # 数据安全
 ```
 

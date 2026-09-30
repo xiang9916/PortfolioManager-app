@@ -5,16 +5,23 @@ import PortfolioCore
 /// 顶部: 统计图面板 (FinancialChartPanel, 5 张图分段切换); 下方: 逐季度数据网格, 一列 = 一个季度.
 /// 9 个手动字段 (总市值 / 总成本 / 境内·境外利息 / 股息 / 资本利得 / (红利税、资本利得税))
 /// 在网格内联编辑, 录入后仍可修改; 其余行全部由 QuarterlyMetrics 公式链自动派生.
+/// 「总市值」「总成本」两格另有「填入当前值」按钮 (空格常显、已有值悬停出现, 见 docs/adr/0001).
 ///
 /// 网格: 最左侧「字段名列」冻结不动, 只有数据列横向滚动; 数据列按季末**降序**排列 (最新季度在最左,
 /// 期初基准列在最右), 因此新增季度总是出现在最左侧。派生指标本身仍按季末升序计算 (见 QuarterlyMetrics)。
 public struct FinancialAnalysisView: View {
     @Bindable var store: AppStore
 
+    /// 所有单元格右侧统一预留的槽位：给「总市值 / 总成本」两行的填入按钮用。
+    /// 统一预留（而不是只给那两行）是为了让同列数字仍然对齐在同一竖直线上。
+    private let cellTrailingInset: CGFloat = 23
+
     /// 内联编辑的文本草稿 ((季度, 字段) → 原始输入). 显示以草稿为准, 不与格式化互相打架.
     @State private var drafts: [CellKey: String] = [:]
     /// 表头日期编辑草稿 (periodEnd → 原始输入).
     @State private var dateDrafts: [String: String] = [:]
+    /// 鼠标悬停的单元格 —— 「总市值/总成本」两行已有值时，填入按钮只在悬停时出现（Q10=B）。
+    @State private var hoveredCell: CellKey?
 
     private let labelWidth: CGFloat = 212
     private let columnWidth: CGFloat = 150
@@ -202,8 +209,9 @@ public struct FinancialAnalysisView: View {
         Text(PrivacyStyle.masked)
             .font(.system(size: 12, weight: emphasis ? .semibold : .regular, design: .monospaced))
             .foregroundStyle(.secondary)
-            .frame(width: columnWidth - 14, alignment: .trailing)
-            .padding(.horizontal, 7)
+            .frame(width: columnWidth - 7 - cellTrailingInset, alignment: .trailing)
+            .padding(.leading, 7)
+            .padding(.trailing, cellTrailingInset)
     }
 
     private func rowLabel(_ row: GridRow) -> some View {
@@ -228,30 +236,76 @@ public struct FinancialAnalysisView: View {
     }
 
     /// 手动字段单元格: 蓝底内联输入框, 值解析后实时驱动派生行, 落盘防抖.
+    /// 「总市值 / 总成本」两格右侧另有「填入当前值」按钮（Q6=C）：空格常显、已有值悬停才出现。
     private func manualCell(_ pe: String, _ field: QuarterlyField) -> some View {
         let key = CellKey(periodEnd: pe, field: field)
-        return TextField("—", text: Binding(
-            get: { drafts[key] ?? "" },
-            set: { text in
-                drafts[key] = text
-                store.updateQuarterlyField(periodEnd: pe, field: field, value: parseNumber(text))
+        let fillValue = store.quarterlyFillValue(periodEnd: pe, field: field)
+        let isEmpty = (drafts[key] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        let showFill = fillValue != nil && (isEmpty || hoveredCell == key)
+        // 按钮刻意做成 TextField 的**兄弟节点**而不是 overlay：TextField 底下是 NSTextField，
+        // overlay 上的按钮有被它吞掉点击的风险；兄弟节点占住右侧预留槽位，点击必然落在按钮上。
+        // 槽位恒定（cellTrailingInset），所以悬停时不会发生布局跳动。
+        return HStack(spacing: 0) {
+            TextField("—", text: Binding(
+                get: { drafts[key] ?? "" },
+                set: { text in
+                    drafts[key] = text
+                    store.updateQuarterlyField(periodEnd: pe, field: field, value: parseNumber(text))
+                }
+            ))
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, design: .monospaced))
+            .multilineTextAlignment(.trailing)
+            .frame(width: columnWidth - 7 - cellTrailingInset, height: rowHeight - 8, alignment: .trailing)
+            .padding(.leading, 7)
+            .help(field.label + " · 手动录入, 可随时修改"
+                  + (fillValue != nil ? "；右侧按钮可填入当前值" : ""))
+
+            ZStack {
+                if fillValue != nil {
+                    Button { fill(periodEnd: pe, field: field, key: key) } label: {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.system(size: 9, weight: .semibold))
+                            .frame(width: 16, height: 16)
+                            .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                            .contentShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .opacity(showFill ? 1 : 0)
+                    .allowsHitTesting(showFill)
+                    .help(fillHelp(field, value: fillValue))
+                }
             }
-        ))
-        .textFieldStyle(.plain)
-        .font(.system(size: 12, design: .monospaced))
-        .multilineTextAlignment(.trailing)
-        .frame(width: columnWidth - 14, height: rowHeight - 8, alignment: .trailing)
-        .padding(.horizontal, 7)
+            .frame(width: cellTrailingInset, height: rowHeight - 8)
+        }
+        .frame(width: columnWidth, height: rowHeight)
         .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-        .help(field.label + " · 手动录入, 可随时修改")
+        .onHover { hovering in
+            if hovering { hoveredCell = key }
+            else if hoveredCell == key { hoveredCell = nil }
+        }
+    }
+
+    /// 把当前的总市值/总成本填进这一格（走与手输相同的落盘路径，派生行立刻跟着重算）。
+    private func fill(periodEnd: String, field: QuarterlyField, key: CellKey) {
+        guard let v = store.applyQuarterlyFill(periodEnd: periodEnd, field: field) else { return }
+        drafts[key] = formatDraft(v)
+    }
+
+    private func fillHelp(_ field: QuarterlyField, value: Double?) -> String {
+        let v = value.map { String(format: "¥%.2f", $0) } ?? "—"
+        let what = field == .marketValue ? "总市值" : "总成本"
+        return "填入当前的\(what) \(v)\n⚠️ 填的是当下实时值，不是该季末的历史值（App 不记录历史总市值）"
     }
 
     private func computedCell(_ text: String, emphasis: Bool) -> some View {
         Text(text.isEmpty ? "—" : text)
             .font(.system(size: 12, weight: emphasis ? .semibold : .regular, design: .monospaced))
             .foregroundStyle(styleFor(text))
-            .frame(width: columnWidth - 14, alignment: .trailing)
-            .padding(.horizontal, 7)
+            .frame(width: columnWidth - 7 - cellTrailingInset, alignment: .trailing)
+            .padding(.leading, 7)
+            .padding(.trailing, cellTrailingInset)
     }
 
     private func isNegative(_ s: String) -> Bool { s.hasPrefix("-") || s.hasPrefix("−") }
@@ -274,7 +328,10 @@ public struct FinancialAnalysisView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("其余行均由公式自动计算; 表头日期可点击编辑, 右键表头删除该季度; 最右一列为期初基准列 (总市值 = 总成本); 数据列从近到早排列, 新季度总是加在最左侧。")
+            Text("「总市值」「总成本」两格：空着时右侧的 ↓ 按钮常显，已有值时悬停才出现 —— 点一下填入**当前**的总市值 / 总成本（是当下实时值，不是该季末的历史值）。")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Text("其余行均由公式自动计算; 表头日期可点击编辑, 右键表头删除该季度; 最右一列为期初基准列 (总市值 = 总成本, 两格同填总成本); 数据列从近到早排列, 新季度总是加在最左侧。")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
@@ -297,11 +354,13 @@ public struct FinancialAnalysisView: View {
         dateDrafts = newDates
     }
 
-    /// 把已存数值转成紧凑可编辑文本 (整数无小数, 否则保留至多 12 位有效数字).
+    /// 把已存数值转成紧凑可编辑文本：整数不带小数点，非整数用 `Double` 的最短往返表示。
+    /// 旧实现用 `%g`（6 位有效数字），会把 123456.7 显示成 328980、234567.89 显示成 471416
+    /// —— 与「填入精确值」(Q8=A) 冲突，这里修正为无损。
     private func formatDraft(_ v: Double?) -> String {
         guard let v else { return "" }
-        if v.truncatingRemainder(dividingBy: 1) == 0 { return String(format: "%.0f", v) }
-        return String(format: "%g", v)
+        if v.truncatingRemainder(dividingBy: 1) == 0, abs(v) < 1e15 { return String(format: "%.0f", v) }
+        return String(v)
     }
 
     private func parseNumber(_ s: String) -> Double? {

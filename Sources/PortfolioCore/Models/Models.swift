@@ -1,7 +1,10 @@
 import Foundation
 
-public enum Pool: String, Codable, Hashable {
-    case domestic, overseas, cross
+/// 资金池归属 —— 只有两种。池是**派生量**：由 `AssetMarket` 解析出的市场推导
+/// （中国内地 → 境内，其余 → 境外；市场解析不出来时按币种回退，CNY → 境内）。
+/// 旧的第三态 `cross` 已废除，见 `docs/adr/0002-remove-cross-pool.md`。
+public enum Pool: String, Codable, Hashable, Sendable {
+    case domestic, overseas
 }
 
 public struct Asset: Codable, Identifiable, Hashable {
@@ -9,17 +12,20 @@ public struct Asset: Codable, Identifiable, Hashable {
     public let key: String
     public let name: String
     public let ticker: String?
-    public let market: String?
+    /// 标的所属市场（闭集，见 `AssetMarket`）。`nil` = 未设置，读时按 ticker / 币种回退。
+    public let market: AssetMarket?
     public let assetClass: String?
+    /// 池归属的**落库缓存**。UI 与统计一律经 `AssetMarket.pool(...)` 读时派生（Q31），
+    /// 这里只保证备份/导出与 pm-cli 拿到一个一致的快照。
     public let pool: Pool
     public let currency: String
     public let source: String?
     public let feeRate: Double?
-    /// 手动排序序号 (资产透视拖动排序); nil = 尚未参与排序.
+    /// 手动排序序号 (资产明细拖动排序); nil = 尚未参与排序.
     public let sortOrder: Double?
 
     public init(id: Int64? = nil, key: String, name: String, ticker: String? = nil,
-                market: String? = nil, assetClass: String? = nil, pool: Pool,
+                market: AssetMarket? = nil, assetClass: String? = nil, pool: Pool,
                 currency: String = "CNY", source: String? = nil, feeRate: Double? = nil,
                 sortOrder: Double? = nil) {
         self.id = id; self.key = key; self.name = name; self.ticker = ticker
@@ -34,7 +40,7 @@ public struct Holding: Codable, Identifiable, Hashable {
     public let assetKey: String
     /// 份额/数量 (shares / units). 市值 = 份额 × 最后价 (派生值, 不存储).
     public let quantity: Double
-    /// 成本/本金, denominated in `currency` (the asset's own currency).
+    /// 成本, denominated in `currency` (the asset's own currency).
     public let costBasis: Double
     /// ISO currency code of `costBasis` and the derived market value (e.g. "USD", "CNY").
     public let currency: String

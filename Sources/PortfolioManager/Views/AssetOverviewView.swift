@@ -2,7 +2,7 @@ import SwiftUI
 import Charts
 import PortfolioCore
 
-/// 模块1：资产管理 — 当前资产大类配置 + 历史财务表现 + 可视化图表。
+/// 模块1：资产总览 — 总市值/总成本 + 当前资产大类配置 + 历史财务表现 + 可视化图表。
 public struct AssetOverviewView: View {
     @Bindable var store: AppStore
 
@@ -24,7 +24,7 @@ public struct AssetOverviewView: View {
             }
             .padding()
         }
-        .navigationTitle("资产管理")
+        .navigationTitle("资产总览")
         // 右上角只有全局按钮（更新行情 / 隐藏数字 / 导出备份 / 导入备份）。
         .toolbar {
             GlobalToolbarContent(store: store)
@@ -36,6 +36,11 @@ public struct AssetOverviewView: View {
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(.ultraThinMaterial, in: Capsule())
                     .padding(.top, 8)
+                    // 状态提示 3 秒后自动消失 (Q9)：消息换了就重开计时，避免旧提示常驻挡住卡片上沿。
+                    .task(id: msg) {
+                        try? await Task.sleep(for: .seconds(3))
+                        if store.statusMessage == msg { store.statusMessage = nil }
+                    }
             }
         }
     }
@@ -46,9 +51,23 @@ public struct AssetOverviewView: View {
         let s = store.performanceSummary
         let div = store.dividendSummary
         let dividendTotal = div?.totalNetCny ?? 0
-        // 全资产股息率 = 全资产股息 ÷ 总资产 (分母与顶部「总资产」同值, 含跨池 → 分子分母同口径).
+        // 全资产股息率 = 全资产股息 ÷ 总市值 (分母与顶部「总市值」同值 → 分子分母同口径).
         let dividendYield = alloc.totalValue > 0 ? dividendTotal / alloc.totalValue : 0
         let coverage = (div?.coveredCount ?? 0).description + "/" + (div?.assetCount ?? store.perspectives.count).description
+        // 「市值 / 成本」三张卡的口径说明。
+        let totalHelp = """
+        总市值 = Σ 各持仓「市值（份额 × 最后价）折人民币」。
+        总成本 = Σ 各持仓在资产明细中手工录入的「成本」折人民币；两者同口径，可直接相减看浮盈浮亏。
+        口径：成本 × 持仓币种汇率；缺汇率的币种按 1:1 估算（与总市值同一处理方式）。
+        """
+        let domesticHelp = """
+        境内池 = 市场为中国内地（A股 / 境内基金）的持仓，「市值 / 成本」均折人民币。
+        池归属由标的的「市场」派生（见资产明细的「市场」行），不再手工选择。
+        """
+        let overseasHelp = """
+        境外池 = 市场为美国 / 香港 / 日本 / 新加坡的持仓，「市值 / 成本」均折人民币。
+        池归属由标的的「市场」派生（见资产明细的「市场」行），不再手工选择。
+        """
         let dividendHelp = """
         全资产股息 = Σ 各资产「今年预计股息（折人民币，税后）」。
         口径：按除息日归入自然年；今年预计每股股息 = max(0, 2×去年每股股息 − 前年每股股息)；
@@ -58,29 +77,28 @@ public struct AssetOverviewView: View {
         更新：\(div?.fetchedAt ?? "尚未抓取")
         """
         let yieldHelp = """
-        全资产股息率 = 全资产股息 ÷ 总资产。
-        分母与顶部「总资产」一致（含跨池），分子分母同口径。
+        全资产股息率 = 全资产股息 ÷ 总市值。
+        分母与顶部「总市值」一致，分子分母同口径。
         覆盖 \(coverage) 个资产；未覆盖的资产按 0 计入，会低估该比率。
         """
         return VStack(alignment: .leading, spacing: 16) {
-            // 4 列 2 行: 总资产/境内/境外/全资产股息 · 近三年收益/年化波动/最大回撤/全资产股息率
+            // 4 列 2 行: 总市值/境内/境外/全资产股息 · 近三年收益/年化波动/最大回撤/全资产股息率
+            // 前三张卡的第二个数字是「成本」，用次要色区分 (Q22=A)；字号靠 minimumScaleFactor
+            // 自适应，窄窗口不截断、宽窗口不缩水 (Q23)。
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: 4),
                       spacing: 16) {
-                metricCard("总资产", money(alloc.totalValue), "chart.pie.fill", .blue)
-                metricCard("境内", money(alloc.domesticValue), "house.fill", .teal)
-                metricCard("境外", money(alloc.overseasValue), "globe", .indigo)
+                metricCard("总市值", money(alloc.totalValue), "chart.pie.fill", .blue,
+                           secondary: money(alloc.totalCost), help: totalHelp)
+                metricCard("境内", money(alloc.domesticValue), "house.fill", .teal,
+                           secondary: money(alloc.domesticCost), help: domesticHelp)
+                metricCard("境外", money(alloc.overseasValue), "globe", .indigo,
+                           secondary: money(alloc.overseasCost), help: overseasHelp)
                 metricCard("全资产股息", money2(dividendTotal), "banknote", .mint, help: dividendHelp)
                 metricCard("近3年收益", perf(s?.totalReturn), "chart.line.uptrend.xyaxis",
                            (s?.totalReturn ?? 0) >= 0 ? .green : .red)
                 metricCard("年化波动", perf(s?.annualizedVolatility), "waveform.path.ecg", .orange)
                 metricCard("最大回撤", perf(s?.maxDrawdown), "arrow.down.right", .purple)
                 metricCard("全资产股息率", pct(dividendYield), "percent", .pink, help: yieldHelp)
-            }
-            // 「跨池」不在 4×2 主网格里: 跨池是资产大类层面的属性, 标的级 pool=cross 才有金额。
-            // 条件性附加行 — 不占你指定的 8 个位, 也不静默丢信息 (当前数据 cross=0, 不显示)。
-            if alloc.crossValue > 0 {
-                metricCard("跨池", money(alloc.crossValue), "arrow.triangle.swap", .yellow,
-                           help: "标的级 pool=跨池 的持仓市值合计（相当于现金，不计入境内/境外）。")
             }
         }
     }
@@ -93,10 +111,23 @@ public struct AssetOverviewView: View {
 
     @ViewBuilder
     private func metricCard(_ title: String, _ value: String, _ icon: String, _ color: Color,
-                            help: String? = nil) -> some View {
+                            secondary: String? = nil, help: String? = nil) -> some View {
         let card = VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: icon).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title2).fontWeight(.semibold).monospacedDigit()
+            Group {
+                if let secondary {
+                    // 次要段刻意用小一号字体（.body）：这样主数字在最小窗口下也**不会**被
+                    // minimumScaleFactor 缩小，三张「市值 / 成本」卡的主数字与另外五张单数字卡
+                    // 逐像素同大（离线渲染核对过 205pt 卡宽）。
+                    Text(value) + Text(" / ").font(.body).foregroundStyle(.tertiary)
+                        + Text(secondary).font(.body).foregroundStyle(.secondary)
+                } else {
+                    Text(value)
+                }
+            }
+            .font(.title2).fontWeight(.semibold).monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.65)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()

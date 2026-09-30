@@ -40,6 +40,8 @@ public final class Database {
             for sql in statements { try exec(sql) }
             try exec("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', '" + String(v) + "')")
         }
+        // 数据归一放在结构迁移之后：幂等，且不占 Schema 版本号（见方法注释）。
+        try normalizeAssetClassification()
     }
 
     /// Read the persisted schema version (0 for a brand-new / empty DB).
@@ -155,7 +157,7 @@ public final class Database {
                 bindText(stmt, 1, a.key)
                 bindText(stmt, 2, a.name)
                 bindText(stmt, 3, a.ticker)
-                bindText(stmt, 4, a.market)
+                bindText(stmt, 4, a.market?.rawValue)
                 bindText(stmt, 5, a.assetClass)
                 bindText(stmt, 6, a.pool.rawValue)
                 bindText(stmt, 7, a.currency)
@@ -172,7 +174,7 @@ public final class Database {
         }
     }
 
-    /// Persist the manual list order for 资产透视 drag-to-reorder (module 2).
+    /// Persist the manual list order for 资产明细 drag-to-reorder (module 2).
     public func updateAssetSortOrders(_ orders: [(key: String, order: Double)]) throws {
         try inTransaction {
             let stmt = try prepared("UPDATE assets SET sort_order = ? WHERE key = ?")
@@ -200,7 +202,7 @@ public final class Database {
         }
     }
 
-    /// Update the editable fields of a holding (资产透视 editing). 市值不在此列(派生 = 份额×最后价).
+    /// Update the editable fields of a holding (资产明细 editing). 市值不在此列(派生 = 份额×最后价).
     public func updateHolding(assetKey: String, quantity: Double, costBasis: Double, currency: String) throws {
         let stmt = try prepared("UPDATE holdings SET quantity = ?, cost_basis = ?, currency = ? WHERE asset_key = ?")
         defer { sqlite3_finalize(stmt) }
@@ -218,7 +220,7 @@ public final class Database {
         try upsertAssets([a])
     }
 
-    /// Delete an asset target and its holdings / prices / dividends (资产透视 删除标的).
+    /// Delete an asset target and its holdings / prices / dividends (资产明细 删除标的).
     public func deleteAsset(key: String) throws {
         try inTransaction {
             for table in ["holdings", "prices", "dividends", "assets"] {
@@ -471,21 +473,63 @@ public final class Database {
         defer { sqlite3_finalize(stmt) }
         var out: [Asset] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let poolRaw = String(cString: sqlite3_column_text(stmt, 6))
+            let ticker = colText(stmt, 3)
+            let marketRaw = colText(stmt, 4)
+            let currency = String(cString: sqlite3_column_text(stmt, 7))
             out.append(Asset(
                 id: sqlite3_column_int64(stmt, 0),
                 key: String(cString: sqlite3_column_text(stmt, 1)),
                 name: String(cString: sqlite3_column_text(stmt, 2)),
-                ticker: colText(stmt, 3),
-                market: colText(stmt, 4),
+                ticker: ticker,
+                // 市场是闭集：原文经别名归一（NASDAQ→US），识别不出则按 ticker 推断（Q26=C / Q32）。
+                market: AssetMarket.resolve(market: marketRaw, ticker: ticker),
                 assetClass: colText(stmt, 5),
-                pool: Pool(rawValue: poolRaw) ?? .overseas,
-                currency: String(cString: sqlite3_column_text(stmt, 7)),
+                // 池是派生量：读时一律由市场推导（解析不出市场时按币种回退），
+                // 不信任 assets.pool 列 —— 它只是写入时的缓存（Q31）。
+                pool: AssetMarket.pool(market: marketRaw, ticker: ticker, currency: currency),
+                currency: currency,
                 source: colText(stmt, 8),
                 feeRate: colDouble(stmt, 9),
                 sortOrder: colDouble(stmt, 10)))
         }
         return out
+    }
+
+    /// 幂等的数据归一（纯数据补齐，没有结构性变更，因此不占 Schema 版本号）：
+    /// ① `market` 收敛到 `AssetMarket` 闭集（别名归一 / ticker 推断），两者都识别不出则置 NULL
+    ///    —— 不接受自由文本（Q32）；
+    /// ② `pool` 重写为市场的派生值，清掉已废除的 `'cross'` 与任何脏值（Q20=C）。
+    ///
+    /// 在 `migrate()` 末尾调用 → App / pm-cli / 测试三条入口都自动获得同一份补全；
+    /// 无可补数据时零写入。
+    public func normalizeAssetClassification() throws {
+        var pending: [(key: String, market: String?, pool: String)] = []
+        let stmt = try prepared("SELECT key, ticker, market, currency, pool FROM assets")
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let key = String(cString: sqlite3_column_text(stmt, 0))
+            let ticker = colText(stmt, 1)
+            let marketRaw = colText(stmt, 2)
+            let currency = colText(stmt, 3) ?? "CNY"
+            let poolRaw = colText(stmt, 4) ?? ""
+            let market = AssetMarket.resolve(market: marketRaw, ticker: ticker)
+            let pool = AssetMarket.pool(market: marketRaw, ticker: ticker, currency: currency)
+            let marketChanged = (market?.rawValue ?? "") != (marketRaw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if marketChanged || poolRaw != pool.rawValue {
+                pending.append((key: key, market: market?.rawValue, pool: pool.rawValue))
+            }
+        }
+        guard !pending.isEmpty else { return }
+        try inTransaction {
+            let up = try prepared("UPDATE assets SET market = ?, pool = ? WHERE key = ?")
+            defer { sqlite3_finalize(up) }
+            for p in pending {
+                bindText(up, 1, p.market)
+                bindText(up, 2, p.pool)
+                bindText(up, 3, p.key)
+                try stepAndReset(up)
+            }
+        }
     }
 
     public func fetchHoldings(asOfDate: String? = nil) throws -> [Holding] {
