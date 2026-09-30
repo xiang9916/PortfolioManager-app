@@ -21,7 +21,15 @@
 swift build                    # 编译核心库 + CLI + SwiftUI 可执行
 swift run pm-cli --self-test   # 自测
 swift build -c release         # release 构建
+bash scripts/build_dev.sh      # 预览用：debug + 真实 SDK 版本戳（见下）
 ```
+
+> **预览一定要用 `scripts/build_dev.sh`，不要直接 `swift build`。** SwiftPM 会把
+> deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
+> macOS 据此判定「用旧 SDK 构建」并启用兼容外观（TabView 标签栏落到标题下方、窗口标题常显），
+> 于是本地看到的界面和用户装到的不是一回事，截图核对也就失去意义。该脚本与
+> `scripts/build_app.sh` 用**一字不差**的 `-platform_version macos 14.0 <当前 SDK>`，
+> 并在构建后打印实际写进二进制的 `minos / sdk` 供核对。
 
 ## 打包 .app（Phase 8）
 ```bash
