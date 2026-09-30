@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fetch fund fees / scale / inception for HSBC open-fund candidates.
 
-Reads:  /tmp/pmbuild/Finance/tmp/hsbc_open_funds.json
-Writes: /tmp/pmbuild/Finance/tmp/hsbc_fund_fees.json
+Reads:  $DSH_FINANCE_DIR/hsbc_open_funds.json  (默认 ~/Finance/tmp/)
+Writes: $DSH_FINANCE_DIR/hsbc_fund_fees.json
 
 Data sources (Eastmoney):
   - jjfl_{code}.html  -> purchase / management / custody / sales-service fees
@@ -11,6 +11,7 @@ Data sources (Eastmoney):
 
 import argparse
 import json
+import os
 import re
 import ssl
 import urllib.request
@@ -81,8 +82,9 @@ def fetch_one(code):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="/tmp/pmbuild/Finance/tmp/hsbc_open_funds.json")
-    parser.add_argument("--output", default="/tmp/pmbuild/Finance/tmp/hsbc_fund_fees.json")
+    tmp = os.environ.get("DSH_FINANCE_DIR", os.path.expanduser("~/Finance/tmp"))
+    parser.add_argument("--input", default=os.path.join(tmp, "hsbc_open_funds.json"))
+    parser.add_argument("--output", default=os.path.join(tmp, "hsbc_fund_fees.json"))
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()

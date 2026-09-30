@@ -14,12 +14,13 @@ Method:
 - Money-market funds keep a fixed 2%/1% assumption because NAV alone does not reflect money-market yield.
 
 Output:
-- /tmp/pmbuild/Finance/tmp/calibrated_params.json
+- $DSH_FINANCE_DIR/calibrated_params.json (默认 ~/Finance/tmp/)
 """
 
 import json
 import math
 import datetime
+import os
 import sys
 
 
@@ -248,7 +249,8 @@ if "SPLG" not in calib["assets"] and "O_US_CORE" in calib["assets"]:
     calib["assets"]["SPLG"] = dict(calib["assets"]["O_US_CORE"])
     calib["us_internal"]["SPLG"] = dict(calib["assets"]["O_US_CORE"])
 
-_OUT = "/tmp/pmbuild/Finance/tmp/calibrated_params.json"
+_OUT = os.path.join(os.environ.get("DSH_FINANCE_DIR", os.path.expanduser("~/Finance/tmp")),
+                    "calibrated_params.json")
 if len(sys.argv) > 1 and sys.argv[1] == "--out" and len(sys.argv) > 2:
     _OUT = sys.argv[2]  # 允许写出到任意路径(如 bundle data 目录), 避免沙箱只允许工作区
 with open(_OUT, "w") as f:

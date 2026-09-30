@@ -71,8 +71,8 @@ public final class YahooFinanceSource: DataSource, Sendable {
     /// 逐年拉取每股现金股息 (除息日 + 税前金额, 报价币种).
     ///
     /// 实测 (2026-09): AAPL 2024=0.99/2025=1.03, 600519.SS 54.758/51.630,
-    /// 0700.HK 3.4/4.5, BTC-USD `events: []` (本无分红), 1111.HK `result: null`
-    /// (2026-04 才上市 → 无历史覆盖)。
+    /// 0700.HK 3.4/4.5, BTC-USD `events: []` (本无分红), 当年新上市的标的
+    /// `result: null` (无历史覆盖)。
     public func fetchDividends(symbol: String, years: [Int]) async throws -> [DividendEvent] {
         var out: [DividendEvent] = []
         var okWindows = 0

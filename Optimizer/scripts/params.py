@@ -212,7 +212,7 @@ BROAD_ASSETS = [
     {"key": "D_HSBC_SP500", "name": "博时标普500联接A", "fund_code": "050025", "pool": "domestic", "mu": 0.090, "vol": 0.17},
     {"key": "D_HSBC_CDB", "name": "博时中债3-5年国开行A", "fund_code": "007485", "pool": "domestic", "mu": 0.035, "vol": 0.04},
     {"key": "D_HSBC_MMF", "name": "博时现金宝货币B", "fund_code": "000891", "pool": "domestic", "mu": 0.020, "vol": 0.01},
-    # 境内：补充的债券/全球类（债券/全球保持独立）
+    # 境内：补充的债券 / 全球类保持独立大类
     {"key": "D_CN_CREDIT_BOND", "name": "易方达双债增强债券A", "fund_code": "110035", "pool": "domestic", "mu": 0.045, "vol": 0.05},
     # QDII 细分三小类 (Bug C): 股票 / 稳健债性 / 商品, 各自独立 mu/vol 与校准代理
     {"key": "D_CN_QDII_STOCK", "name": "QDII全球股票", "fund_code": None, "pool": "domestic", "mu": 0.085, "vol": 0.19},
@@ -743,7 +743,7 @@ import os
 
 # External data file paths: env override → Finance/tmp (dev machine) → bundled Resources/data.
 # Packaged app sets DSH_FINANCE_DIR via PythonSidecar env, or falls back to Resources/data.
-_FINANCE_TMP = os.environ.get("DSH_FINANCE_DIR", "/tmp/pmbuild/Finance/tmp")
+_FINANCE_TMP = os.environ.get("DSH_FINANCE_DIR", os.path.expanduser("~/Finance/tmp"))
 _BUNDLE_DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 

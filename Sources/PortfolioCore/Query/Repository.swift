@@ -214,7 +214,7 @@ public final class Repository {
         let total = ctx.totalValueCny
         var groups: [String: (value: Double, pool: Pool)] = [:]
         // 池统计按「每个标的自身的市场」累计 — 修复: 之前按大类分组且组池被同组
-        // 最后一个标的覆盖, 导致同大类中境内标的 (如 000001) 被计入境外池.
+        // 最后一个标的覆盖, 导致同一大类里的境内标的被计入境外池.
         var domestic = 0.0
         var overseas = 0.0
         var totalCost = 0.0
@@ -416,7 +416,7 @@ public final class Repository {
     ///
     /// 状态非 `ok` (数据源无覆盖 / 抓取失败 / 从未抓取) 时, 四个金额字段全为 nil
     /// (详情显示「—」)。注意: 新上市标的只要**任一抓取窗口**有数据就算 `ok` ——
-    /// 例如 2026-04 才上市的 1111.HK 会命中当年窗口, 因此显示 ¥0.00 而不是「—」
+    /// 例如某只当年新上市的标的会命中当年窗口, 因此显示 ¥0.00 而不是「—」
     /// (它在 2024/2025 确实没有派息, 数值上与 NULL 态一样按 0 计入)。
     private func assetDividend(asset: Asset, quantity: Double, currency: String,
                                fx: [String: Double], market: AssetMarket?,

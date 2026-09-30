@@ -2,7 +2,7 @@
 """Forward-looking adjustment using aistockresearcher.
 
 Reads:
-  /tmp/pmbuild/Finance/tmp/calibrated_params.json
+  $DSH_FINANCE_DIR/calibrated_params.json  (默认 ~/Finance/tmp/)
 
 Uses aistockresearcher (if importable) to fetch:
   - market regime (牛/熊/震荡) for sh000001
@@ -14,18 +14,20 @@ that the portfolio reflects the current market position instead of mechanically
 following long-run history. Default strength = 0.3.
 
 Output:
-  /tmp/pmbuild/Finance/tmp/forward_adjusted.json
+  $DSH_FINANCE_DIR/forward_adjusted.json
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-BASE = "/tmp/pmbuild/Finance/tmp"
+BASE = os.environ.get("DSH_FINANCE_DIR", os.path.expanduser("~/Finance/tmp"))
 CALIB = Path(BASE) / "calibrated_params.json"
 OUT = Path(BASE) / "forward_adjusted.json"
-AISTOCK = "/tmp/pmbuild/.dsh/skills/aistockresearcher/scripts"
+AISTOCK = os.environ.get("AISTOCKRESEARCHER_DIR",
+                         os.path.expanduser("~/.dsh/skills/aistockresearcher/scripts"))
 FORWARD_STRENGTH = 0.3
 
 

@@ -46,7 +46,7 @@ public struct DividendRecord: Codable, Hashable, Identifiable {
 ///
 /// - `ok`: 抓取成功。该标的本就无分红时记录为空, 显示 `¥0.00` (确认无分红)。
 /// - `unavailable`: 数据源对该标的没有历史覆盖 (如新上市标的
-///   `1111.HK` / `2222.HK` 返回 `Data doesn't exist`), 显示 `—`。
+///   返回 `Data doesn't exist`), 显示 `—`。
 /// - `failed`: 网络/解析失败, 显示 `—`; 已抓到的历史记录保留不删。
 ///
 /// 汇总计算时 `unavailable` / `failed` 一律按 0 计入 (决策 Q28), 但覆盖率

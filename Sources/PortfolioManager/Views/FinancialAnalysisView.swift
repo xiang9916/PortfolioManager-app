@@ -355,7 +355,7 @@ public struct FinancialAnalysisView: View {
     }
 
     /// 把已存数值转成紧凑可编辑文本：整数不带小数点，非整数用 `Double` 的最短往返表示。
-    /// 旧实现用 `%g`（6 位有效数字），会把 123456.7 显示成 328980、234567.89 显示成 471416
+    /// 旧实现用 `%g`（6 位有效数字），会把 123456.7 显示成 123457、234567.89 显示成 234568
     /// —— 与「填入精确值」(Q8=A) 冲突，这里修正为无损。
     private func formatDraft(_ v: Double?) -> String {
         guard let v else { return "" }

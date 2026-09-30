@@ -121,7 +121,7 @@ if args.count >= 2 && args[1] == "refresh" {
     let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
     exit(runAsync {
         let db = try Database(path: dbPath)
-        let keys = args.count >= 4 ? Array(args[3...]) : ["AAPL", "UNH", "GOOG", "O_GOLD", "O_BTC", "D_CN_CREDIT_BOND"]
+        let keys = args.count >= 4 ? Array(args[3...]) : ["VTV", "GOOG", "O_GOLD", "O_BTC", "D_CN_QDII_STOCK"]
         var total = 0
         for key in keys {
             guard let ref = AssetCatalog.ref(for: key) else { print("  未知标的: \(key)"); continue }
