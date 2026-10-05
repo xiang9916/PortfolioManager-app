@@ -7,7 +7,7 @@
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「.numbers 手工维护 + 终端跑 Python 优化器」。
 - 当前版本 **v0.4-beta3**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，13 个 pre-release + 14 个 tag 齐全。
+- 线上仓库：`xiang9916/PortfolioManager-app`，14 个 pre-release + 15 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
@@ -53,7 +53,7 @@ rm -f /tmp/pm-tokens.txt
 ## 2. 仓库状态与历史（会影响你看到的 SHA）
 - remote `origin https://github.com/xiang9916/PortfolioManager-app.git`，分支 `main`。
 - **重建于 2026-09-30**：所有提交 SHA 都变了，更早文档/对话里的 SHA 不再对应，`git fetch origin <旧SHA>` 会失败（这是想要的效果）。
-- 线上 13 个 release（v0.1-beta2 … v0.4-beta2）已逐一还原：标题、pre-release 标记、脱敏 notes、DMG —— 按 GitHub asset `digest` 逐个核对与本地归档**字节一致**。
+- 线上 14 个 release（v0.1-beta2 … v0.4-beta3）已逐一还原：标题、pre-release 标记、脱敏 notes、DMG —— 按 GitHub asset `digest` 逐个核对与本地归档**字节一致**。
 - 本地分支 `backup/beta3-beta4-work`（0.3-beta3/4 时期的备份线，比 main 多 4 个提交）**从未推送过**；要继续用就 `git push -u origin backup/beta3-beta4-work`。
 - 无 CI workflow：DMG 本地构建 + 手动 `gh release create` 上传。
 
