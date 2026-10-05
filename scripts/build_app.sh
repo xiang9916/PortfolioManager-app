@@ -109,9 +109,16 @@ if [ "${WITH_VENV}" = "1" ]; then
   echo "==> scrubbing build-machine paths inside venv"
   VENV="${BUNDLE}/Contents/Resources/Optimizer/.venv"
   find "${VENV}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-  grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" 2>/dev/null | while IFS= read -r f; do
-    perl -pi -e 's#/Users/[A-Za-z0-9_.-]+/#/build/#g' "$f"
-  done
+  # 注意: 不要写成 `grep ... | while ... done` —— venv 里已经没有 /Users 引用时 grep 返回 1,
+  # 配合脚本开头的 set -o pipefail 会把整个打包脚本在这里中止（实测踩过：无 DMG/无 zip/未签名）。
+  # 先把命中列表落盘再处理, 列表为空就跳过。
+  SCRUB_LIST="${DIST}/.venv-scrub-list"
+  if grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" >"${SCRUB_LIST}" 2>/dev/null; then
+    while IFS= read -r f; do
+      perl -pi -e 's#/Users/[A-Za-z0-9_.-]+/#/build/#g' "$f"
+    done <"${SCRUB_LIST}"
+  fi
+  rm -f "${SCRUB_LIST}"
   echo "    remaining /Users references: $(grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" 2>/dev/null | wc -l | tr -d ' ')"
 fi
 
