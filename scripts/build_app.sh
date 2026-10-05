@@ -1,6 +1,8 @@
 #!/bin/bash
 # Phase 8: assemble a distributable PortfolioManager.app from the SPM release build.
-# Usage: scripts/build_app.sh [--with-venv] [--no-codesign]
+# Usage: scripts/build_app.sh [--with-venv] [--no-codesign] [--dmg] [--zip]
+#   --dmg  产出 DMG（隐含 --zip：发布产物固定为 DMG + 仅含 .app 的 zip 两件套）
+#   --zip  只产出 PortfolioManager-<version>.zip（顶层就是 PortfolioManager.app）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # repo root
@@ -13,11 +15,13 @@ BUNDLE="${DIST}/${APP_NAME}.app"
 WITH_VENV=0
 CODESIGN=1
 MAKE_DMG=0
+MAKE_ZIP=0
 for a in "$@"; do
   case "$a" in
     --with-venv) WITH_VENV=1 ;;
     --no-codesign) CODESIGN=0 ;;
-    --dmg) MAKE_DMG=1 ;;
+    --dmg) MAKE_DMG=1; MAKE_ZIP=1 ;;   # DMG 与 zip 是固定搭配的发布产物, 不做单选
+    --zip) MAKE_ZIP=1 ;;
   esac
 done
 
@@ -118,19 +122,21 @@ if [ "${CODESIGN}" = "1" ]; then
   codesign --verify --verbose=2 "${BUNDLE}"
 fi
 
+# 发布产物固定为两件套: DMG（拖拽安装, 带 /Applications 快捷方式）+ 仅含 .app 的 zip。
+if [ "${MAKE_DMG}" = "1" ] || [ "${MAKE_ZIP}" = "1" ]; then
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${BUNDLE}/Contents/Info.plist")"
+fi
+
 if [ "${MAKE_DMG}" = "1" ]; then
   echo "==> creating dmg"
-  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${BUNDLE}/Contents/Info.plist")"
   DMG="${DIST}/PortfolioManager-${VERSION}.dmg"
   STAGE="${DIST}/dmg-staging"
   rm -rf "${STAGE}" "${DMG}"
   mkdir -p "${STAGE}"
   cp -R "${BUNDLE}" "${STAGE}/"
   ln -s /Applications "${STAGE}/Applications"
-  # 一键安装脚本: 在 DMG 里双击安装并清除隔离标记，免去"仍要打开"。
-  INSTALLER="${STAGE}/一键安装（首次需在设置-隐私与安全性允许）.command"
-  cp "scripts/install_dmg.sh" "${INSTALLER}"
-  chmod +x "${INSTALLER}"
+  # 不再放「一键安装.command」: 它自身同样带隔离标记、双击第一次仍会被 Gatekeeper 拦,
+  # 收益为零却多一个要维护的脚本 —— 镜像里只留 app + /Applications 快捷方式, 拖进去即可。
   VOLNAME="投资组合管家 ${VERSION}"
   # 必须显式 -fs HFS+: 新版 macOS 下 hdiutil create 默认生成 APFS 镜像, 同样内容
   # 压缩后比 HFS+ 大约 50% (实测 261MB bundle: APFS 130MB vs HFS+ 86MB)。以前在
@@ -155,6 +161,17 @@ if [ "${MAKE_DMG}" = "1" ]; then
   rm -rf "${STAGE}"
   hdiutil verify "${DMG}" >/dev/null 2>&1 || echo "    (verify skipped: hybrid-derived image has no checksum)"
   echo "==> dmg: ${DMG} ($(du -h "${DMG}" | cut -f1))"
+fi
+
+if [ "${MAKE_ZIP}" = "1" ]; then
+  echo "==> creating zip (only the .app)"
+  ZIP="${DIST}/PortfolioManager-${VERSION}.zip"
+  rm -f "${ZIP}"
+  # 用 ditto 而不是 zip: 它是 macOS 上打 app 包的正解 —— 保留符号链接
+  # (venv/bin/python3)、可执行位与扩展属性, 解压回来签名封条仍然完整。
+  # --keepParent 保证 zip 顶层是 PortfolioManager.app 本身（而不是它里面的内容）。
+  ditto -c -k --sequesterRsrc --keepParent "${BUNDLE}" "${ZIP}"
+  echo "==> zip: ${ZIP} ($(du -h "${ZIP}" | cut -f1))"
 fi
 
 echo "==> done: ${BUNDLE}"

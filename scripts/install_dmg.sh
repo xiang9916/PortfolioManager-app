@@ -1,11 +1,13 @@
 #!/bin/bash
-# 一键安装/更新 PortfolioManager（绕过 Gatekeeper 警告）
-# 两种用法:
-#   1. 在 DMG 里双击「一键安装.command」—— 安装同卷里的 PortfolioManager.app
-#   2. 终端运行: scripts/install_dmg.sh [dist/PortfolioManager-X.Y.dmg]
-#      不带参数时自动选 dist/ 里最新的 DMG。
-# 原理: 把 app 拷贝到 /Applications 并移除 com.apple.quarantine 隔离标记。
-#   本地安装的 app 不再受 Gatekeeper 校验，无需每次"仍要打开"。
+# 安装/更新 PortfolioManager（绕过 Gatekeeper 警告）
+# 用法: bash scripts/install_dmg.sh [dist/PortfolioManager-X.Y.dmg]
+#   不带参数时自动选 dist/ 里最新的 DMG；若脚本旁边就有 PortfolioManager.app
+#   （例如把 zip 解压后与本脚本放在一起），则直接安装旁边那个 app。
+# 为什么还需要它: 本 App 只有 ad-hoc 签名，从网络拿到的 DMG / zip 都带隔离标记，
+#   首次打开要在「系统设置 → 隐私与安全性」放行一次。本脚本把 app 拷进 /Applications
+#   并移除 com.apple.quarantine，装完就不再弹警告。
+# 注: DMG 里不再放「一键安装.command」—— 它自身同样被隔离、双击第一次照样被 Gatekeeper
+#   拦住，收益为零却要多维护一个脚本。镜像里只留 app + /Applications 快捷方式，拖进去即可。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
