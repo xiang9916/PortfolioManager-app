@@ -6,7 +6,7 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「.numbers 手工维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.4-beta2**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 当前版本 **v0.4-beta3**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
 - 线上仓库：`xiang9916/PortfolioManager-app`，13 个 pre-release + 14 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
@@ -39,6 +39,8 @@ rm -f /tmp/pm-tokens.txt
 - 该命令只取长度 ≥5 的 key，3–4 字符的短代码查不出来；这类短代码多为通用代号，
   仍需人工确认仓库里没有把它们与持仓/数量/金额写在一起。
 - release notes 也要单独扫（它在 GitHub 上，不在仓库里）：`gh release view <tag> --json body --jq .body` 后同样 grep。
+- **示例数值也必须虚构。** 最容易漏的一处是「拿真实数字当例子说明格式化 bug」—— 真实历史里就这么漏过一次
+  （release notes 里写了两个真实金额作为 `%g` 舍入的对照）。扫 notes 时那条类别 grep 一旦命中千分位写法，就得改。
 - 测试一律用**虚构 fixture**；季度指标的期望值不要手抄，用 `QuarterlyMetrics.compute` 跑出来再固化。
 
 ### 历史教训（为什么上面这些规则这么硬）
@@ -78,14 +80,21 @@ bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别�
 ```bash
 bash scripts/build_app.sh --with-venv --dmg     # 必须 --with-venv，否则优化器没有 Python
 ```
+- **发布产物固定两件套**：`dist/PortfolioManager-<版本>.dmg`（内含 app + `/Applications` 快捷方式，拖拽安装）
+  与 `dist/PortfolioManager-<版本>.zip`（**顶层只有一个 `PortfolioManager.app`**，用 `ditto` 打包以保留符号链接、
+  可执行位与扩展属性）。`--dmg` 隐含 `--zip`；只想出 zip 就传 `--zip`。
+- **DMG 里不再放「一键安装.command」**（自 0.4-beta3 起）：它自身同样带隔离标记、双击第一次照样被 Gatekeeper
+  拦住，收益为零却要多维护一个脚本。仓库里的 `scripts/install_dmg.sh` 保留，供有仓库的人从终端安装。
 - **内置隐私加固（勿删）**：① venv 拷完后清 `__pycache__` 并把 `/Users/<user>/` 重写成 `/build`；
   ② 二进制 debug info 里的 `/Users/<user>` 在 codesign **之前**做等长替换成 `/tmp/pmbuild`。
   副作用：DMG 体积 85MB → 48MB（少了 .pyc），首次跑优化器会重新编译缓存。
 - 版本 bump：只改 `scripts/Info.plist`（`CFBundleShortVersionString` + `CFBundleVersion` 同步）→
   commit `chore: bump version to X.Y` → annotated tag `vX.Y`（message `PortfolioManager X.Y`）
-  → `gh release create --prerelease`，notes 中文 + 结尾 SHA256 行 + 附 DMG。
-- 上传后必须核对：`gh api repos/xiang9916/PortfolioManager-app/releases/tags/<tag> --jq '.assets[0].digest'`
+  → `gh release create --prerelease`，notes 中文 + **两个附件各自的 SHA256 行** + 同时挂 DMG 与 zip 两个 asset。
+- 上传后必须核对：`gh api repos/xiang9916/PortfolioManager-app/releases/tags/<tag> --jq '.assets[] | .name, .digest'`
   与本地 `shasum -a 256` 一致，且 notes 里的 SHA 行同步更新。
+- zip 上传前必须**解压回验**：`ditto -x -k <zip> <tmpdir>` → `codesign --verify <tmpdir>/PortfolioManager.app`
+  必须通过（zip 若丢了符号链接或可执行位，封条会碎）。
 - `hdiutil create` 在沙箱下会失败 → `build_app.sh` 内置 `makehybrid` + `convert` 回退；镜像固定 HFS+（APFS 会大约 50%）。
 
 ## 6. 架构与数据模型（Schema v8 现状）
@@ -135,9 +144,10 @@ pm-cli (headless CLI) 复用 PortfolioCore
 ## 10. Gatekeeper / 隔离标记
 - app 只有 **ad-hoc 签名**（`codesign --sign -`），无开发者证书 → 从网络下载的 DMG 会触发「Apple 无法验证」；
   彻底消除只能靠 Apple Developer Program（$99/年）Developer ID 签名 + 公证。
-- `scripts/install_dmg.sh`：一键安装（拷到 /Applications + `xattr -dr com.apple.quarantine`）。
-  双场景：DMG 内双击「一键安装（首次需在设置-隐私与安全性允许）.command」，或终端 `bash scripts/install_dmg.sh`。
-- 安装脚本本身也被隔离，双击首次仍会弹一次 Gatekeeper，允许一次即可。
+- **安装方式**：打开 DMG 把 app 拖进「应用程序」（或解压 zip 后拖过去），首次打开在
+  「系统设置 → 隐私与安全性」放行一次即可，之后正常。**DMG 内不再有一键安装脚本**（见 §5）。
+- `scripts/install_dmg.sh`：给有仓库的人用的一键安装（拷到 /Applications + `xattr -dr com.apple.quarantine`）——
+  终端 `bash scripts/install_dmg.sh [dmg]`，不带参数时自动挑 `dist/` 里最新的 DMG。
 
 ## 11. 备份/恢复语义
 - `BackupManager.exportJSON`：导出 assets/holdings/snapshots/quarterly_reports/income_periods/fx_rates/quotes + schema_version。
