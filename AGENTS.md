@@ -59,7 +59,7 @@ rm -f /tmp/pm-tokens.txt
 
 ## 3. 恢复套件（在仓库内 `tmp/`，已被 .gitignore 忽略）
 - `tmp/pm-repo-20260930.bundle` —— 全 refs 备份（main + 14 tags），实测 `git clone <bundle>` 可还原。
-- `tmp/release-archive/` —— 13 份脱敏 notes、13 份 release 元数据、`SHA256SUMS`、`tags.txt`、`repo-settings.json`，
+- `tmp/release-archive/` —— 脱敏 notes（重建的 13 份 + 之后各版）、13 份 release 元数据、`SHA256SUMS`、`tags.txt`、`repo-settings.json`，
   以及两个脚本：`redownload_dmgs.sh`（拉回 13 个 DMG 并校验）、`rebuild_repo.sh`（重建仓库 + 13 个 release，已跑通）。
 - ⚠️ **不要依赖 `/tmp`**：同类归档放在 `/tmp` 曾被系统清理过一次。
 
