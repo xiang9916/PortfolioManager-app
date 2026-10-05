@@ -183,8 +183,16 @@ public struct AssetOverviewView: View {
 
     private func performanceSection() -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("模拟历史财务表现（加权净值，近3年）").font(.headline)
-                .help("口径：以当前持仓市值权重，将各标的累计净值在近3年窗口内归一为1.0后加权合成；不含汇率、不含历史调仓。基金用累计净值（含分红再投），股票用收盘价。基准=沪深300+标普500按当前境内/境外池占比加权（与优化器一致）。")
+            HStack(alignment: .center, spacing: 12) {
+                Text("模拟历史财务表现（加权净值，近3年）").font(.headline).lineLimit(1)
+                    .help("口径：以当前持仓市值权重，将各标的累计净值在近3年窗口内归一为1.0后加权合成；不含汇率、不含历史调仓。基金用累计净值（含分红再投），股票用收盘价。基准=沪深300+标普500按当前境内/境外池占比加权（与优化器一致）。")
+                Spacer(minLength: 0)
+                // 图例移出绘图区、落在标题行右侧: 结构上不可能再压住折线.
+                // (此前是 .overlay(alignment: .topTrailing) 钉在绘图区右上角, 上行曲线末端必被盖住.)
+                if !store.hideNumbers {
+                    performanceLegend
+                }
+            }
             if store.hideNumbers {
                 PrivacyPlaceholder().frame(height: 260)
             } else {
@@ -193,6 +201,31 @@ public struct AssetOverviewView: View {
         }
         .padding()
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: 图例
+    // 系列配色单一来源: 图例色块与 chartForegroundStyleScale 共用, 避免两处各写 .blue/.green 后漂移.
+    private static let portfolioColor: Color = .blue
+    private static let benchmarkColor: Color = .green
+
+    /// 系列图例: 形式跟随 Mark —— 线图用线形色块, 「基准」以两段色块表示虚线.
+    /// 已移出绘图区, 故不再需要半透明底框.
+    private var performanceLegend: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                Rectangle().fill(Self.portfolioColor).frame(width: 12, height: 3)
+                Text("组合").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 4) {
+                HStack(spacing: 2) {
+                    Rectangle().fill(Self.benchmarkColor).frame(width: 5, height: 3)
+                    Rectangle().fill(Self.benchmarkColor).frame(width: 5, height: 3)
+                }
+                Text("基准").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        // 图例保住原生宽度: 宽度不足时先截断标题, 不压缩、不折行 (真值以截图核对).
+        .fixedSize()
     }
 
     private var performanceChart: some View {
@@ -217,7 +250,7 @@ public struct AssetOverviewView: View {
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
             }
         }
-        .chartForegroundStyleScale(["组合": .blue, "基准": .green])
+        .chartForegroundStyleScale(["组合": Self.portfolioColor, "基准": Self.benchmarkColor])
         .chartYScale(domain: lo...hi)
         .chartYAxis {
             // 只留刻度文字, 不画水平网格线 —— 悬在数据上方的横线曾被误认为"多余的直线".
@@ -225,23 +258,8 @@ public struct AssetOverviewView: View {
                 AxisValueLabel()
             }
         }
+        // 自绘图例已移到标题行; 这里仍须隐藏 Charts 自带图例, 否则会多画一个.
         .chartLegend(.hidden)
-        .overlay(alignment: .topTrailing) {
-            // 右上角图例: 自绘 overlay (chartLegend 自定义内容不渲染, 勿改回).
-            HStack(spacing: 12) {
-                HStack(spacing: 4) {
-                    Rectangle().fill(.blue).frame(width: 12, height: 3)
-                    Text("回测数据（组合）").font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 4) {
-                    Rectangle().fill(.green).frame(width: 12, height: 3)
-                    Text("基准数据（沪深300+标普500）").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 6))
-            .padding(6)
-        }
         .frame(height: 260)
     }
 
