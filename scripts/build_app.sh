@@ -177,7 +177,9 @@ if [ "${MAKE_ZIP}" = "1" ]; then
   # 用 ditto 而不是 zip: 它是 macOS 上打 app 包的正解 —— 保留符号链接
   # (venv/bin/python3)、可执行位与扩展属性, 解压回来签名封条仍然完整。
   # --keepParent 保证 zip 顶层是 PortfolioManager.app 本身（而不是它里面的内容）。
-  ditto -c -k --sequesterRsrc --keepParent "${BUNDLE}" "${ZIP}"
+  # 不加 --sequesterRsrc: 它会额外产出顶层 __MACOSX/（AppleDouble 元数据）,
+  # 与"zip 里只有 .app"的约定不符; 实测去掉后符号链接/可执行位/封条全部完好。
+  ditto -c -k --keepParent "${BUNDLE}" "${ZIP}"
   echo "==> zip: ${ZIP} ($(du -h "${ZIP}" | cut -f1))"
 fi
 
