@@ -6,8 +6,8 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「.numbers 手工维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.4-beta3**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，14 个 pre-release + 15 个 tag 齐全。
+- 当前版本 **v0.5-alpha.1**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 线上仓库：`xiang9916/PortfolioManager-app`，15 个 pre-release + 16 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
@@ -36,6 +36,12 @@ rm -f /tmp/pm-tokens.txt
   `Optimizer/scripts/params.py`、`Optimizer/scripts/market_data.py`、`Optimizer/data/calibrated_params.json`
   —— 这四个文件装的是**候选**资产全集（不是持仓清单），命中项经人工确认「只是候选池内容」后放行。
   **除此之外的任何文件出现命中，一律按隐私泄露处理。**
+- 第二类预期命中：**通用公开行情代码**（`BTC-USD`、`0700.HK`、`AAPL`、`000001` 这类谁都写得出的例子）出现在
+  测试 fixture、UI 输入提示、文档注释里。判定标准只有一条 —— **读者能否据此推断真实持仓**：不能就放行；
+  一旦它与数量/成本/金额/组合构成出现在同一处上下文里，仍按泄露处理。
+  （实测 2026-10-09：这条检查会稳定命中 `Tests/PortfolioCoreTests/AssetMarketTests.swift`、
+  `Sources/PortfolioManager/Views/AssetEditorViews.swift`、`Sources/PortfolioCore/DataSources/YahooFinanceSource.swift`，
+  三处均为上述通用示例，人工核对后放行；每次发布仍需逐条看一眼命中行。）
 - 该命令只取长度 ≥5 的 key，3–4 字符的短代码查不出来；这类短代码多为通用代号，
   仍需人工确认仓库里没有把它们与持仓/数量/金额写在一起。
 - release notes 也要单独扫（它在 GitHub 上，不在仓库里）：`gh release view <tag> --json body --jq .body` 后同样 grep。
@@ -175,6 +181,26 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - **"compiler is unable to type-check this expression in reasonable time"** = 单个 Chart builder 表达式太重。解法：把数组在 builder 外预先算成简单 struct 数组，builder 内只剩 ForEach + Mark。
 - **macOS 没有内置悬浮 tooltip**，要 `chartOverlay + GeometryReader + onContinuousHover` 手写。
 - **堆积图负值**：有负层时正负分开累计（正值堆上、负值沉底），否则分界线会画歪。
+  **唯一例外是财务分析「本金与市值」图**：那四个正层（累计股息 → 累计利息 → 累计已实现资本利得 → 本金）相加 ≡ 总成本，
+  所以最上面那条「未实现资本利得」带**不沉底**，而是两端锚在总成本线上——为正时叠在总成本之上（色块上界 = 总市值），
+  为负时压在总成本之内（本金层顶部那一截被它盖住，色块上界 = 总成本）。这是有意为之，别再"修"回沉底。
+- **跨零翻转的带子别用 `catmullRom`**：它在符号翻转处过冲，实测会把负值带插到 0 轴以下、整条带横穿全图（2026-10-09 实测）。
+  不过冲的插值只有 `.linear`（点间走直线）与 `.monotone`（圆滑但不过冲）；**图 5 现用 `.linear`**（想更圆滑换 `.monotone` 即可，两边都是一词之改，别用 catmullRom）。
+- **图 5 的实现口径**：X 轴是**数值轴**（季度序号），不是类别轴 —— 因为交点落在两个季度之间，类别轴放不下：
+  四个正层照旧走 `foregroundStyle(by:)` 的堆积（相加 = 总成本，形态与改动前一致）；「未实现资本利得」带**不进堆叠**，
+  另画一条独立序列 `AreaMark(x:yStart:yEnd:)`（x 用季度序号），并在**两条线相交处插一个采样点**（`t = d0/(d0−d1)`）
+  —— 于是带子在那里厚度真正归零、再翻到另一侧。轴标签只在整数刻度出（`AxisValueLabel` 里反查季度名）。
+  悬停：数值轴下 `proxy.value(atX:)` 返回 `Double`，`ChartHoverModifier` 加了 `numeric` 开关折算到最近季度（**其余四张图仍走类别轴**）。
+  插值统一 `.linear`（点间走直线，不过冲）。
+  **本金参考线**：值 =「本金」字段本身（离横轴的距离 = 本金金额；不是本金层的下边缘，也不是累计已实现回报），
+  常显、不进图例、不进堆叠；样式 = **亮绿**粗虚线 `Color(hue: 0.30, saturation: 0.82, brightness: 0.95)` +
+  `lineWidth 2.5, dash [5, 3]`（原先的墨绿在砖红/金层上发糊、在深色背景里更糊）。这条线永远落在有填充的带子内，不会落到空白背景上。
+- **`AreaMark` 的 `yStart/yEnd` 会「按点归一化」**：每个数据点先取小者为下界、大者为上界，再各自插值 ——
+  所以在**类别轴**上"两条边界线在两个季度之间相交"这个形状画不出来（带子只会整体滑过成本线；
+  实测把 `min/max` 换成直接给 `总市值/总成本` 两条线，两种写法**逐像素完全相同**，2026-10-09）。
+  要真交点就得换数值轴 + 在交点补采样点（图 5 就是这么做的）。注意 `cmp` 比字节会报"不同"，那是 PNG 压缩差异，要比像素。
+  踩坑记录：把五层**全部**改成显式 `yStart/yEnd` 的 `AreaMark` 会被合并成一条（只剩一层）；`BarMark(x:yStart:yEnd:width:)` 传裸 `Double`
+  会静默落到另一个 init 画成全高柱；`RectangleMark` 的 `yStart` 是 `CGFloat`。**混合写法**（4 层照旧堆积 + 1 条显式带）才可行。
 - 设计教训：**一图一信息**。Y 轴截断（如 20%~180%）会把小波动放大成"过山车"；混合柱+双轴线在一个图里基本看不懂。用截断轴前先想清楚要不要 `chartYScale(domain: 0...)`。
 
 ## 14. 工作流习惯
