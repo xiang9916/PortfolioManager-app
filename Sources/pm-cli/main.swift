@@ -288,7 +288,7 @@ if args.count >= 2 && args[1] == "financials" {
         let fa = try repo.fetchFinancialAnalysis()
         print("财务分析:")
         print("  资产结构: 原始本金 \(fa.originalPrincipal) 实盈实亏 \(fa.realizedPnl) 本金 \(fa.principal) 市值 \(fa.marketValue)")
-        print("           浮盈 \(fa.unrealizedPnl) 收益率(实盈/原始本金) \(String(format: "%.2f%%", fa.returnRate * 100))")
+        print("           未实现资本利得 \(fa.unrealizedPnl) 收益率(实盈/原始本金) \(String(format: "%.2f%%", fa.returnRate * 100))")
         print("  收益结构: 股息 \(fa.totalDividends) 交易损益 \(fa.totalRealizedPnl) 合计收益 \(fa.totalIncome) 合计收益率 \(String(format: "%.2f%%", fa.totalReturnRate * 100))")
         print("  期间明细 (\(fa.periods.count) 条):")
         for f in fa.periods {

@@ -77,9 +77,9 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
     public let valueCny: Double
     /// 成本（折人民币）(costBasis × FX rate).
     public let costCny: Double
-    /// 浮盈浮亏 = 市值 − 成本 (人民币).
+    /// 未实现资本利得 = 市值 − 成本 (人民币).
     public let unrealizedPnl: Double
-    /// 收益率 = 浮盈浮亏 / 成本 (成本为 0 时记 0).
+    /// 收益率 = 未实现资本利得 / 成本 (成本为 0 时记 0).
     public let returnRate: Double
     public let quantity: Double
     /// 手工录入的持仓成本（原币, 与 `currency` 同币种）。
@@ -97,17 +97,17 @@ public struct AssetPerspectiveRow: Codable, Hashable, Identifiable {
 
 /// 能力4 财务分析: 个人资产/收益结构底稿 (组合级).
 public struct FinancialAnalysis: Codable, Hashable {
-    // 资产结构 (恒等式: 市值 = 原始本金 + 实盈实亏 + 浮盈浮亏, 其中 本金 = 原始本金 + 实盈实亏)
+    // 资产结构 (恒等式: 市值 = 原始本金 + 实盈实亏 + 未实现资本利得, 其中 本金 = 原始本金 + 实盈实亏)
     public let originalPrincipal: Double // 原始本金 = Σ 成本×汇率
     public let realizedPnl: Double       // 实盈实亏 = 累计股息分红 + 累计交易损益
     public let principal: Double         // 本金 = 原始本金 + 实盈实亏
     public let marketValue: Double       // 市值 = Σ 市值折¥
-    public let unrealizedPnl: Double     // 浮盈浮亏 = 市值 - 本金
-    public let returnRate: Double        // 收益率 = 浮盈浮亏 / 本金
+    public let unrealizedPnl: Double     // 未实现资本利得 = 市值 - 本金
+    public let returnRate: Double        // 收益率 = 未实现资本利得 / 本金
     // 收益结构 (从 income_periods 累计)
     public let totalDividends: Double   // 累计股息分红
     public let totalRealizedPnl: Double // 累计交易损益
-    public let totalIncome: Double      // 合计收益 = 实盈实亏 + 浮盈浮亏 = 市值 - 原始本金
+    public let totalIncome: Double      // 合计收益 = 实盈实亏 + 未实现资本利得 = 市值 - 原始本金
     public let totalReturnRate: Double  // 合计收益率 = 合计收益 / 原始本金
     public let periods: [IncomeSummary] // 期间明细
 }
@@ -507,7 +507,7 @@ public final class Repository {
         let totalRealized = periods.reduce(0.0) { $0 + $1.realizedPnl }
         let realizedPnl = totalDividends + totalRealized          // 实盈实亏
         let principal = originalPrincipal + realizedPnl           // 本金 = 原始本金 + 实盈实亏
-        let unrealized = marketValue - principal                  // 浮盈浮亏 = 市值 - 本金
+        let unrealized = marketValue - principal                  // 未实现资本利得 = 市值 - 本金
         let totalIncome = realizedPnl + unrealized                // 合计收益 = 市值 - 原始本金
         // 收益率 = 实盈实亏 / 原始本金 (已实现收益率, 与资产结构卡片对应)
         let returnRate = originalPrincipal > 0 ? realizedPnl / originalPrincipal : 0

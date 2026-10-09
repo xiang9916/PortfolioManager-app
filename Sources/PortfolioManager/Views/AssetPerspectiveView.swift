@@ -103,7 +103,7 @@ public struct AssetDetailView: View {
                           store.hideNumbers ? PrivacyStyle.masked : CurrencyStyle.symbol(row.currency) + money(row.value))
                 detailRow("市值 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.valueCny) + " ¥")
                 detailRow("成本 (折人民币)", store.hideNumbers ? PrivacyStyle.masked : money(row.costCny) + " ¥")
-                pnlRow("浮盈浮亏", row.unrealizedPnl)
+                pnlRow("未实现资本利得", row.unrealizedPnl)
                 detailRow("收益率", store.hideNumbers ? PrivacyStyle.masked : pct(row.returnRate))
 
                 // 股息 (自动抓取, 不可手改): 四个指定字段 + 对照/依据行.

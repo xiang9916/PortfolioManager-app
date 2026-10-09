@@ -119,7 +119,7 @@ struct FinancialChartPanel: View {
                 }
             }
             .frame(height: 280)
-            .withHover(labels: labels, hovered: $hoverLabel)
+            .withHover(labels: labels, hovered: $hoverLabel, numeric: tab == .capital)
 
             if tab == .cashFlow {
                 cashLegend
@@ -159,7 +159,7 @@ struct FinancialChartPanel: View {
         case .quarterReturn:
             return "点 = 滚动年化收益率; 棒 = 95% 置信区间 (均值±1.96σ), 棒越长 = 波动越大; 水平虚线 = 当前运行均值。年化 ≤ 0 表示当期亏损。"
         case .capital:
-            return "总市值结构 (自下而上): 累计股息 → 累计利息 → 累计已实现资本利得 → 本金 → 未实现资本利得，各层累计值相加 = 总市值。悬停查看各层数值。"
+            return "自下而上: 累计股息 → 累计利息 → 累计已实现资本利得 → 本金 → 未实现资本利得；四个正层相加 = 总成本，最上面那条带 = 总市值与总成本之差（为正叠在顶部之上，为负压在顶部之内）。绿虚线 = 本金。悬停查看各层数值。"
         }
     }
 
@@ -503,8 +503,11 @@ struct FinancialChartPanel: View {
     }
 
     // MARK: - 图 5 · 本金与市值 (总市值结构堆积面积图)
-    // 自下而上: 累计股息 → 累计利息 → 累计已实现资本利得 → 本金 → 未实现资本利得.
-    // 各层 = 累计值绝对量, 正值堆上 / 负值沉底, 上边界 + 下边界之和 ≈ 总市值.
+    // 自下而上: 累计股息 → 累计利息 → 累计已实现资本利得 → 本金 (= 总成本, 纯平滑堆积, 与改动前一致);
+    // 最上面那条「未实现资本利得」带另画一条独立序列, 两端锚在总成本线上:
+    //   为正 → 叠在总成本之上 (色块上界 = 总市值);
+    //   为负 → 压在总成本之内 (盖掉本金层顶部那一截, 色块上界 = 总成本).
+    // 这样负值永远不会进入堆叠 (进去就会被甩到 0 轴以下), Y 轴恒从 0 起; 详见 AGENTS.md §13.
 
     private struct StackLayer {
         let name: String
@@ -512,7 +515,7 @@ struct FinancialChartPanel: View {
         let value: (QuarterComputed) -> Double?
     }
 
-    /// 配色: 统一大地暖色系, 相邻层强对比 (金→青灰→橙→砖红→奶油), 底部深 = 本金压舱, 顶部浅 = 浮盈.
+    /// 配色: 统一大地暖色系, 相邻层强对比 (金→青灰→橙→砖红→奶油), 底部深 = 本金压舱, 顶部浅 = 未实现资本利得.
     private static let capitalLayers: [StackLayer] = [
         StackLayer(name: "累计股息",           color: Color(hue: 0.115, saturation: 0.72, brightness: 0.94)) { $0.cumDividend },
         StackLayer(name: "累计利息",           color: Color(hue: 0.52,  saturation: 0.50, brightness: 0.55)) { $0.cumInterest },
@@ -521,81 +524,174 @@ struct FinancialChartPanel: View {
         StackLayer(name: "未实现资本利得",     color: Color(hue: 0.11,  saturation: 0.38, brightness: 1.00)) { $0.unrealizedGain },
     ]
 
+    /// 堆叠用前三/四层 = 上面数组的前四项 (它们的和 ≡ 总成本); 未实现带不走堆叠.
+    private static let capitalStackLayers: [StackLayer] = Array(capitalLayers[0..<4])
+
+    /// 本金参考线: **亮绿**粗虚线 (高饱和高亮度, 压在砖红/橙/青灰/浅黄上都跳得出来; 深色背景下同样醒目), 不进图例.
+    private static let principalBaselineColor = Color(hue: 0.30, saturation: 0.82, brightness: 0.95)
+
+    /// 图 5 的 X 轴用**数值轴**(季度序号), 不是类别轴: 只有这样才放得下"两个季度之间"的交点采样点.
+    private func capitalX(_ i: Int) -> Double { Double(i) }
+
     private struct Stratum: Identifiable {
         let id: String
         let label: String
         let layer: String
+        let x: Double
         let v: Double
+    }
+
+    /// 可画的一列 = 总市值与总成本都填了; 缺任一个 → 整列跳过 (层与点都不画).
+    private func capitalColumn(_ c: QuarterComputed) -> (mv: Double, cost: Double)? {
+        guard let mv = c.report.marketValue, let cost = c.report.totalCost, c.principal != nil else { return nil }
+        return (mv, cost)
     }
 
     private var capStrata: [Stratum] {
         var out: [Stratum] = []
-        for (i, c) in filtered.enumerated() where c.report.marketValue != nil {
-            for l in Self.capitalLayers {
+        for (i, c) in filtered.enumerated() where capitalColumn(c) != nil {
+            for l in Self.capitalStackLayers {
                 if let v = l.value(c) {
-                    out.append(Stratum(id: "\(l.name)|\(labels[i])", label: labels[i], layer: l.name, v: v))
+                    out.append(Stratum(id: "\(l.name)|\(labels[i])", label: labels[i], layer: l.name,
+                                       x: capitalX(i), v: v))
                 }
             }
         }
         return out
     }
 
-    /// (正层累计上界, 负层累计下界), 只用于定 Y 轴范围.
-    private var capExtent: (upper: Double, lower: Double) {
-        var up = 0.0
-        var lo = 0.0
-        for c in filtered where c.report.marketValue != nil {
-            var pos = 0.0
-            var neg = 0.0
-            for l in Self.capitalLayers {
-                guard let v = l.value(c) else { continue }
-                if v >= 0 { pos += v } else { neg += v }
-            }
-            up = max(up, pos)
-            lo = min(lo, neg)
+    /// 未实现带的一个采样点: 上下就是「总市值」与「总成本」两条折线.
+    private struct GainPoint: Identifiable {
+        let id: String
+        let x: Double
+        let mv: Double
+        let cost: Double
+    }
+
+    /// 未实现带 = 各季度点 + **交点采样点**.
+    /// 两条直线在两个季度之间相交时, 把交点也插成一个采样点 —— 于是带子在那里厚度真正归零, 然后翻到另一侧.
+    /// (类别轴做不到: AreaMark 会把每个点上的上下界按大小归一化再各自插值, 两点之间永远不会相交.)
+    private var capitalGainPoints: [GainPoint] {
+        var cols: [(x: Double, mv: Double, cost: Double)] = []
+        for (i, c) in filtered.enumerated() {
+            guard let col = capitalColumn(c) else { continue }
+            cols.append((capitalX(i), col.mv, col.cost))
         }
-        return (up, lo)
+        var out: [GainPoint] = []
+        for (k, p) in cols.enumerated() {
+            out.append(GainPoint(id: "q\(k)", x: p.x, mv: p.mv, cost: p.cost))
+            guard k + 1 < cols.count else { continue }
+            let q = cols[k + 1]
+            let d0 = p.mv - p.cost, d1 = q.mv - q.cost
+            guard d0.sign != d1.sign, d0 != 0, d1 != 0 else { continue }
+            let t = d0 / (d0 - d1)
+            guard t > 0, t < 1 else { continue }
+            let v = p.mv + (q.mv - p.mv) * t
+            out.append(GainPoint(id: "x\(k)", x: p.x + (q.x - p.x) * t, mv: v, cost: v))
+        }
+        return out
+    }
+
+    /// 本金参考线 = 「本金」字段本身 (离横轴的距离 = 本金金额), 不是本金层的下边缘.
+    private struct BaselinePoint: Identifiable {
+        let id: String
+        let x: Double
+        let v: Double
+    }
+
+    private var principalBaseline: [BaselinePoint] {
+        filtered.enumerated().compactMap { i, c in
+            guard capitalColumn(c) != nil, let p = c.principal else { return nil }
+            return BaselinePoint(id: labels[i], x: capitalX(i), v: p)
+        }
+    }
+
+    /// 数值轴上的季度标签: 只有整数刻度才是真季度 (交点是小数刻度, 不该出现标签).
+    private func quarterLabel(at x: Double) -> String? {
+        let i = Int(x.rounded())
+        guard abs(x - Double(i)) < 0.001, i >= 0, i < labels.count else { return nil }
+        return labels[i]
+    }
+
+    /// 数值轴范围: 左右各留半个槽, 免得首末季度的标签被切掉.
+    private var capitalXDomain: ClosedRange<Double> {
+        let hi = Double(max(filtered.count - 1, 0))
+        return -0.45...(hi + 0.45)
+    }
+
+    /// Y 轴上界 = 色块最高处 (总市值 / 总成本 取大者) × 1.15; 下界恒 0.
+    private var capitalTop: Double {
+        var hi = 0.0
+        for c in filtered {
+            guard let col = capitalColumn(c) else { continue }
+            hi = max(hi, max(col.mv, col.cost))
+        }
+        return max(hi * 1.15, 1)
+    }
+
+    /// 末尾读数, 固定放图外顶边 (无论该季未实现资本利得为正还是为负, 位置一致).
+    private var capitalReadout: String? {
+        guard let last = filtered.last(where: { capitalColumn($0) != nil }),
+              let col = capitalColumn(last) else { return nil }
+        return "总市值 \(amount(col.mv)) · 总成本 \(amount(col.cost))"
     }
 
     private var capitalChart: some View {
         let strata = capStrata
-        let extent = capExtent
+        let gainPoints = capitalGainPoints
+        let baseline = principalBaseline
         return Group {
             if strata.isEmpty {
                 chartNote("暂无市值数据")
             } else {
-                let maxV = max(extent.upper, 1)
-                let minV = extent.lower
                 Chart {
+                    // 四层正项堆积: 相加 = 总成本 (x 用季度序号, 与数值轴一致).
                     ForEach(strata) { s in
                         AreaMark(
-                            x: .value("季度", s.label),
+                            x: .value("季度序号", s.x),
                             y: .value("金额", s.v)
                         )
                         .foregroundStyle(by: .value("构成", s.layer))
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.linear)
                     }
-                    if let last = filtered.last(where: { $0.report.marketValue != nil }),
-                       let mv = last.report.marketValue {
-                        PointMark(
-                            x: .value("季度", QuarterlyMetrics.quarterLabel(last.report.periodEnd)),
-                            y: .value("金额", mv)
+                    // 未实现带: 独立序列, 上下边 = 总市值 / 总成本 两条折线 (含交点采样点, 翻符号处厚度归零).
+                    ForEach(gainPoints) { p in
+                        AreaMark(
+                            x: .value("季度序号", p.x),
+                            yStart: .value("总市值", p.mv),
+                            yEnd: .value("总成本", p.cost)
                         )
-                        .foregroundStyle(.primary.opacity(0.3))
-                        .symbolSize(1)
-                        .annotation(position: .top) {
-                            Text("总市值 \(amount(mv))")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
+                        .foregroundStyle(Self.capitalLayers[4].color)
+                        .interpolationMethod(.linear)
                     }
-                    hoverRule
+                    // 本金参考线 (常显, 不进图例; 值 = 「本金」字段本身).
+                    ForEach(baseline) { p in
+                        LineMark(
+                            x: .value("季度序号", p.x),
+                            y: .value("本金", p.v)
+                        )
+                        .foregroundStyle(Self.principalBaselineColor)
+                        .lineStyle(StrokeStyle(lineWidth: 2.5, dash: [5, 3]))
+                        .interpolationMethod(.linear)
+                    }
+                    capitalHoverRule
                 }
                 .chartForegroundStyleScale(
-                    domain: Self.capitalLayers.map(\.name),
-                    range: Self.capitalLayers.map(\.color)
+                    domain: Self.capitalStackLayers.map(\.name),
+                    range: Self.capitalStackLayers.map(\.color)
                 )
-                .chartYScale(domain: minV...(maxV * 1.15))
+                .chartYScale(domain: 0...capitalTop)
+                .chartXScale(domain: capitalXDomain)
+                .chartXAxis {
+                    AxisMarks(values: filtered.indices.map { capitalX($0) }) { value in
+                        AxisGridLine()
+                        AxisValueLabel {
+                            if let d = value.as(Double.self), let text = quarterLabel(at: d) {
+                                Text(text)
+                            }
+                        }
+                    }
+                }
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
                         AxisGridLine()
@@ -607,6 +703,15 @@ struct FinancialChartPanel: View {
                     }
                 }
                 .chartLegend(.hidden)
+                .chartOverlay(alignment: .topTrailing) { _ in
+                    if let readout = capitalReadout {
+                        Text(readout)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.trailing, 6)
+                            .allowsHitTesting(false)
+                    }
+                }
             }
         }
     }
@@ -617,6 +722,16 @@ struct FinancialChartPanel: View {
     private var hoverRule: some ChartContent {
         if let h = hoverLabel {
             RuleMark(x: .value("悬停", h))
+                .foregroundStyle(.secondary.opacity(0.5))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        }
+    }
+
+    /// 图 5 的悬停竖线: 它用数值 x, 得把悬停到的季度标签折算回序号.
+    @ChartContentBuilder
+    private var capitalHoverRule: some ChartContent {
+        if let h = hoverLabel, let i = labels.firstIndex(of: h) {
+            RuleMark(x: .value("悬停", capitalX(i)))
                 .foregroundStyle(.secondary.opacity(0.5))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
@@ -668,6 +783,7 @@ struct FinancialChartPanel: View {
                     ("累计已实现资本利得", amount(c.cumRealizedGain), false),
                     ("本金", amount(c.principal), false),
                     ("未实现资本利得", amount(c.unrealizedGain), false),
+                    ("总成本", amount(c.report.totalCost), false),
                     ("总市值", amount(c.report.marketValue), true),
                 ])
             }
@@ -751,6 +867,8 @@ struct FinancialChartPanel: View {
 
 private struct ChartHoverModifier: ViewModifier {
     let labels: [String]
+    /// 数值 x 轴 (图 5 用季度序号) 时 value(atX:) 返回 Double, 得折算到最近的季度; 其余四张图是类别轴.
+    var numeric = false
     @Binding var hovered: String?
 
     func body(content: Content) -> some View {
@@ -765,7 +883,12 @@ private struct ChartHoverModifier: ViewModifier {
                             guard let plotFrame = proxy.plotFrame else { return }
                             let origin = geo[plotFrame].origin
                             let x = location.x - origin.x
-                            if let label: String = proxy.value(atX: x) {
+                            if numeric {
+                                if let d: Double = proxy.value(atX: x), !labels.isEmpty {
+                                    let i = min(max(Int(d.rounded()), 0), labels.count - 1)
+                                    hovered = labels[i]
+                                }
+                            } else if let label: String = proxy.value(atX: x) {
                                 hovered = label
                             }
                         case .ended:
@@ -778,7 +901,7 @@ private struct ChartHoverModifier: ViewModifier {
 }
 
 private extension View {
-    func withHover(labels: [String], hovered: Binding<String?>) -> some View {
-        modifier(ChartHoverModifier(labels: labels, hovered: hovered))
+    func withHover(labels: [String], hovered: Binding<String?>, numeric: Bool = false) -> some View {
+        modifier(ChartHoverModifier(labels: labels, numeric: numeric, hovered: hovered))
     }
 }
