@@ -101,6 +101,10 @@ bash scripts/build_app.sh --with-venv --dmg     # 必须 --with-venv，否则优
   与本地 `shasum -a 256` 一致，且 notes 里的 SHA 行同步更新。
 - zip 上传前必须**解压回验**：`ditto -x -k <zip> <tmpdir>` → `codesign --verify <tmpdir>/PortfolioManager.app`
   必须通过（zip 若丢了符号链接或可执行位，封条会碎）。
+  ⚠️ 别加 `--deep --strict`：venv 里 `bin/python3` 是指向本机 conda 解释器的**绝对符号链接**，
+  strict 模式必然报 `invalid destination for symbolic link in bundle` 并退 1 —— 这是既有现象（0.4-beta3 的产物同样如此），
+  不是这次打包坏了；同理 DMG 挂载后做 strict 校验也会报 `file modified`（HFS+ 转换改写符号链接元数据）。
+  想根治只能把 venv 建成 `--copies` 的自包含形态（会显著变大），目前不做。
 - `hdiutil create` 在沙箱下会失败 → `build_app.sh` 内置 `makehybrid` + `convert` 回退；镜像固定 HFS+（APFS 会大约 50%）。
 
 ## 6. 架构与数据模型（Schema v8 现状）
@@ -167,7 +171,8 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - Python 解释器解析链：`PORTFOLIO_OPTIMIZER_PYTHON` → App bundle `Resources/Optimizer/.venv` → 仓库 `Optimizer/.venv` → PATH。
 - 外部数据目录：`DSH_FINANCE_DIR`（默认 `~/Finance/tmp`）；aistockresearcher 脚本目录：`AISTOCKRESEARCHER_DIR`。
   **不要写死 `/Users/<某人>/…` 路径**（构建机绝对路径是隐私泄露源，见 §1）。
-- venv 解释器 `/opt/miniconda3/bin/python3`（实测 3.14.x）。
+- venv 解释器 `/opt/anaconda3/bin/python3`（实测 3.14.6；`/opt/miniconda3` 在本机已不存在，别照旧路径找）。
+  bundle 里 `Resources/Optimizer/.venv/bin/python3` 是指向它的**绝对符号链接**（strict 校验的坑见 §5）。
 - futu-api 仅声明于 requirements，当前无代码 import；行情走 Yahoo/Eastmoney 公开源。仓库不得出现任何 API key/凭据。
 - 「新标的测试」= 临时加 ticker 重跑，不改持仓，结果在弹窗（testOptimization 状态）。
 
