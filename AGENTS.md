@@ -6,8 +6,8 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「.numbers 手工维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.5-alpha.1**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，15 个 pre-release + 16 个 tag 齐全。
+- 当前版本 **v0.5-alpha.2**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 线上仓库：`xiang9916/PortfolioManager-app`，16 个 pre-release + 17 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
@@ -48,6 +48,15 @@ rm -f /tmp/pm-tokens.txt
 - **示例数值也必须虚构。** 最容易漏的一处是「拿真实数字当例子说明格式化 bug」—— 真实历史里就这么漏过一次
   （release notes 里写了两个真实金额作为 `%g` 舍入的对照）。扫 notes 时那条类别 grep 一旦命中千分位写法，就得改。
 - 测试一律用**虚构 fixture**；季度指标的期望值不要手抄，用 `QuarterlyMetrics.compute` 跑出来再固化。
+
+- **已自动化**：`scripts/privacy_check.sh`（`--staged` / `--message` / `--install`）；
+  `--install` 会写好 `.git/hooks/pre-commit`（扫暂存区）与 `commit-msg`（扫提交信息），
+  本地黑名单 `tmp/privacy-numbers.txt`（gitignore 内、一行一个正则）专门挡"本地跑出来的组合级数字"。
+  判定分级：候选池文件直接跳过；通用公开代码（三处 Swift 与 AGENTS.md 自身）打印出来供人工确认；
+  其余命中一律按泄露处理并让提交失败。
+- **🔴 实测数字一律不入库**：优化权重、组合收益/波动/夏普、真实池拆分比例、内部标的权重……
+  这些都不是"候选池内容"，写进文档/注释/提交信息即等于泄露组合结构。**只写机制与教训**；
+  本地验证记录留在 `tmp/`（gitignore）或工作区外。
 
 ### 历史教训（为什么上面这些规则这么硬）
 - 本项目真出过一次隐私泄露，**泄露渠道全部是「人写的文本」**：release notes、测试 fixture、代码注释、UI 文案。
@@ -255,6 +264,6 @@ pm-cli (headless CLI) 复用 PortfolioCore
 
 ## 14. 工作流习惯
 - 中文 commit message，前缀：`feat(scope):` / `fix(scope):` / `chore:`。
-- 改版前先跑全量测试；发布流程见 §5；**发布前跑一遍 §1 的隐私自查**。
+- 改版前先跑全量测试；发布流程见 §5；**提交/发布前跑 `scripts/privacy_check.sh`**（装了钩子会自动跑）。
 - `.gitignore` 已忽略：`.build/` `Optimizer/.venv/` `tmp/` `dist/` `__pycache__/` `*.pyc` `.DS_Store`。
   不要把 venv、构建产物、含个人数据的文件加进来；个人数据目录与表格文件就在工作区里，但**不是本仓库内容**，勿提交。
