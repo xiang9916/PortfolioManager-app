@@ -28,8 +28,9 @@ EXCLUDES=(--exclude-dir=.git --exclude-dir=.build --exclude-dir=dist --exclude-d
 POOL_RE='(^|/)(AssetCatalog\.swift|params\.py|market_data\.py|calibrated_params\.json|asset_classes\.py|bond_prior\.py)$|^\./Optimizer/tests/'
 GENERIC_RE='AssetMarketTests\.swift$|AssetEditorViews\.swift$|YahooFinanceSource\.swift$|^\./AGENTS\.md$|^\./README\.md$' 
 
-# 自身含规则文本，不参与 ②（同 AGENTS.md §1 的既有例外）
+# 自身含规则文本，不参与 ②（同 AGENTS.md §1 的既有例外：占位符与「123,456.78」是规则内容）
 SELF_EXCLUDE="--exclude=privacy_check.sh --exclude=AGENTS.md --exclude=build_app.sh"
+STAGED_EXCLUDE=(-- . ':(exclude)scripts/privacy_check.sh' ':(exclude)AGENTS.md' ':(exclude)build_app.sh' ':(exclude)README.md')
 
 MODE="worktree"
 MSG_FILE=""
@@ -69,7 +70,7 @@ if [ "$MODE" != "message" ]; then
     sqlite3 "$DB" "select distinct key from assets where length(key)>=5" > "$TOKENS" 2>/dev/null || true
     if [ -s "$TOKENS" ]; then
       if [ "$MODE" = "staged" ]; then
-        HITS="$(git diff --cached -U0 | grep '^+' | grep -v '^+++' | grep -oFf "$TOKENS" | sort -u || true)"
+        HITS="$(git diff --cached -U0 "${STAGED_EXCLUDE[@]}" | grep '^+' | grep -v '^+++' | grep -oFf "$TOKENS" | sort -u || true)"
         [ -n "$HITS" ] && report "暂存区里出现真实持仓 key："$'\n'"$(echo "$HITS" | sed 's/^/      /')"
       else
         FILES="$(grep -rIlFf "$TOKENS" . "${EXCLUDES[@]}" 2>/dev/null || true)"
@@ -93,7 +94,7 @@ PATTERN='/Users/[a-zA-Z0-9_.-]+/|[0-9]{2,3},[0-9]{3}'
 if [ "$MODE" = "message" ]; then
   HITS="$(grep -InE "$PATTERN" "$MSG_FILE" || true)"
 elif [ "$MODE" = "staged" ]; then
-  HITS="$(git diff --cached -U0 | grep '^+' | grep -v '^+++' | grep -InE "$PATTERN" || true)"
+  HITS="$(git diff --cached -U0 "${STAGED_EXCLUDE[@]}" | grep '^+' | grep -v '^+++' | grep -InE "$PATTERN" || true)"
 else
   HITS="$(grep -rInE "$PATTERN" . "${EXCLUDES[@]}" $SELF_EXCLUDE 2>/dev/null || true)"
 fi
@@ -105,7 +106,7 @@ if [ -f "$BLACK" ]; then
   if [ "$MODE" = "message" ]; then
     HITS="$(grep -InEf "$BLACK" "$MSG_FILE" || true)"
   elif [ "$MODE" = "staged" ]; then
-    HITS="$(git diff --cached -U0 | grep '^+' | grep -v '^+++' | grep -InEf "$BLACK" || true)"
+    HITS="$(git diff --cached -U0 "${STAGED_EXCLUDE[@]}" | grep '^+' | grep -v '^+++' | grep -InEf "$BLACK" || true)"
   else
     HITS="$(grep -rInEf "$BLACK" . "${EXCLUDES[@]}" 2>/dev/null || true)"
   fi
