@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """Calibrate portfolio-optimizer parameters from market data.
 
+规则（混合比例、截断线、历史窗口、波动率下限、兜底矩阵）全部定义在
+`asset_classes.py` —— 本文件只负责取数、算历史年化收益/波动、按规则组装。
+
 Data sources:
 - Yahoo Finance: US/HK/JP/SG ETFs, stocks, BTC, buffer ETF proxy
 - Eastmoney: China open-end fund NAV history (LJJZ/cumulative NAV)
 
 Method:
-- Use ~3 years of daily data.
-- Volatility: annualized std of daily log returns.
-- Correlations: daily return correlations on common dates.
-- Expected returns: 50% historical annualized return + 50% prior forward-looking assumption,
-  clamped to [0%, 15%] to stay forward-looking and avoid overfitting short histories.
-- Money-market funds keep a fixed 2%/1% assumption because NAV alone does not reflect money-market yield.
+- 历史窗口按类别：宽基/大类 = 全历史；策略指数 = 20 年；个股/主动 = 10 年（不足则用可得全历史）。
+- σ = 日收益标准差 × √252（窗口内），再按类别套人工下限。
+- 相关性 = 窗口内日收益的皮尔逊相关（共同日期 ≥180 天），不足填 0.30。
+- 见 asset_classes.py 的 docstring：三个类别各自的 μ 构造与兜底矩阵。
 
 Output:
-- $DSH_FINANCE_DIR/calibrated_params.json (默认 ~/Finance/tmp/)
+- $DSH_FINANCE_DIR/calibrated_params.json (默认 ~/Finance/tmp/)，或 --out 指定
+
+JSON 里额外写入：
+- `provenance[key]`: {class, window_years, n_days, mu_hist, mu, vol, note, vol_note, source}
+  —— 说明每个数的来历（历史 / 人工先验 / 人工下限 / 写死），供 App 与审计追溯。
+- `warnings`: 需要人看的提示（丢弃、σ 毛刺、缺少先验用纯历史、无行情用先验…）。
 """
 
 import json
@@ -22,7 +28,6 @@ import math
 import datetime
 import os
 import sys
-
 
 import numpy as np
 import pandas as pd
@@ -34,220 +39,249 @@ from market_data import (
     to_series,
     yahoo_history,
 )
+import asset_classes as AC
 
-prior = {
-    "D_HSBC_SP500": 0.09,
-    "D_HSBC_CSI300": 0.08,
-    "D_HSBC_DIVLOWVOL": 0.075,
-    "D_HSBC_CDB": 0.035,
-    "D_HSBC_GOLD": 0.06,
-    "D_HSBC_HSTECH": 0.08,
-    "D_HSBC_MMF": 0.02,
-    "D_CN_CREDIT_BOND": 0.045,
-    "D_CN_DIVLOWVOL100": 0.075,
-    "D_CN_STOCK": 0.08,
-    "D_CN_MIXED": 0.07,
-    "D_CN_INDEX": 0.075,
-    "D_CN_HK": 0.075,
-    "D_CN_QDII_STOCK": 0.085,
-    "D_CN_QDII_STABLE": 0.045,
-    "D_CN_QDII_COMMODITY": 0.05,
-    "O_US_CORE": 0.09,
-    "O_BTC": 0.15,
-    "O_HYLB": 0.065,
-    "O_HK_HSTECH": 0.08,
-    "O_HK_HIGHDIV": 0.07,
-    "O_JP_EQ": 0.07,
-    "O_SG_EQ": 0.065,
-    "O_US_TLT": 0.04,
-    "O_US_REIT": 0.065,
-    "O_US_ENERGY": 0.075,
-    "O_HK_GOLD": 0.06,
-    "O_GOLD": 0.06,
-    "SPLG": 0.09,
-    "VTV": 0.085,
-    "SPMO": 0.095,
-    "UNH": 0.09,
-    "GOOG": 0.09,
-    "AAPL": 0.09,
-    "MSFT": 0.09,
-    "NVDA": 0.11,
-    "AMZN": 0.095,
-    "META": 0.10,
-    "TSLA": 0.10,
-    "BUFFER": 0.07,
-    "1364": 0.07,
-    "1698": 0.07,
-    "2516": 0.08,
-    "1477": 0.065,
-    "1478": 0.07,
-    "1490": 0.065,
-    "2529": 0.075,
-    "2800": 0.07,
-    "2828": 0.075,
-    "3031": 0.07,
-    "3067": 0.08,
-    "3110": 0.07,
-    "3070": 0.07,
-    "CSI300": 0.075,
-    "DIVLOWVOL": 0.07,
-    "DIVLOWVOL100": 0.075,
-    "STOCK": 0.08,
-    "MIXED": 0.07,
-    "INDEX": 0.075,
-    "HK_BROAD": 0.07,
-    "HK_DIV": 0.07,
-    "HK_TECH": 0.08,
-}
+PROVENANCE, WARNINGS, DROPPED = {}, [], []
+
+
+def _fetch(typ, sym, years, adjusted=False):
+    """adjusted=True → Yahoo 取复权价（含分红/票息）。中国基金走累计净值，天然是全收益。"""
+    if typ == "yahoo":
+        return yahoo_history(sym, years=years, adjusted=adjusted)
+    return eastmoney_nav(sym, years=years)
+
+
+def _label(key):
+    return f"{key}（{AC.ASSET_CLASS.get(key, '未登记')}）"
+
+
+def _pick_series(key, sym, fetched, years):
+    """在"真实标的"与"长历史代理"之间选序列。
+
+    规则（2026-10-13 修）：窗口内已经够长的就用**真实标的**，代理只在真实标的
+    铺不满窗口（或取数失败）时顶上。此前一律"谁的点数多用谁"，导致 10 年窗口下
+    原油期货 CL=F 的点数超过 XOM，把"能源生产商个股"的 σ 算成了 114%。
+    """
+    actual = fetched.get(sym) or []
+    proxy_syms = [s for s in fetched if s != sym]
+    proxy_sym = proxy_syms[0] if proxy_syms else None
+    proxy = fetched.get(proxy_sym) or [] if proxy_sym else []
+    if not proxy:
+        return actual, (sym if actual else None)
+    if not actual:
+        return proxy, proxy_sym
+    if years is not None:
+        need = int(years * 252 * 0.85)      # 铺满窗口的 85% 即认为够长
+        if len(actual) >= need:
+            return actual, sym
+        if len(proxy) >= need:
+            return proxy, proxy_sym
+    return (proxy, proxy_sym) if len(proxy) > len(actual) else (actual, sym)
+
 
 series = {}
 meta = {}
-for key, (typ, sym) in sources.items():
+retired = []
+
+# ── 债券大类的**动态先验**：先验 =（回归 μ + 当期锚定收益率）/2 ───────────────────
+# 回归自变量固定为同币种 10 年期国债收益率，锚定期限见 asset_classes.BOND_PRIOR_FORMULA。
+# 取数/拟合失败 → 回落到静态先验并报警（公式是主路径，写死值只是保险）。
+BOND_ANCHORS = {}
+BOND_DETAIL = {}
+_YIELD_HISTORY = []
+if AC.BOND_PRIOR_FORMULA:
     try:
-        # Try actual symbol first, using its full available history.
-        if typ == "yahoo":
-            prices = yahoo_history(sym, years=None)
-        else:
-            prices = eastmoney_nav(sym, years=None)
-        best_prices = prices
-        best_sym = sym
+        import bond_prior as _BP
+        _YIELD_HISTORY = _BP.fetch_yield_series(log=lambda m: print(m))
+        BOND_ANCHORS = _BP.latest_anchors(_YIELD_HISTORY)
+        if not BOND_ANCHORS:
+            WARNINGS.append("债券先验动态公式：取不到国债收益率锚，本次回落到静态先验")
+    except Exception as exc:  # noqa: BLE001
+        WARNINGS.append(f"债券先验动态公式不可用（{type(exc).__name__}: {exc}），本次回落到静态先验")
 
-        # If a long-history proxy exists and has more data, prefer it.
-        proxy = proxy_map.get(key)
-        if proxy is not None:
-            ptyp, psym = proxy
+
+def _resolve_bond_prior(key, prices, adjusted_prices=None):
+    """按动态公式算该债券标的的先验；(prior, detail) —— 失败时 prior 为 None。
+
+    `adjusted_prices`：债券 ETF 的**复权**序列。回归必须用它 —— 价格序列把票息丢掉了，
+    用未复权价会系统性低估远期收益、把斜率和截距都带偏（实测 TLT：0.53/3.36 → 0.60/3.64）。
+    """
+    if not _YIELD_HISTORY:
+        return None, {"reason": "no_yield_history"}
+    try:
+        import bond_prior as _BP
+        spec = AC.BOND_PRIOR_FORMULA[key]
+        x = _BP.yield_series_for_market(_YIELD_HISTORY, spec["market"])
+        use = adjusted_prices if (adjusted_prices and len(adjusted_prices) >= 260) else prices
+        fit = _BP.fit_asset(use, x)
+        fit["adjusted"] = use is adjusted_prices
+        m = fit.get("monthly")
+        if not m:
+            return None, {"reason": fit.get("error", "fit_failed")}
+        fits = {key: {"a": m["a"], "b": m["b"], "r2": m["r2"], "n_obs": fit["n"],
+                      "n_years": fit["n_years"], "source": None,
+                      "window": [fit["first"], fit["last"]]}}
+        return AC.bond_prior(key, BOND_ANCHORS, fits)
+    except Exception as exc:  # noqa: BLE001
+        return None, {"reason": f"{type(exc).__name__}: {exc}"}
+
+for key, (typ, sym) in sources.items():
+    cls = AC.asset_class(key)
+    if cls is None:
+        # 已退役的候选代码（不在任何池里、也没登记类别）→ 汇总成一条提示，不再逐个刷屏
+        retired.append(key)
+        continue
+    years = AC.window_years(key)
+    try:
+        fetched = {}
+        for _typ, _sym in ((typ, sym),) + (((proxy_map[key]),) if proxy_map.get(key) else ()):
             try:
-                if ptyp == "yahoo":
-                    pprices = yahoo_history(psym, years=None)
-                else:
-                    pprices = eastmoney_nav(psym, years=None)
-                if len(pprices) > len(best_prices):
-                    best_prices = pprices
-                    best_sym = psym
-            except Exception:
-                pass
-
-        df = to_series(best_prices)
-        if df is None or len(df) < 30:
-            print(f"{key:22} {best_sym:12} insufficient n={len(best_prices) if best_prices else 0}")
+                fetched[_sym] = _fetch(_typ, _sym, years)
+            except Exception as exc:  # 单个源失败不该丢掉整个标的（如 Yahoo 对 SPLG 返回 404）
+                fetched[_sym] = []
+                if _sym == sym:
+                    WARNINGS.append(f"{_label(key)}: {_sym} 取数失败 "
+                                    f"{type(exc).__name__}: {exc}，尝试代理源")
+        best_prices, best_sym = _pick_series(key, sym, fetched, years)
+        if not best_prices:
+            WARNINGS.append(f"{_label(key)}: 所有数据源都取不到行情，"
+                            + ("将用人工先验/下限兜底" if cls != "active" else "active 类无法兜底，已丢弃"))
+            PROVENANCE[key] = {"class": cls, "window_years": years, "n_days": 0,
+                               "source": None, "note": "no_history"}
+            continue
+        # 窗口裁剪：取不到那么长就用可得全历史
+        windowed = AC.slice_window(best_prices, years)
+        df = to_series(windowed)
+        if df is None or len(windowed) < 30:
+            WARNINGS.append(
+                f"{_label(key)}: 行情历史不足 30 天（{best_sym}），"
+                + ("已用人工先验/下限兜底" if cls != "active" else "active 类无法兜底，已丢弃"))
+            PROVENANCE[key] = {"class": cls, "window_years": years, "n_days": len(windowed or []),
+                               "source": best_sym, "note": "no_history"}
             continue
         series[key] = df
         n = len(df)
         ann_ret = (float(df["close"].iloc[-1]) / float(df["close"].iloc[0])) ** (252.0 / n) - 1.0
         ann_vol = float(df["ret"].std(ddof=1) * math.sqrt(252.0))
+
+        if key in AC.BOND_PRIOR_FORMULA:
+            # 债券回归要用全收益（复权）序列；Yahoo 走 adjclose，中国基金本身就是累计净值
+            adj = None
+            if typ == "yahoo":
+                try:
+                    adj = _fetch(typ, sym, years, adjusted=True)
+                except Exception as exc:  # noqa: BLE001
+                    WARNINGS.append(f"{_label(key)}: 复权序列取数失败（{type(exc).__name__}），"
+                                    f"动态先验改用未复权序列拟合，结果会偏低")
+            prior_val, detail = _resolve_bond_prior(key, windowed, adj)
+            BOND_DETAIL[key] = detail
+            if prior_val is not None:
+                AC.set_prior_overrides({**AC.PRIOR_OVERRIDE, key: prior_val})
+                WARNINGS.append(
+                    f"{_label(key)}: 先验走动态公式 {prior_val:.2%} =（回归 μ {detail['reg_mu']:.2%}"
+                    f" + {detail['anchor_label']} {detail['anchor_value']:.2%}）/2"
+                    f"（拟合 a={detail['a']:.2f}、R²={detail['r2']:.2f}、非重叠 {detail['n_years']} 个窗口）")
+            else:
+                WARNINGS.append(
+                    f"{_label(key)}: 动态先验不可用（{detail.get('reason')}），"
+                    f"回落到静态先验 {AC.PRIOR[key]:.2%}")
+        mu, note = AC.build_mu(key, ann_ret)
+        vol, vol_note = AC.build_vol(key, ann_vol)
+        if vol_note == "sigma_glitch":
+            WARNINGS.append(f"{_label(key)}: σ={ann_vol:.0%} 超过 150%，按数据毛刺丢弃（不再参与优化）")
+            DROPPED.append(key)
+            series.pop(key, None)
+            continue
+        if mu is None or vol is None:
+            WARNINGS.append(f"{_label(key)}: 既有行情也缺写死兜底值，已丢弃（不再参与优化）")
+            DROPPED.append(key)
+            series.pop(key, None)
+            continue
+
+        if note == "prior_fallback":
+            WARNINGS.append(f"{_label(key)}: 无行情历史，改用人工先验 μ={mu:.2%}、下限 σ={vol:.2%}")
+        elif note == "history_only":
+            WARNINGS.append(f"{_label(key)}: 无人工先验，broad/strategy 类改用纯历史 μ={mu:.2%}（口径与其它标的不同）")
+        if vol_note == "vol_floor":
+            WARNINGS.append(f"{_label(key)}: 历史波动 {ann_vol:.2%} 低于人工下限，σ 取 {vol:.2%}")
+        if note == "fixed":
+            WARNINGS.append(f"{_label(key)}: 货币基金按写死值 μ=2%、σ=1%")
+
         meta[key] = {"symbol": best_sym, "ret": ann_ret, "vol": ann_vol, "n": n}
-        print(f"{key:22} {best_sym:12} ret={ann_ret:.4f} vol={ann_vol:.4f} n={n}")
+        PROVENANCE[key] = {
+            "class": cls, "window_years": years, "n_days": n, "source": best_sym,
+            "mu_hist": round(ann_ret, 6), "vol_hist": round(ann_vol, 6),
+            "mu": round(mu, 6), "vol": round(vol, 6),
+            "note": note or "blend", "vol_note": vol_note or "history",
+            "prior": AC.prior_for(key), "vol_floor": AC.VOL_FLOOR.get(key) if AC.CLASS_RULES[cls]["use_vol_floor"] else None,
+            "prior_formula": BOND_DETAIL.get(key),
+        }
+        print(f"{key:22} {best_sym:12} {AC.CLASS_RULES[cls]['label']:<6} n={n:>6} "
+              f"hist={ann_ret:>7.2%} → μ={mu:>7.2%}  vol {ann_vol:>6.2%} → {vol:>6.2%}")
     except Exception as e:
+        WARNINGS.append(f"{_label(key)}: 取数失败 {type(e).__name__}: {e}")
         print(f"{key:22} {sym:12} ERR {type(e).__name__}: {e}")
 
-# Build full return DataFrame (do not drop all rows with any NaN; pairwise corr handles this)
+if retired:
+    WARNINGS.append(
+        f"已退役的候选代码 {len(retired)} 个（不在任何池里、未登记类别，已跳过）: " + "、".join(retired))
+
+# ---- 相关性：窗口内日收益的皮尔逊相关（不丢全 NaN 行；pairwise 处理缺失）----
 ret_df = pd.DataFrame({k: df.set_index("date")["ret"] for k, df in series.items()})
 corr = ret_df.corr(min_periods=180).round(4)
-# Pairs with too little common history are not reliable -> use a conservative prior correlation.
+missing_pairs = int(corr.isna().sum().sum() // 2)
 corr = corr.fillna(0.30)
+if missing_pairs:
+    WARNINGS.append(f"相关性：{missing_pairs} 对共同历史不足 180 天，已按保守先验 0.30 填充")
 
-# SPLG fallback: if Yahoo did not provide enough SPLG data, use SPY as the same-index proxy.
+# SPLG 兜底：Yahoo 若没给足 SPLG，用 SPY（同指数）代理
 if "SPLG" not in series and "O_US_CORE" in series:
     for other in list(corr.index):
         corr.loc["SPLG", other] = corr.loc["O_US_CORE", other]
-        corr.loc[other, "SPLG"] = corr.loc[other, "O_US_CORE"]
+        corr.loc[other, "SPLG"] = corr.loc["O_US_CORE", other]
     corr.loc["SPLG", "SPLG"] = 1.0
-
-# Conservative volatility floors: avoid unrealistically low risk from a benign 3y window.
-VOL_FLOOR = {
-    "O_HYLB": 0.08,
-    "O_US_REIT": 0.15,
-    "O_US_ENERGY": 0.20,
-    "O_BTC": 0.40,
-    "D_HSBC_GOLD": 0.15,
-    "O_HK_GOLD": 0.15,
-    "O_GOLD": 0.15,
-    "O_HK_HSTECH": 0.25,
-    "D_HSBC_HSTECH": 0.25,
-    "O_JP_EQ": 0.15,
-    "O_SG_EQ": 0.13,
-    "O_US_TLT": 0.10,
-    "BUFFER": 0.08,
-    "1364": 0.15,
-    "1698": 0.13,
-    "2516": 0.18,
-    "1477": 0.10,
-    "1478": 0.12,
-    "1490": 0.10,
-    "2529": 0.14,
-    "2800": 0.18,
-    "2828": 0.20,
-    "3031": 0.14,
-    "3067": 0.25,
-    "3110": 0.14,
-    "3070": 0.14,
-    "CSI300": 0.17,
-    "DIVLOWVOL": 0.14,
-    "DIVLOWVOL100": 0.14,
-    "STOCK": 0.18,
-    "MIXED": 0.13,
-    "INDEX": 0.15,
-    "HK_BROAD": 0.20,
-    "HK_DIV": 0.14,
-    "HK_TECH": 0.25,
-    "SPMO": 0.18,
-    "UNH": 0.20,
-    "GOOG": 0.20,
-    "AAPL": 0.20,
-    "MSFT": 0.20,
-    "NVDA": 0.35,
-    "AMZN": 0.25,
-    "META": 0.25,
-    "TSLA": 0.40,
-    "SPLG": 0.15,
-    "VTV": 0.13,
-    "D_HSBC_SP500": 0.15,
-    "D_HSBC_CSI300": 0.17,
-    "D_CN_STOCK": 0.18,
-    "D_CN_MIXED": 0.13,
-    "D_CN_INDEX": 0.15,
-    "D_CN_HK": 0.22,
-    "D_CN_QDII_STOCK": 0.15,
-    "D_CN_QDII_STABLE": 0.05,
-    "D_CN_QDII_COMMODITY": 0.20,
-}
 
 calib = {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "rules": "asset_classes.py（2026-10-13 定稿：按类别混合/截断/窗口 + 兜底矩阵）",
     "assets": {},
     "us_internal": {},
     "jp_internal": {},
     "hk_internal": {},
     "gc_internal": {},
     "corr": {f"{a}|{b}": float(corr.loc[a, b]) for a in corr.index for b in corr.index if a < b},
+    "provenance": PROVENANCE,
+    "warnings": WARNINGS,
+    # 运行期解析出的先验（债券动态公式的结果）。params.py 加载时用它覆盖静态兜底表，
+    # 于是"公式"这条路径离线也能复现（bundle 里就带这个 JSON）。
+    "priors": {k: round(float(v), 6) for k, v in AC.PRIOR_OVERRIDE.items()},
+    "bond_anchors": {k: round(float(v), 6) for k, v in BOND_ANCHORS.items()},
+    "bond_prior_detail": BOND_DETAIL,
 }
 JP_KEYS = ["1364", "1698", "2516", "1477", "1478", "1490", "2529"]
 HK_KEYS = ["2800", "2828", "3031", "3067", "3110", "3070"]
 GC_KEYS = ["CSI300", "DIVLOWVOL", "DIVLOWVOL100", "STOCK", "MIXED", "INDEX", "HK_BROAD", "HK_DIV", "HK_TECH"]
 for key, st in meta.items():
-    mu_hist = st["ret"]
-    mu_prior = prior.get(key, 0.07)
-    mu = 0.5 * mu_hist + 0.5 * mu_prior
-    mu = max(0.0, min(0.15, mu))
-    vol = max(st["vol"], VOL_FLOOR.get(key, 0.0))
-    vol = min(vol, 0.6)  # sanity cap: avoid data glitches / unrealistic single-name vol
-    if key == "D_HSBC_MMF":
-        mu = 0.02
-        vol = 0.01
-    calib["assets"][key] = {"mu": round(mu, 4), "vol": round(vol, 4)}
+    p = PROVENANCE[key]
+    entry = {"mu": round(p["mu"], 4), "vol": round(p["vol"], 4)}
+    calib["assets"][key] = entry
     if key in ["SPLG", "VTV", "SPMO", "UNH", "GOOG", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "BUFFER"]:
-        calib["us_internal"][key] = {"mu": round(mu, 4), "vol": round(vol, 4)}
+        calib["us_internal"][key] = entry
     if key in JP_KEYS:
-        calib["jp_internal"][key] = {"mu": round(mu, 4), "vol": round(vol, 4)}
+        calib["jp_internal"][key] = entry
     if key in HK_KEYS:
-        calib["hk_internal"][key] = {"mu": round(mu, 4), "vol": round(vol, 4)}
+        calib["hk_internal"][key] = entry
     if key in GC_KEYS:
-        calib["gc_internal"][key] = {"mu": round(mu, 4), "vol": round(vol, 4)}
+        calib["gc_internal"][key] = entry
 
-# SPLG fallback to SPY proxy if missing
-if "SPLG" not in calib["assets"] and "O_US_CORE" in calib["assets"]:
-    calib["assets"]["SPLG"] = dict(calib["assets"]["O_US_CORE"])
-    calib["us_internal"]["SPLG"] = dict(calib["assets"]["O_US_CORE"])
+# 没有行情的 broad/strategy 标的：这里**不写兜底值**——兜底由 params.py 在加载时
+# 用 asset_classes.py 的类别规则（μ=先验、σ=下限）补齐，避免两套写死值并存。
+for key, cls in AC.ASSET_CLASS.items():
+    if key in calib["assets"]:
+        continue
+    PROVENANCE.setdefault(key, {"class": cls, "note": "no_history"})
+    if cls == "active":
+        WARNINGS.append(f"{_label(key)}: 无行情历史，active 类不设先验/下限，已丢弃（不再参与优化）")
 
 _OUT = os.path.join(os.environ.get("DSH_FINANCE_DIR", os.path.expanduser("~/Finance/tmp")),
                     "calibrated_params.json")
@@ -255,6 +289,11 @@ if len(sys.argv) > 1 and sys.argv[1] == "--out" and len(sys.argv) > 2:
     _OUT = sys.argv[2]  # 允许写出到任意路径(如 bundle data 目录), 避免沙箱只允许工作区
 with open(_OUT, "w") as f:
     json.dump(calib, f, ensure_ascii=False, indent=2)
+
 print(f"\nsaved {_OUT}")
 print("assets calibrated:", len(calib["assets"]))
 print("corr pairs:", len(calib["corr"]))
+print(f"dropped: {DROPPED or '无'}")
+print(f"warnings: {len(WARNINGS)}")
+for w in WARNINGS:
+    print("  -", w)

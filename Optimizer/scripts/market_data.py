@@ -31,7 +31,12 @@ ctx.verify_mode = ssl.CERT_NONE
 _MIN_SERIES = 30
 
 
-def yahoo_history(ticker, years=None):
+def yahoo_history(ticker, years=None, adjusted=False):
+    """日线收盘序列 [(date, close)]。
+
+    adjusted=True 时取复权收盘价（adjclose，含分红/派息）。做**远期收益/收益率回归**必须用它：
+    债券 ETF 的价格序列把票息丢掉了，用未复权价会系统性低估甚至把斜率符号弄反。
+    """
     end = int(time.time())
     if years is None:
         # Use an early start so Yahoo returns the longest daily history it can.
@@ -46,6 +51,10 @@ def yahoo_history(ticker, years=None):
     res = data["chart"]["result"][0]
     ts = res["timestamp"]
     closes = res["indicators"]["quote"][0]["close"]
+    if adjusted:
+        adj = (res["indicators"].get("adjclose") or [{}])[0].get("adjclose")
+        if adj:
+            closes = adj
     out = []
     for t, c in zip(ts, closes):
         if c is not None:
@@ -186,32 +195,20 @@ def cached_series(work_dir, source, symbol, log=None):
 
 SOURCES = {
     "D_HSBC_SP500": ("fund", "050025"),
-    "D_HSBC_CSI300": ("fund", "000051"),
-    "D_HSBC_DIVLOWVOL": ("fund", "007605"),
     "D_HSBC_CDB": ("fund", "007485"),
-    "D_HSBC_GOLD": ("fund", "000307"),
-    "D_HSBC_HSTECH": ("fund", "013402"),
     "D_HSBC_MMF": ("fund", "000891"),
     "D_CN_CREDIT_BOND": ("fund", "110035"),
-    "D_CN_DIVLOWVOL100": ("fund", "021550"),
-    "D_CN_STOCK": ("fund", "000251"),
-    "D_CN_MIXED": ("fund", "000849"),
-    "D_CN_INDEX": ("fund", "001237"),
-    "D_CN_HK": ("fund", "005698"),
     "D_CN_QDII_STOCK": ("fund", "000043"),
     "D_CN_QDII_STABLE": ("fund", "017970"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
     "O_US_CORE": ("yahoo", "SPY"),
     "O_BTC": ("yahoo", "BTC-USD"),
     "O_HYLB": ("yahoo", "HYLB"),
-    "O_HK_HSTECH": ("yahoo", "3067.HK"),
-    "O_HK_HIGHDIV": ("yahoo", "3031.HK"),
     "O_JP_EQ": ("yahoo", "1698.T"),
     "O_SG_EQ": ("yahoo", "G3B.SI"),
     "O_US_TLT": ("yahoo", "TLH"),
     "O_US_REIT": ("yahoo", "REZ"),
     "O_US_ENERGY": ("yahoo", "XOM"),
-    "O_HK_GOLD": ("yahoo", "3170.HK"),
     "O_GOLD": ("yahoo", "GC=F"),
     "SPLG": ("yahoo", "SPLG"),
     "VTV": ("yahoo", "VTV"),
@@ -253,32 +250,21 @@ SOURCES = {
 # index/futures proxy that covers a longer economic cycle.
 PROXY_MAP = {
     "D_HSBC_SP500": ("yahoo", "^GSPC"),
-    "D_HSBC_CSI300": ("yahoo", "000001.SS"),
-    "D_HSBC_DIVLOWVOL": ("yahoo", "000001.SS"),
     "D_HSBC_CDB": None,
-    "D_HSBC_GOLD": ("yahoo", "GC=F"),
-    "D_HSBC_HSTECH": ("yahoo", "^HSI"),
     "D_HSBC_MMF": None,
     "D_CN_CREDIT_BOND": None,
     "D_CN_DIVLOWVOL100": None,
-    "D_CN_STOCK": ("yahoo", "000001.SS"),
-    "D_CN_MIXED": ("yahoo", "000001.SS"),
-    "D_CN_INDEX": ("yahoo", "000001.SS"),
-    "D_CN_HK": ("yahoo", "^HSI"),
     "D_CN_QDII_STOCK": ("yahoo", "^GSPC"),
     "D_CN_QDII_STABLE": ("yahoo", "BND"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
     "O_US_CORE": ("yahoo", "^GSPC"),
     "O_BTC": None,
     "O_HYLB": None,
-    "O_HK_HSTECH": ("yahoo", "^HSI"),
-    "O_HK_HIGHDIV": ("yahoo", "^HSI"),
     "O_JP_EQ": ("yahoo", "^N225"),
     "O_SG_EQ": ("yahoo", "^STI"),
     "O_US_TLT": None,
     "O_US_REIT": ("yahoo", "VNQ"),
     "O_US_ENERGY": ("yahoo", "CL=F"),
-    "O_HK_GOLD": ("yahoo", "GC=F"),
     "SPLG": ("yahoo", "^GSPC"),
     "VTV": None,
     "SPMO": None,

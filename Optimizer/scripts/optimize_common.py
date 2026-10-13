@@ -132,6 +132,55 @@ def solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_targe
     return best
 
 
+def solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_target,
+                     n_starts=160, seed=13, rf=0.025):
+    """最大化夏普比率 s.t. 满仓 / 池权重 / 收益下限（2026-10-13 起两阶段统一用这个目标）。
+
+    夏普是**比值**目标（拟凹而非凸），所以必须多起点搜索，并且**必须显式校验 bounds** ——
+    SLSQP 未收敛时返回的迭代点可能越界（实测过单标的超过上限的情况）。
+
+    返回 (w, ret, vol, sharpe) 或 None。
+    """
+    n = len(mu)
+    bounds = list(zip(lower, upper))
+    upper_arr = np.array([np.inf if b[1] is None else float(b[1]) for b in bounds])
+    cons = [
+        {"type": "eq", "fun": lambda w: w.sum() - 1.0},
+        {"type": "eq", "fun": lambda w: w[dom_idx].sum() - dom_w},
+        {"type": "ineq", "fun": lambda w: mu @ w - ret_target},
+    ]
+    rng = np.random.default_rng(seed)
+    best = None
+    for _ in range(n_starts):
+        start = feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng)
+        if start is None:
+            continue
+
+        def neg_sharpe(w):
+            vol = float(np.sqrt(w @ cov @ w))
+            if vol <= 0:
+                return 1e6
+            return -float((mu @ w - rf) / vol)
+
+        res = minimize(neg_sharpe, start, method="SLSQP", bounds=bounds, constraints=cons,
+                       options={"maxiter": 2500, "ftol": 1e-12})
+        w = res.x
+        if abs(w.sum() - 1) > 1e-4 or abs(w[dom_idx].sum() - dom_w) > 1e-4:
+            continue
+        if np.any(w < -1e-6) or np.any(w > upper_arr + 1e-6):
+            continue
+        if mu @ w < ret_target - 1e-4:
+            continue
+        vol = float(np.sqrt(w @ cov @ w))
+        if vol <= 0:
+            continue
+        ret = float(mu @ w)
+        sharpe = (ret - rf) / vol
+        if best is None or sharpe > best[3]:
+            best = (w, ret, vol, sharpe)
+    return best
+
+
 def max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
                          n_starts=80, seed=11):
     """Find the maximum achievable portfolio return under pool constraints."""

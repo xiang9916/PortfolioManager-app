@@ -215,8 +215,12 @@ if args.count >= 2 && args[1] == "optimize" {
     let dbPath = "tmp/portfolio.db"
     var totalAssets: Double? = nil
     var testTickers: [String]? = nil
+    var testClass = "active"
     for i in 2..<args.count where args[i] == "--total-assets" && i + 1 < args.count {
         totalAssets = Double(args[i + 1])
+    }
+    for i in 2..<args.count where args[i] == "--test-class" && i + 1 < args.count {
+        testClass = args[i + 1].lowercased()
     }
     for i in 2..<args.count where args[i] == "--test-tickers" && i + 1 < args.count {
         testTickers = args[i + 1].split(whereSeparator: { ",，;； \t".contains($0) })
@@ -228,7 +232,7 @@ if args.count >= 2 && args[1] == "optimize" {
         // CLI 一次性运行: 优化结束即删除联网管线临时文件 (App 内则等关闭优化器再删)。
         // 注意 exit() 不执行 defer, 必须在每个退出点显式清理。
         let out = try svc.runSync(extractJSON: URL(fileURLWithPath: extractJSON), totalAssets: totalAssets,
-                                  testTickers: testTickers)
+                                  testTickers: testTickers, testClass: testClass)
         OptimizationService.cleanupWorkDir()
         if let r = out.result {
             print("优化完成 (run \(out.runID)):")
@@ -310,6 +314,12 @@ print("  pm-cli summarize <portfolio_result.json>")
 print("  pm-cli extract [portfolio.numbers]")
 print("  pm-cli fetch <yahoo|fund> [symbol]")
 print("  pm-cli optimize [extract.json] [--total-assets N]")
+print("      --test-tickers A,B   临时测试标的（逗号分隔）")
+print("      --test-class C       测试标的类别：broad=宽基/大类（50% 历史 + 50% 先验，截断 0~20%，全历史窗口）")
+print("                           strategy=策略指数（67% 历史 + 33% 先验，截断 -5~30%，20 年窗口）")
+print("                           active=个股/主动（100% 历史，截断 -10~40%，10 年窗口）；缺省 active")
+print("                           类别决定 μ 的构造、历史窗口、是否套用人工波动率下限；")
+print("                           测试标的没有登记先验/下限，选 broad/strategy 会退化为纯历史并给出提示。")
 print("  pm-cli overview [db]")
 print("  pm-cli financials [db]")
 print("  pm-cli backup [db] / list [db] / restore <db> <backup.db>")

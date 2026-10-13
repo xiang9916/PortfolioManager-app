@@ -17,6 +17,10 @@ except ImportError:
 from params import (
     BROAD_ASSETS,
     BROAD_CORR,
+    CALIBRATION_WARNINGS,
+    CALIBRATION_PROVENANCE,
+    describe_param_source,
+    param_origin,
     RF,
     TARGET_RETURN,
     US_INTERNAL,
@@ -36,6 +40,7 @@ from optimize_common import (
     portfolio_stats,
     feasible_start,
     solve_min_var,
+    solve_max_sharpe,
     max_feasible_return,
     stage1_bounds,
     project_psd,
@@ -47,7 +52,73 @@ from fund_pipeline import (
     filter_available_assets,
 )
 from test_tickers import parse_test_tickers, resolve_test_assets
+import asset_classes as AC
 
+
+
+def _upper_array(bounds):
+    """把 scipy 的 bounds 列表转成上界数组（None = 无上界）。"""
+    return np.array([np.inf if b[1] is None else float(b[1]) for b in bounds])
+
+
+# 「个股/主动」类单标的组合权重上限（asset_classes.ACTIVE_CAP = 10%）触发记录，
+# 最后合并成一条报警，避免每次跑都刷屏。
+CAP_HITS = []
+
+
+def _note_cap_hit(key, weight, cap):
+    CAP_HITS.append((key, float(weight), float(cap)))
+
+
+def _active_cap_map(assets):
+    """key → 组合权重上限。仅对 class == active 的标的生效。
+
+    必须覆盖**所有**标的：大类槽位（如 O_US_ENERGY=XOM）、美股/日本/香港/大中华内部标的
+    （AAPL、NVDA…）以及 test_class=active 的测试标的 —— 漏掉内部标的会让上限形同虚设
+    （2026-10-13 实测：曾出现单标的被拿到超过 10% 上限、却没人拦截的情况）。
+    """
+    caps = {}
+
+    def consider(key, cls=None):
+        if (cls or AC.asset_class(key)) == "active":
+            caps[key] = AC.ACTIVE_CAP
+
+    for a in assets or []:
+        consider(a.get("key", ""), a.get("test_class"))
+    for internal in (US_INTERNAL, JP_INTERNAL, HK_INTERNAL, GC_INTERNAL):
+        for key in internal:
+            consider(key)
+    return caps
+
+
+def apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings):
+    """把 active 类单标的上限写进 stage-1 上界；与池权重约束冲突时放宽到可行并报警。
+
+    可行性条件：每个池的 upper 之和必须 ≥ 该池的目标权重，否则优化必然不可行
+    （典型情形：境内池只有一只可用标的，却要求它 ≤ 10%，而境内目标权重 30%）。
+    """
+    capped = []
+    for i, a in enumerate(assets):
+        cap = cap_map.get(a.get("key"))
+        if cap is not None and upper[i] > cap:
+            upper[i] = cap
+            capped.append(a["key"])
+    if not capped:
+        return
+    pool_idx = [i for i, a in enumerate(assets) if a.get("pool") == "domestic"]
+    if pool_idx:
+        capsum = float(sum(upper[i] for i in pool_idx))
+        if capsum < dom_w - 1e-9 and capped:
+            # 只放宽"被上限压住"的境内成员，补足缺口
+            relaxed = [i for i in pool_idx if assets[i].get("key") in cap_map]
+            need = dom_w - capsum
+            if relaxed:
+                add = need / len(relaxed)
+                for i in relaxed:
+                    upper[i] = min(1.0, upper[i] + add)
+                warnings.append(
+                    f"active 类单标的上限 {AC.ACTIVE_CAP:.0%} 会与境内池权重 {dom_w:.2%} 冲突"
+                    f"（境内可用标的的合计上界不足），已相应放宽 {len(relaxed)} 个境内标的的上限以保证可行。")
 
 
 def log_step(step, message, level="info", log_path=None):
@@ -127,7 +198,8 @@ def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, bro
     return mus, cov, keys
 
 
-def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, broad_keys, broad_vols):
+def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, broad_keys, broad_vols,
+                    cap_map=None):
     """Optimize internal US equity weights with total US core weight fixed and no per-ticker caps."""
     # Always consider the full US internal candidate pool, even for tickers the
     # Numbers file does not currently hold. Keeping file tickers first preserves
@@ -170,6 +242,12 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         return -sharpe
 
     bounds = [(0.0, None)] * n_internal
+    # active（个股/主动）类单标的组合权重上限；US 内部权重就是组合绝对权重，直接套用
+    if cap_map:
+        for j, t in enumerate(internal_tickers):
+            cap = cap_map.get(t)
+            if cap is not None:
+                bounds[j] = (0.0, cap)
 
     cons = [
         {"type": "eq", "fun": lambda x: x.sum() - core_total},
@@ -196,17 +274,24 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
             continue
         res = minimize(objective, start, method="SLSQP", bounds=bounds, constraints=cons,
                        options={"maxiter": 2000, "ftol": 1e-12})
+        # SLSQP 未收敛时会返回"当前迭代点"，可能违反 bounds（实测超过单标的上限）——
+        # 不要求 res.success（未收敛但可行的点仍可用），但必须显式校验 bounds（2026-10-13 修）。
         x = res.x
         w = total_weights(x)
         if abs(x.sum() - core_total) > 1e-4:
             continue
-        if np.any(x < -1e-6) or np.any(x > core_total + 1e-6):
+        if np.any(x < -1e-6) or np.any(x > _upper_array(bounds) + 1e-6):
             continue
         if mus @ w < TARGET_RETURN - 1e-4:
             continue
         ret, vol, sharpe = portfolio_stats(w, mus, cov, rf=RF)
         if best is None or sharpe > best[3]:
             best = (x, ret, vol, sharpe, w, internal_tickers)
+    if best is not None and cap_map:
+        for j, t in enumerate(best[5]):
+            cap = cap_map.get(t)
+            if cap is not None and best[0][j] >= cap - 1e-6:
+                _note_cap_hit(t, best[0][j], cap)
     return best, None
 
 
@@ -248,7 +333,8 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
     return selection
 
 
-def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets, seed=31):
+def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
+                            seed=31, cap_map=None):
     """Generic second-level optimization inside a broad equity bucket."""
     tickers = list(internal_pool.keys())
     if not tickers:
@@ -274,6 +360,16 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
 
     cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
     bounds = [(0.0, 1.0)] * n
+    # 桶内权重是"归一化后 × 桶权重"，所以组合上限要折算：cap_norm = cap / total_w
+    cap_norm = {}
+    if cap_map and total_w > 1e-9:
+        for t in tickers:
+            cap = cap_map.get(t)
+            if cap is not None:
+                cap_norm[t] = min(1.0, cap / total_w)
+        for i, t in enumerate(tickers):
+            if t in cap_norm:
+                bounds[i] = (0.0, cap_norm[t])
     rng = np.random.default_rng(seed)
     best = None
     for _ in range(60):
@@ -284,7 +380,7 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
         x = res.x
         if abs(x.sum() - 1.0) > 1e-4:
             continue
-        if np.any(x < -1e-6):
+        if np.any(x < -1e-6) or np.any(x > _upper_array(bounds) + 1e-6):
             continue
         ret = float(x @ mu)
         vol = float(np.sqrt(x @ cov @ x))
@@ -294,6 +390,10 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     if best is None:
         return None
     sharpe, x, ret, vol = best
+    if cap_norm:
+        for i, t in enumerate(tickers):
+            if t in cap_norm and x[i] >= cap_norm[t] - 1e-6:
+                _note_cap_hit(t, x[i] * total_w, cap_map[t])
     return {
         "broad_total_weight": total_w,
         "internal_weights_total": {t: float(x[i]) * total_w for i, t in enumerate(tickers)},
@@ -305,19 +405,22 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     }
 
 
-def stage2_japan_optimize(stage1_weights, assets, total_assets):
+def stage2_japan_optimize(stage1_weights, assets, total_assets, cap_map=None):
     """Optimize Japan equity internal factor weights."""
-    return _internal_pool_optimize(stage1_weights, assets, JP_INTERNAL, JP_INTERNAL_CORR, "O_JP_EQ", total_assets, seed=31)
+    return _internal_pool_optimize(stage1_weights, assets, JP_INTERNAL, JP_INTERNAL_CORR, "O_JP_EQ",
+                                   total_assets, seed=31, cap_map=cap_map)
 
 
-def stage2_hk_optimize(stage1_weights, assets, total_assets):
+def stage2_hk_optimize(stage1_weights, assets, total_assets, cap_map=None):
     """Optimize Hong Kong equity internal factor weights."""
-    return _internal_pool_optimize(stage1_weights, assets, HK_INTERNAL, HK_INTERNAL_CORR, "O_HK_HSTECH", total_assets, seed=37)
+    return _internal_pool_optimize(stage1_weights, assets, HK_INTERNAL, HK_INTERNAL_CORR, "O_HK_HSTECH",
+                                   total_assets, seed=37, cap_map=cap_map)
 
 
-def stage2_gc_optimize(stage1_weights, assets, total_assets):
+def stage2_gc_optimize(stage1_weights, assets, total_assets, cap_map=None):
     """Optimize Greater China equity internal (沪深300/红利低波/主动/混合/指数/港股宽基/高股息/科技)."""
-    return _internal_pool_optimize(stage1_weights, assets, GC_INTERNAL, GC_INTERNAL_CORR, "D_GREATER_CN", total_assets, seed=43)
+    return _internal_pool_optimize(stage1_weights, assets, GC_INTERNAL, GC_INTERNAL_CORR, "D_GREATER_CN",
+                                   total_assets, seed=43, cap_map=cap_map)
 
 
 def build_result_summary(output, hsbc_pool=None):
@@ -535,6 +638,9 @@ def build_result_summary(output, hsbc_pool=None):
         "assets": assets,
         "benchmark": _build_benchmark(output, final),
         "test_assets": (output.get("test") or {}).get("assets"),
+        "target_return": output.get("target_return"),
+        "target_gap": output.get("target_gap"),
+        "objective": output.get("objective"),
         "warnings": summary_warnings,
         "source_detail": None,
     }
@@ -623,8 +729,16 @@ def main():
         dest="test_tickers",
         default=None,
         help="逗号分隔的临时测试标的 (如 AAPL,0700.HK,510300)；"
-             "以 100%% 历史年化估算 μ、历史波动估算 σ、与宽基代理序列估算相关性,"
-             "作为新增资产参与优化 (T_ 前缀); 6 位纯数字按境内池处理。",
+             "按 --test-class 指定的类别估算 μ/σ 与相关性，作为新增资产参与优化 (T_ 前缀)；"
+             "6 位纯数字按境内池处理。",
+    )
+    parser.add_argument(
+        "--test-class",
+        dest="test_class",
+        default="active",
+        choices=["broad", "strategy", "active"],
+        # argparse 的 help 走 %-格式化，说明文字里的 % 必须转义成 %%
+        help=AC.CLASS_PARAM_HELP.replace("%", "%%"),
     )
     parser.add_argument(
         "--work-dir",
@@ -663,6 +777,9 @@ def main():
         log_step("rf", f"无风险利率覆盖为 {RF:.2%} (动态中美10年国债加权)", log_path=args.log_path)
 
     warnings = list(extract.get("warnings", []))
+    CAP_HITS.clear()
+    # 参数口径的提示（缺行情用人工兜底、σ 毛刺丢弃、相关性兜底…）一并带给结果页
+    warnings.extend(CALIBRATION_WARNINGS)
 
     # live_anchors: 用户实际持有的境内基金代码 (从 extract_live.json domestic_holdings 提取),
     # 用 classify_domestic_fund(name) 归类, 覆盖 params.py 写死的 fund_code 作为各类锚定.
@@ -761,11 +878,25 @@ def main():
             # 相关性要覆盖全量大类 (不只是本次可投的那几个): 基准对比用
             # D_HSBC_SP500 / D_GREATER_CN 算组合 Beta, 缺了这些行 Beta 会被低估。
             corr_keys={a["key"] for a in BROAD_ASSETS},
+            test_class=args.test_class,
             log=lambda msg, level="info": log_step(
                 "test_tickers", msg, level=level, log_path=args.log_path),
         )
         for t, reason in test_skipped:
             warnings.append(f"测试标的 {t} 已跳过: {reason}")
+        # 测试标的没有登记先验/下限：broad/strategy 会退化成纯历史，必须显式说明口径不同
+        for e in test_estimates:
+            if e.get("mu_note") == "history_only":
+                warnings.append(
+                    f"测试标的 {e['ticker']} 标为「{AC.CLASS_RULES[e['test_class']]['label']}」，"
+                    f"但该类的人工先验只对登记在册的标的有效；测试标的使用纯历史年化 "
+                    f"μ={e['mu']:.2%}（组合内同类标的的口径是"
+                    f"{AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 历史 + "
+                    f"{1-AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 先验，两者不可直接横比）。")
+            if e.get("vol_note") == "no_floor_written":
+                warnings.append(
+                    f"测试标的 {e['ticker']} 按「{AC.CLASS_RULES[e['test_class']]['label']}」本应套用人工波动率下限，"
+                    f"但新标的没有登记下限，本次直接用历史波动 σ={e['vol']:.2%}。")
         if test_assets:
             assets = assets + test_assets
             for a in test_assets:
@@ -795,10 +926,17 @@ def main():
     dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
     ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
 
-    log_step("stage1_broad", "第一阶段：大类资产均值-方差优化", log_path=args.log_path)
+    log_step("stage1_broad", "第一阶段：大类资产最大夏普优化（s.t. 收益 ≥ 目标）", log_path=args.log_path)
     lower, upper = stage1_bounds(assets)
+    cap_map = _active_cap_map(assets)
+    apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings)
     target = TARGET_RETURN
-    solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
+    # 目标函数（2026-10-13 用户定稿）：两阶段统一为 max 夏普，收益目标只作为**下限**。
+    # 若目标高于切点收益，约束绷紧 → 解自然落到"有效前沿上收益=目标"的那点（与 min 方差等价），
+    # 所以下面保留 min 方差作为兜底，避免 SLSQP 在约束边界上失败时拿不到解。
+    solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
+    if solved is None:
+        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
     if solved is None:
         max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
         warnings.append(f"{target:.0%} 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
@@ -806,22 +944,28 @@ def main():
         # Bug D1 修复: 回退后的靶值必须同步回全局 TARGET_RETURN,
         # 否则 stage2 的收益约束仍按原始(不可行)目标求解, 导致 stage2 必然返回 None.
         TARGET_RETURN = target
-        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, seed=23, rf=RF)
+        solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target,
+                                  seed=23, rf=RF)
 
     if solved is None:
         print(json.dumps({"error": "Optimization infeasible", "warnings": warnings}, ensure_ascii=False, indent=2))
         sys.exit(1)
 
     w1, ret1, vol1, sharpe1 = solved
+    # 记录 stage-1 里被 active 上限压住的标的（稍后合并成一条报警）
+    for i, a in enumerate(assets):
+        cap = cap_map.get(a.get("key"))
+        if cap is not None and w1[i] >= cap - 1e-6:
+            _note_cap_hit(a["key"], w1[i], cap)
     log_step("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}", log_path=args.log_path)
     total_assets = args.total_assets or float(extract["total_value"])
 
     domestic_selection = select_domestic_funds(w1, assets, hsbc_pool, total_assets)
     log_step("select_domestic", "境内基金选择完成", log_path=args.log_path)
 
-    japan_selection = stage2_japan_optimize(w1, assets, total_assets)
-    hk_selection = stage2_hk_optimize(w1, assets, total_assets)
-    gc_selection = stage2_gc_optimize(w1, assets, total_assets)
+    japan_selection = stage2_japan_optimize(w1, assets, total_assets, cap_map=cap_map)
+    hk_selection = stage2_hk_optimize(w1, assets, total_assets, cap_map=cap_map)
+    gc_selection = stage2_gc_optimize(w1, assets, total_assets, cap_map=cap_map)
 
     log_step("stage2_internal", "第二阶段：美国权益内部标的优化", log_path=args.log_path)
     internal, stage2_error = stage2_optimize(
@@ -832,6 +976,7 @@ def main():
         cov,
         keys,
         vols,
+        cap_map=cap_map,
     )
     final = None
     if internal is not None:
@@ -854,6 +999,14 @@ def main():
         if stage2_error:
             warnings.append(stage2_error)
         warnings.append("美国权益内部优化不可行，组合统计已回退使用第一阶段结果。")
+
+    target_gap = None
+    if target is not None and final is not None:
+        target_gap = float(final.get("ret", 0.0)) - float(target)
+        if target_gap > 0.002:
+            warnings.append(
+                f"目标收益 {target:.2%} 只是下限：目标是最大化夏普，实际取到 {final.get('ret', 0.0):.2%}"
+                f"（高出 {target_gap:.2%}）。想让目标说了算，把目标设到切点收益以上，或改回 min 方差口径。")
 
     stage1_detail = {
         "weights": {keys[i]: float(w1[i]) for i in range(len(keys)) if w1[i] > 1e-6},
@@ -910,12 +1063,25 @@ def main():
         "hk_selection": hk_selection,
         "gc_selection": gc_selection,
         "final": final,
+        "target_return": TARGET_RETURN,
+        "target_gap": target_gap,
+        "objective": "max_sharpe",
         "warnings": warnings,
     }
+
+    if CAP_HITS:
+        merged = {}
+        for k, w, cap in CAP_HITS:
+            merged[k] = max(merged.get(k, 0.0), w)
+        warnings.append(
+            f"active（个股/主动）类单标的上限 {AC.ACTIVE_CAP:.0%} 生效，以下标的被压到上限: "
+            + "、".join(f"{k} {w:.2%}" for k, w in sorted(merged.items(), key=lambda kv: -kv[1])))
 
     if args.test_tickers:
         output["test"] = {
             "tickers": parse_test_tickers(args.test_tickers),
+            "test_class": args.test_class,
+            "class_help": AC.CLASS_PARAM_HELP,
             "assets": test_estimates,
             "skipped": [{"ticker": t, "reason": r} for t, r in test_skipped],
             # 测试标的与各大类的相关性: 基准对比要用它把测试标的并入协方差,

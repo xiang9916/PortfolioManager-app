@@ -851,7 +851,9 @@ public final class AppStore {
     /// 临时加入标的重跑一次优化。结果写入 testOptimization（「测试结果」弹窗），
     /// 不影响 lastOptimization 与资产总览数据; 仅 optimization_runs 留痕
     /// (paramsDesc 带 test=...)。与普通优化互斥。
-    public func runTestOptimization(tickers: [String]) {
+    /// testClass: 标的类别 broad / strategy / active（见 asset_classes.py 的口径说明），
+    /// 决定 μ 的构造方式、历史窗口与是否套用人工波动率下限；缺省 active。
+    public func runTestOptimization(tickers: [String], testClass: String = "active") {
         guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }
         let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: extract.path) else {
@@ -868,7 +870,7 @@ public final class AppStore {
 
         do {
             _ = try optimizer.start(extractJSON: extract, targetReturn: targetReturn,
-                                    testTickers: tickers)
+                                    testTickers: tickers, testClass: testClass)
             pollTask = Task { [weak self] in
                 guard let self else { return }
                 while self.optimizer.isRunning {

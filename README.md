@@ -47,7 +47,13 @@ pm-cli extract [portfolio.numbers]                 # 从 .numbers 提取
 pm-cli import [db] [extract.json]                     # 导入持仓到 SQLite
 pm-cli refresh [db] [keys...]                         # 抓行情落库
 pm-cli optimize [extract.json] [--total-assets N]     # 运行优化器
-pm-cli optimize [extract.json] --test-tickers NFLX,0700.HK  # 新标的测试: 临时加入标的重跑优化 (μ=100%历史年化)
+pm-cli optimize [extract.json] --test-tickers NFLX,0700.HK --test-class active
+                                                      # 新标的测试: 临时加入标的重跑优化
+                                                      # --test-class broad|strategy|active 决定 μ 的构造:
+                                                      #   broad=宽基/大类(50%历史+50%先验, 截断 0~20%, 全历史窗口)
+                                                      #   strategy=策略指数(67%历史+33%先验, 截断 -5~30%, 20 年窗口)
+                                                      #   active=个股/主动(100%历史, 截断 -10~40%, 10 年窗口, 单标的上限 10%)
+                                                      # 缺省 active; 测试标的没有登记先验/下限, 选前两类会退化为纯历史并给出提示
 pm-cli overview [db]                                  # 总市值/总成本 + 资产分布/历史表现
 pm-cli financials [db]                                # 财务分析
 pm-cli backup|list|restore|export|import-json|export-csv|daily-backup  # 数据安全

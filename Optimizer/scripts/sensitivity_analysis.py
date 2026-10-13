@@ -37,6 +37,7 @@ from optimize_common import (
     portfolio_stats,
     feasible_start,
     solve_min_var,
+    solve_max_sharpe,
     max_feasible_return,
     stage1_bounds,
 )
@@ -243,7 +244,9 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
 
     points = []
     for target in targets:
-        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, seed=23, rf=RF)
+        solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
+        if solved is None:  # 约束绷紧时退到 min 方差（两者在该区间等价）
+            solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, seed=23, rf=RF)
         if solved is not None:
             w, ret, vol, sharpe = solved
             worst = ret - 1.96 * vol

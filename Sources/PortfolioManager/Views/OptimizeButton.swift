@@ -141,7 +141,7 @@ public struct OptimizeButton: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("优化设置").font(.headline)
             HStack {
-                Text("目标收益率")
+                Text("目标收益率（下限）")
                 Spacer()
                 Text(String(format: "%.1f%%", targetReturnInput * 100))
                     .monospacedDigit().foregroundStyle(.secondary)
@@ -151,6 +151,9 @@ public struct OptimizeButton: View {
                     store.targetReturn = newValue
                     UserDefaults.standard.set(newValue, forKey: "optimizer.targetReturn")
                 }
+            Text("优化目标是「最大化夏普比率」（单位风险的收益），这个数字只是「收益不低于」的**下限**：若最优夏普组合本身的收益已经高于它，滑杆不会改变结果。想让滑杆真正说话，请把它设到最优夏普组合的收益之上（此时解会落到相同风险下收益更高的那一点）。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             let w = store.livePoolWeights
             HStack {
                 Text("境内池 / 境外池")

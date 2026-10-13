@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """「新标的测试」: 把临时标的作为新增资产注入第一阶段优化.
 
-参数口径 (与 calibrate_params.py 同源, 经 market_data.py):
-- μ = 100% 历史年化收益 (用户指定, 不做先验混合); 样本 < 30 天剔除
-- σ = 历史年化波动 (上限 0.60 防数据毛刺)
+参数口径与 calibrate_params.py 完全同源（规则见 asset_classes.py）:
+- 类别由调用方指定（`test_class`，宽基/策略/个股三选一，缺省 active）：
+  * broad    宽基/大类   : μ = 0.5×历史 + 0.5×先验，截断 0%~20%，窗口全历史
+  * strategy 策略指数     : μ = 0.67×历史 + 0.33×先验，截断 −5%~30%，窗口 20 年
+  * active   个股/主动    : μ = 100% 历史，截断 −10%~40%，窗口 10 年
+- **测试标的没有人工先验/下限**（用户临时输入的代码不在表里），因此：
+  * broad/strategy 只能退化成"纯历史年化"（会显式报警，口径与组合内同类标的不同）
+  * active 天然就是纯历史，不需要先验
+- σ = 历史年化波动（broad/strategy 无人工下限可套）；σ > 150% 视为数据毛刺 → 丢弃
 - 相关性 = 与各宽基大类代表序列的日收益皮尔逊相关 (重叠 < 180 天回退 0.30);
   多个测试标的之间直接互相计算
 
@@ -23,14 +29,29 @@ from market_data import (
     pairwise_corr,
     series_for_broad_key,
 )
+import asset_classes as AC
 
-VOL_CAP = 0.60
 _CORR_MIN_PERIODS = 180
 _CORR_DEFAULT = 0.30
 
 # D_GREATER_CN (大中华权益) 是沪深+港股混合大类, 无单一代理;
 # 取 A股 与 恒指 两个代理相关的均值近似。
 _D_GREATER_CN_PROXIES = [("yahoo", "000001.SS"), ("yahoo", "^HSI")]
+
+
+def normalize_test_class(raw):
+    """把用户输入的类别名收敛到 broad/strategy/active；空值/未知值 → active。"""
+    if not raw:
+        return "active"
+    s = str(raw).strip().lower()
+    alias = {"broad": "broad", "宽基": "broad", "大类": "broad", "wide": "broad",
+             "strategy": "strategy", "策略": "strategy", "策略指数": "strategy",
+             "active": "active", "个股": "active", "主动": "active"}
+    return alias.get(s, "active")
+
+
+def _window_text(years):
+    return "全历史" if years is None else f"近 {years} 年"
 
 
 def parse_test_tickers(raw):
@@ -53,7 +74,8 @@ def classify_source(ticker):
     return "yahoo", ticker
 
 
-def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, corr_keys=None):
+def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, corr_keys=None,
+                        test_class="active"):
     """解析并估算测试标的, 返回 (assets, corr_pairs, skipped, estimates).
 
     - assets: 追加进第一阶段 assets 的大类资产 dict (key 前缀 T_)
@@ -65,7 +87,11 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
     第一阶段的大类)。基准对比 (_build_benchmark) 会用到全量 BROAD_ASSETS 的行,
     所以调用方可以传更大的集合 (例如所有 BROAD_ASSETS 的 key), 否则测试标的与
     被过滤掉的大类之间的相关性会缺失, 组合 Beta 会被低估。
+
+    test_class: 标的类别 broad / strategy / active (见 asset_classes.py 与
+    CLASS_PARAM_HELP 的中文说明), 缺省 active。
     """
+    test_class = normalize_test_class(test_class)
     def _log(msg, level="info"):
         if log:
             log(msg, level=level)
@@ -81,20 +107,28 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
             skipped.append((ticker, "已是美股内部标的 (第二阶段本就全池参与, 加入无变化)"))
             continue
         source, symbol = classify_source(ticker)
-        prices = cached_series(work_dir, source, symbol, log=_log)
+        years = AC.window_years_for_class(test_class)
+        prices = AC.slice_window(cached_series(work_dir, source, symbol, log=_log), years)
         if len(prices) < 30:
             if source == "fund":
                 hint = " (天天基金无该 6 位代码净值历史; A股个股请用 600519.SS 形式)"
             else:
                 hint = " (Yahoo 无该代码历史; 港股请用 4 位数字如 0700.HK, A股请加后缀 .SS/.SZ)"
-            skipped.append((ticker, "行情历史不足 30 天" + hint))
+            skipped.append((ticker, f"行情历史不足 30 天（窗口：{_window_text(years)}）" + hint))
             continue
-        mu = annualized_cagr(prices)
-        vol = annualized_vol(prices)
-        if mu is None or vol is None:
+        mu_hist = annualized_cagr(prices)
+        vol_hist = annualized_vol(prices)
+        if mu_hist is None or vol_hist is None:
             skipped.append((ticker, "收益/波动估算失败 (数据无效)"))
             continue
-        vol = min(vol, VOL_CAP)
+        # 测试标的没有登记先验/下限：broad/strategy 会退化成纯历史（note 里带出来，调用方报警）
+        mu, mu_note = AC.mu_for_class(test_class, mu_hist)
+        vol, vol_note = AC.vol_for_class(test_class, vol_hist)
+        if mu is None or vol is None:
+            reason = ("σ 超过 150%，按数据毛刺丢弃" if vol_note == "sigma_glitch"
+                      else "既有行情也无法构造 μ/σ")
+            skipped.append((ticker, reason))
+            continue
         pool = "domestic" if source == "fund" else "overseas"
         key = "T_" + ticker
         assets.append({
@@ -104,14 +138,19 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
             "pool": pool,
             "mu": round(mu, 4),
             "vol": round(vol, 4),
+            "test_class": test_class,   # 供单标的上限判定（active 才套 10%）
         })
         src_label = "eastmoney" if source == "fund" else "yahoo"
         estimates.append({
             "key": key, "ticker": ticker, "source": src_label, "pool": pool,
             "mu": round(mu, 4), "vol": round(vol, 4), "n_days": len(prices),
+            "test_class": test_class, "window_years": years,
+            "mu_note": mu_note, "vol_note": vol_note,
+            "mu_hist": round(mu_hist, 6), "vol_hist": round(vol_hist, 6),
         })
         chosen.append((ticker, key, daily_return_map(prices)))
-        _log(f"测试标的 {ticker}: n={len(prices)} mu={mu:.2%} vol={vol:.2%} pool={pool}")
+        _log(f"测试标的 {ticker} [{test_class}]: n={len(prices)} "
+             f"hist μ={mu_hist:.2%}/σ={vol_hist:.2%} → μ={mu:.2%}/σ={vol:.2%} pool={pool}")
 
     # 每个测试标的 vs 每个宽基 key 的相关性行
     broad_rets_cache = {}

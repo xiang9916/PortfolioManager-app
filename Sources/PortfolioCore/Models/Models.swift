@@ -236,6 +236,16 @@ public struct TestAssetEstimate: Codable, Hashable {
     public let mu: Double
     public let vol: Double
     public let nDays: Int
+    /// 测试标的的类别：broad（宽基/大类）/ strategy（策略指数）/ active（个股、主动）。
+    /// 类别决定 μ 的构造、历史窗口、是否套人工波动率下限（旧结果文件无此字段 → nil）。
+    public let testClass: String?
+    public let windowYears: Int?
+    /// μ 的口径备注：history_only（无先验，退化为纯历史）/ prior_fallback / fixed。
+    public let muNote: String?
+    /// σ 的口径备注：no_floor_written（本应套下限但没登记）/ vol_floor（取到下限）/ history。
+    public let volNote: String?
+    public let muHist: Double?
+    public let volHist: Double?
 }
 
 public struct OptimizationResult: Codable {
@@ -247,6 +257,10 @@ public struct OptimizationResult: Codable {
     /// 汇总阶段的自检/管线提示（结果清单是否覆盖了全部权重、基金剔除原因等）。
     /// 旧结果文件没有这个键 → nil。
     public let warnings: [String]?
+    /// 目标收益率（优化目标是最大化夏普，它只是收益下限）与实际收益超出目标的幅度。
+    public let targetReturn: Double?
+    public let targetGap: Double?
+    public let objective: String?
     public let sourceDetail: String?
 }
 

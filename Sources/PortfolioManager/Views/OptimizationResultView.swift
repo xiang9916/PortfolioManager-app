@@ -63,6 +63,20 @@ public struct OptimizationResultView: View {
                 statCard("95%最差年度", pct(result.portfolio.worstYear95))
             }
 
+            // 目标收益率只是下限：优化目标是最大化夏普，实际收益可以高于目标。
+            if let target = result.targetReturn, !isTestResult {
+                let gap = result.portfolio.expectedReturn - target
+                HStack(spacing: 6) {
+                    Image(systemName: gap > 0.002 ? "info.circle" : "checkmark.circle")
+                        .foregroundStyle(gap > 0.002 ? Color.orange : Color.secondary)
+                    Text(gap > 0.002
+                         ? "目标收益率 \(pct(target)) 只是下限：优化目标是最大化夏普，实际取到 \(pct(result.portfolio.expectedReturn))，高出 \(pct(gap))。把目标提到最优夏普组合的收益之上，滑杆才真正起作用。"
+                         : "实际收益 \(pct(result.portfolio.expectedReturn)) 已贴合目标下限 \(pct(target))。")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             // Weights bar chart
             // 测试标的 (isTest) 用橙色区分: 它们是 what-if 临时注入的仓位, 不进执行清单,
             // 但同样占权重 —— 必须出现在这张图里, 否则权重合计看起来不足 100%。
@@ -100,13 +114,21 @@ public struct OptimizationResultView: View {
                          + "两者口径不同，横向比较时测试标的的预期收益偏乐观；图中橙色行即为测试标的。")
                         .font(.caption).foregroundStyle(.secondary)
                     ForEach(ta, id: \.key) { e in
-                        HStack(spacing: 8) {
-                            Text(e.ticker).fontWeight(.medium)
-                            Text("\(e.source == "eastmoney" ? "天天基金" : "Yahoo") · \(e.pool == "domestic" ? "境内池" : "境外池") · \(e.nDays) 天")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            Text("μ \(pct(e.mu))   σ \(pct(e.vol))")
-                                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 8) {
+                                Text(e.ticker).fontWeight(.medium)
+                                Text(classLabel(e.testClass))
+                                    .font(.caption2).foregroundStyle(.orange)
+                                Text("\(e.source == "eastmoney" ? "天天基金" : "Yahoo") · \(e.pool == "domestic" ? "境内池" : "境外池") · \(windowLabel(e.windowYears)) · \(e.nDays) 天")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                                Text("μ \(pct(e.mu))   σ \(pct(e.vol))")
+                                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                            }
+                            let note = provenanceNote(e)
+                            if !note.isEmpty {
+                                Text(note).font(.caption2).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -194,6 +216,44 @@ public struct OptimizationResultView: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
     }
     private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
+
+    private func classLabel(_ cls: String?) -> String {
+        switch cls {
+        case "broad": return "宽基/大类"
+        case "strategy": return "策略指数"
+        case "active": return "个股/主动"
+        default: return "类别未标注"
+        }
+    }
+
+    private func windowLabel(_ years: Int?) -> String {
+        guard let y = years else { return "窗口全历史" }
+        return "窗口近 \(y) 年"
+    }
+
+    /// 说明这个 μ/σ 是怎么来的（口径与 asset_classes.py 一致）
+    private func provenanceNote(_ e: TestAssetEstimate) -> String {
+        var parts: [String] = []
+        switch e.muNote {
+        case "history_only":
+            parts.append("本类标的在册时是「历史 + 人工先验」，此测试标的无先验 → μ 退化为纯历史，不能与组合内同类直接横比")
+        case "prior_fallback":
+            parts.append("无行情历史，μ 用人工先验兜底")
+        case "fixed":
+            parts.append("写死值")
+        default:
+            if let h = e.muHist { parts.append("历史年化 μ \(pct(h))") }
+        }
+        switch e.volNote {
+        case "no_floor_written":
+            parts.append("本类在册时套人工波动率下限，此测试标的未登记下限 → 直接用历史波动")
+        case "vol_floor":
+            parts.append("历史波动低于人工下限，σ 取下限")
+        default:
+            if let h = e.volHist, e.muNote != "prior_fallback" { parts.append("历史波动 σ \(pct(h))") }
+        }
+        return parts.joined(separator: "；")
+    }
 }
 
 /// 新标的测试输入弹窗：逗号分隔临时标的 → AppStore.runTestOptimization。
@@ -203,6 +263,8 @@ private struct NewTickerTestInputView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
     @State private var showResult = false
+    /// 标的类别。口径与 Python 侧 asset_classes.py 的 CLASS_PARAM_HELP 一致（改这里也要改那边）。
+    @State private var testClass = "active"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -216,7 +278,24 @@ private struct NewTickerTestInputView: View {
             TextField("例如：NFLX, NVDA, 0700.HK, 510300", text: $input, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...3)
-            Text("参数口径：预期收益 = 100% 历史年化；波动 = 历史年化波动；相关性 = 与各类资产代理指数的历史相关。6 位纯数字按境内基金（天天基金净值）处理并参与境内池约束；其余走 Yahoo 代码（美股 / 港股 0700.HK / 日股 7203.T / A股 600519.SS）。已在优化池内的标的会被跳过。")
+
+            // 类别参数：决定 μ 怎么估、历史窗口多长、是否套人工波动率下限
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("标的类别", selection: $testClass) {
+                    Text("个股 / 主动基金　100% 历史年化，截断 −10%~40%，窗口 10 年，不套波动率下限")
+                        .tag("active")
+                    Text("策略指数（smart beta）　67% 历史 + 33% 先验，截断 −5%~30%，窗口 20 年")
+                        .tag("strategy")
+                    Text("宽基 / 大类（含债券、黄金、商品）　50% 历史 + 50% 先验，截断 0%~20%，窗口全历史")
+                        .tag("broad")
+                }
+                .pickerStyle(.radioGroup)
+                Text("类别决定三件事：① 预期收益怎么估（先验占比不同）；② 历史窗口多长；③ 是否套用人工波动率下限。\n个股 / 主动类还额外受「单个标的组合权重 ≤ 10%」约束（触顶会在结果里提示）。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("测试标的一律没有人工先验与波动率下限（只有登记在册的标的才有），所以选「宽基 / 策略」时预期收益会退化为纯历史年化，并给出提示——这与组合内同类标的的口径不同，不能直接横比。相关性 = 与各类资产代理指数的历史相关。6 位纯数字按境内基金（天天基金净值）处理并参与境内池约束；其余走 Yahoo 代码（美股 / 港股 0700.HK / 日股 7203.T / A股 600519.SS）。已在优化池内的标的会被跳过。")
                 .font(.caption).foregroundStyle(.secondary)
             if store.isTestOptimizing {
                 HStack(spacing: 8) {
@@ -233,7 +312,7 @@ private struct NewTickerTestInputView: View {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("运行测试") {
-                    store.runTestOptimization(tickers: parseInput(input))
+                    store.runTestOptimization(tickers: parseInput(input), testClass: testClass)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(parseInput(input).isEmpty || store.isTestOptimizing)

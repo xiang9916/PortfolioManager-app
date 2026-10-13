@@ -5,22 +5,25 @@ import json
 
 import numpy as np
 
+# 类别规则、人工先验与波动率下限的唯一事实来源（见 asset_classes.py 的 docstring）
+import asset_classes as _AC
+
 RF = 0.025
 TARGET_RETURN = 0.10
 
 US_INTERNAL = {
-    "SPLG": {"name": "SPDR Portfolio S&P 500 ETF", "mu": 0.090, "vol": 0.17},
-    "VTV": {"name": "Vanguard Value ETF", "mu": 0.085, "vol": 0.16},
-    "SPMO": {"name": "Invesco S&P 500 Momentum ETF", "mu": 0.095, "vol": 0.19},
-    "UNH": {"name": "UnitedHealth Group", "mu": 0.090, "vol": 0.22},
-    "GOOG": {"name": "Alphabet Inc.", "mu": 0.090, "vol": 0.22},
-    "AAPL": {"name": "Apple Inc.", "mu": 0.090, "vol": 0.24},
-    "MSFT": {"name": "Microsoft Corp.", "mu": 0.090, "vol": 0.22},
-    "NVDA": {"name": "NVIDIA Corp.", "mu": 0.110, "vol": 0.38},
-    "AMZN": {"name": "Amazon.com Inc.", "mu": 0.095, "vol": 0.28},
-    "META": {"name": "Meta Platforms Inc.", "mu": 0.100, "vol": 0.30},
-    "TSLA": {"name": "Tesla Inc.", "mu": 0.100, "vol": 0.45},
-    "BUFFER": {"name": "MAXJ/DMAX 缓冲期权", "mu": 0.070, "vol": 0.10},
+    "SPLG": {"name": "SPDR Portfolio S&P 500 ETF"},
+    "VTV": {"name": "Vanguard Value ETF"},
+    "SPMO": {"name": "Invesco S&P 500 Momentum ETF"},
+    "UNH": {"name": "UnitedHealth Group"},
+    "GOOG": {"name": "Alphabet Inc."},
+    "AAPL": {"name": "Apple Inc."},
+    "MSFT": {"name": "Microsoft Corp."},
+    "NVDA": {"name": "NVIDIA Corp."},
+    "AMZN": {"name": "Amazon.com Inc."},
+    "META": {"name": "Meta Platforms Inc."},
+    "TSLA": {"name": "Tesla Inc."},
+    "BUFFER": {"name": "MAXJ/DMAX 缓冲期权"},
 }
 
 US_INTERNAL_CORR = {
@@ -94,13 +97,13 @@ US_INTERNAL_CORR = {
 
 # 日本权益大类内部：策略/因子二级候选池
 JP_INTERNAL = {
-    "1364": {"name": "iShares JPX-Nikkei 400", "mu": 0.070, "vol": 0.17},
-    "1698": {"name": "Listed Index Fund Japan High Dividend", "mu": 0.070, "vol": 0.15},
-    "2516": {"name": "TSE Growth 250", "mu": 0.080, "vol": 0.20},
-    "1477": {"name": "iShares MSCI Japan Min Vol ex-REITs", "mu": 0.065, "vol": 0.12},
-    "1478": {"name": "iShares MSCI Japan High Dividend", "mu": 0.070, "vol": 0.14},
-    "1490": {"name": "MSCI Japan High Div Low Vol", "mu": 0.065, "vol": 0.12},
-    "2529": {"name": "Nomura Shareholder Yield 70", "mu": 0.075, "vol": 0.16},
+    "1364": {"name": "iShares JPX-Nikkei 400"},
+    "1698": {"name": "Listed Index Fund Japan High Dividend"},
+    "2516": {"name": "TSE Growth 250"},
+    "1477": {"name": "iShares MSCI Japan Min Vol ex-REITs"},
+    "1478": {"name": "iShares MSCI Japan High Dividend"},
+    "1490": {"name": "MSCI Japan High Div Low Vol"},
+    "2529": {"name": "Nomura Shareholder Yield 70"},
 }
 
 JP_INTERNAL_CORR = {
@@ -129,12 +132,12 @@ JP_INTERNAL_CORR = {
 
 # 香港权益大类内部：宽基/中企/高股息/科技
 HK_INTERNAL = {
-    "2800": {"name": "Tracker Fund of Hong Kong", "mu": 0.070, "vol": 0.22},
-    "2828": {"name": "Hang Seng China Enterprises Index ETF", "mu": 0.075, "vol": 0.25},
-    "3031": {"name": "Fullgoal HSI High Dividend ETF", "mu": 0.070, "vol": 0.16},
-    "3067": {"name": "iShares Hang Seng TECH ETF", "mu": 0.080, "vol": 0.30},
-    "3110": {"name": "Global X HSI High Dividend Yield ETF", "mu": 0.070, "vol": 0.16},
-    "3070": {"name": "Ping An CSI HK Dividend ETF", "mu": 0.070, "vol": 0.16},
+    "2800": {"name": "Tracker Fund of Hong Kong"},
+    "2828": {"name": "Hang Seng China Enterprises Index ETF"},
+    "3031": {"name": "Fullgoal HSI High Dividend ETF"},
+    "3067": {"name": "iShares Hang Seng TECH ETF"},
+    "3110": {"name": "Global X HSI High Dividend Yield ETF"},
+    "3070": {"name": "Ping An CSI HK Dividend ETF"},
 }
 
 HK_INTERNAL_CORR = {
@@ -157,15 +160,15 @@ HK_INTERNAL_CORR = {
 
 # 大中华权益一级大类内部：9 个二级风格/因子
 GC_INTERNAL = {
-    "CSI300": {"name": "沪深300", "mu": 0.075, "vol": 0.20},
-    "DIVLOWVOL": {"name": "红利低波", "mu": 0.070, "vol": 0.16},
-    "DIVLOWVOL100": {"name": "中证红利低波100", "mu": 0.075, "vol": 0.16},
-    "STOCK": {"name": "主动股票/行业", "mu": 0.080, "vol": 0.22},
-    "MIXED": {"name": "混合", "mu": 0.070, "vol": 0.15},
-    "INDEX": {"name": "其他指数", "mu": 0.075, "vol": 0.18},
-    "HK_BROAD": {"name": "港股宽基", "mu": 0.070, "vol": 0.22},
-    "HK_DIV": {"name": "港股高股息", "mu": 0.070, "vol": 0.16},
-    "HK_TECH": {"name": "港股科技", "mu": 0.080, "vol": 0.30},
+    "CSI300": {"name": "沪深300"},
+    "DIVLOWVOL": {"name": "红利低波"},
+    "DIVLOWVOL100": {"name": "中证红利低波100"},
+    "STOCK": {"name": "主动股票/行业"},
+    "MIXED": {"name": "混合"},
+    "INDEX": {"name": "其他指数"},
+    "HK_BROAD": {"name": "港股宽基"},
+    "HK_DIV": {"name": "港股高股息"},
+    "HK_TECH": {"name": "港股科技"},
 }
 
 GC_INTERNAL_CORR = {
@@ -209,28 +212,28 @@ GC_INTERNAL_CORR = {
 
 BROAD_ASSETS = [
     # 境内：HSBC 代销/可投基金（非大中华权益/黄金类保留独立大类）
-    {"key": "D_HSBC_SP500", "name": "博时标普500联接A", "fund_code": "050025", "pool": "domestic", "mu": 0.090, "vol": 0.17},
-    {"key": "D_HSBC_CDB", "name": "博时中债3-5年国开行A", "fund_code": "007485", "pool": "domestic", "mu": 0.035, "vol": 0.04},
-    {"key": "D_HSBC_MMF", "name": "博时现金宝货币B", "fund_code": "000891", "pool": "domestic", "mu": 0.020, "vol": 0.01},
+    {"key": "D_HSBC_SP500", "name": "博时标普500联接A", "fund_code": "050025", "pool": "domestic"},
+    {"key": "D_HSBC_CDB", "name": "博时中债3-5年国开行A", "fund_code": "007485", "pool": "domestic"},
+    {"key": "D_HSBC_MMF", "name": "博时现金宝货币B", "fund_code": "000891", "pool": "domestic"},
     # 境内：补充的债券 / 全球类保持独立大类
-    {"key": "D_CN_CREDIT_BOND", "name": "易方达双债增强债券A", "fund_code": "110035", "pool": "domestic", "mu": 0.045, "vol": 0.05},
+    {"key": "D_CN_CREDIT_BOND", "name": "易方达双债增强债券A", "fund_code": "110035", "pool": "domestic"},
     # QDII 细分三小类 (Bug C): 股票 / 稳健债性 / 商品, 各自独立 mu/vol 与校准代理
-    {"key": "D_CN_QDII_STOCK", "name": "QDII全球股票", "fund_code": None, "pool": "domestic", "mu": 0.085, "vol": 0.19},
-    {"key": "D_CN_QDII_STABLE", "name": "QDII稳健配置(债性FOF)", "fund_code": None, "pool": "domestic", "mu": 0.045, "vol": 0.06},
-    {"key": "D_CN_QDII_COMMODITY", "name": "QDII商品/原油", "fund_code": None, "pool": "domestic", "mu": 0.05, "vol": 0.25},
+    {"key": "D_CN_QDII_STOCK", "name": "QDII全球股票", "fund_code": None, "pool": "domestic"},
+    {"key": "D_CN_QDII_STABLE", "name": "QDII稳健配置(债性FOF)", "fund_code": None, "pool": "domestic"},
+    {"key": "D_CN_QDII_COMMODITY", "name": "QDII商品/原油", "fund_code": None, "pool": "domestic"},
     # 大中华权益一级大类（跨池：内地权益 + 香港权益，内部再拆 9 类二级）
-    {"key": "D_GREATER_CN", "name": "大中华权益（沪深300/红利低波/主动/港股等）", "fund_code": None, "pool": "cross", "mu": 0.075, "vol": 0.20},
+    {"key": "D_GREATER_CN", "name": "大中华权益（沪深300/红利低波/主动/港股等）", "fund_code": None, "pool": "cross"},
     # 黄金一级大类（跨池：境内黄金基金 + 境外黄金ETF 合并）
-    {"key": "O_GOLD", "name": "黄金（境内/境外合并）", "fund_code": None, "pool": "cross", "mu": 0.060, "vol": 0.15},
+    {"key": "O_GOLD", "name": "黄金（境内/境外合并）", "fund_code": None, "pool": "cross"},
     # 境外：核心与已有
     {"key": "O_US_CORE", "name": "美国核心权益（文件内部权重）", "pool": "overseas", "mu": None, "vol": None},
-    {"key": "O_BTC", "name": "比特币", "pool": "overseas", "mu": 0.150, "vol": 0.60},
-    {"key": "O_HYLB", "name": "HYLB 高收益信用", "pool": "overseas", "mu": 0.065, "vol": 0.10},
-    {"key": "O_JP_EQ", "name": "日本权益ETF 1698.T", "pool": "overseas", "mu": 0.070, "vol": 0.18},
-    {"key": "O_SG_EQ", "name": "新加坡权益ETF G3B.SI", "pool": "overseas", "mu": 0.065, "vol": 0.15},
-    {"key": "O_US_TLT", "name": "美国长久期国债TLH", "pool": "overseas", "mu": 0.040, "vol": 0.14},
-    {"key": "O_US_REIT", "name": "美国住宅REIT ETF REZ", "pool": "overseas", "mu": 0.065, "vol": 0.18},
-    {"key": "O_US_ENERGY", "name": "能源生产商XOM", "pool": "overseas", "mu": 0.075, "vol": 0.25},
+    {"key": "O_BTC", "name": "比特币", "pool": "overseas"},
+    {"key": "O_HYLB", "name": "HYLB 高收益信用", "pool": "overseas"},
+    {"key": "O_JP_EQ", "name": "日本权益ETF 1698.T", "pool": "overseas"},
+    {"key": "O_SG_EQ", "name": "新加坡权益ETF G3B.SI", "pool": "overseas"},
+    {"key": "O_US_TLT", "name": "美国长久期国债TLH", "pool": "overseas"},
+    {"key": "O_US_REIT", "name": "美国住宅REIT ETF REZ", "pool": "overseas"},
+    {"key": "O_US_ENERGY", "name": "能源生产商XOM", "pool": "overseas"},
 ]
 
 BROAD_CORR = {
@@ -929,53 +932,85 @@ def build_open_pool_from_status(hsbc_funds, availability, live_anchors=None):
 
 
 # ---------------------------------------------------------------------------
-# 市场数据校准（前瞻性混合）
+# 参数来源：校准文件（历史数据）+ 类别兜底（asset_classes.py 的人工先验/下限）
 # ---------------------------------------------------------------------------
-# 校准文件由 scripts/calibrate_params.py 生成，包含：
-#   - 历史年化收益/波动（约 3 年日频数据）
-#   - 预期收益 = 60% 历史收益 + 40% 原前瞻假设，并做合理截断
-#   - 相关性矩阵 = 历史日收益相关性
-# 如果文件存在，模块加载时会自动覆盖上面写死的手工参数。
+# 规则本身（混合比例、截断线、历史窗口、波动率下限、兜底矩阵）见 asset_classes.py，
+# 本模块不再保存任何"静态 μ/σ"——它们已全部退役：
+#   有校准值 → 用校准值；没有 → 用类别兜底（μ=先验、σ=下限）；两者皆无 → 该标的缺失并报警。
+# 行业口径变化记录：
+#   - 2026-10-13 之前：所有标的都是 0.5×历史 + 0.5×先验、截断 [0,15%]，σ 上限 0.6。
+#   - 2026-10-13 起：按 broad/strategy/active 三类分别处理（见 asset_classes.py）。
 CALIBRATION_PATH = _resolve_data_file("calibrated_params.json")
 CALIBRATION_LOADED = False
 CALIBRATION_SUMMARY = None
+CALIBRATION_WARNINGS = []      # 校准阶段的提示（缺数据、σ 毛刺、人工兜底…）
+CALIBRATION_PROVENANCE = {}    # key → {class, mu_hist, note, vol_note, ...} 每个数的来历
+PARAM_SOURCE = {}              # key → "calibrated" | "written_fallback" | "missing"
+
+
+def _class_fallback(key):
+    """没有校准值时的人工兜底：μ=先验、σ=波动率下限（来自 asset_classes.py）。"""
+    mu, _ = _AC.build_mu(key, None)
+    vol, _ = _AC.build_vol(key, None)
+    return mu, vol
+
+
+def _assign(entry, key, cal_assets):
+    """给一条标的写 μ/σ：优先校准值，其次类别兜底；都拿不到就记 missing。"""
+    src = cal_assets.get(key)
+    if src is not None:
+        entry["mu"] = src["mu"]
+        entry["vol"] = src["vol"]
+        PARAM_SOURCE[key] = "calibrated"
+        return True
+    mu, vol = _class_fallback(key)
+    if mu is None or vol is None:
+        PARAM_SOURCE[key] = "missing"
+        CALIBRATION_WARNINGS.append(
+            f"{key}（{_AC.asset_class(key) or '未登记'}）：既无校准值也无人工兜底，本次优化不参与")
+        return False
+    entry["mu"] = mu
+    entry["vol"] = vol
+    PARAM_SOURCE[key] = "fixed" if key in _AC.SPECIAL_FIXED else "written_fallback"
+    return True
 
 
 def _apply_calibration():
-    global CALIBRATION_LOADED, CALIBRATION_SUMMARY
+    """把校准值/类别兜底写进各标的表。任何情况下都要让 μ/σ 齐全（表里已不再存静态值）。"""
+    global CALIBRATION_LOADED, CALIBRATION_SUMMARY, CALIBRATION_WARNINGS, CALIBRATION_PROVENANCE
+    cal = {}
     try:
         with open(CALIBRATION_PATH, encoding="utf-8") as f:
             cal = json.load(f)
+        CALIBRATION_LOADED = True
     except Exception as exc:
         CALIBRATION_SUMMARY = {"loaded": False, "reason": str(exc)}
-        return
+        CALIBRATION_WARNINGS.append(
+            f"校准文件不可用（{type(exc).__name__}），本次全部使用人工兜底值（类别：先验 μ + 下限 σ）")
 
     cal_assets = cal.get("assets", {})
+    # 动态先验（债券公式）：校准文件里带着解析结果，离线也能复现；缺了就用静态兜底表
+    _cal_priors = cal.get("priors") or {}
+    if _cal_priors:
+        _AC.set_prior_overrides(_cal_priors)
+
     cal_corr = cal.get("corr", {})
-    cal_us = cal.get("us_internal", {})
+    CALIBRATION_PROVENANCE = cal.get("provenance", {}) or {}
+    CALIBRATION_WARNINGS.extend(cal.get("warnings", []) or [])
 
-    # 1) 更新大类资产的预期收益和波动率
+    # 1) 大类资产（O_US_CORE 例外：运行时由美股内部权重动态聚合）
     for a in BROAD_ASSETS:
-        key = a["key"]
-        if key == "O_US_CORE":
-            # O_US_CORE 的 mu/vol 仍由 Numbers 内部权重动态聚合，不覆盖
+        if a["key"] == "O_US_CORE":
+            a["mu"] = None
+            a["vol"] = None
+            PARAM_SOURCE["O_US_CORE"] = "aggregated"
             continue
-        if key in cal_assets:
-            a["mu"] = cal_assets[key]["mu"]
-            a["vol"] = cal_assets[key]["vol"]
+        _assign(a, a["key"], cal_assets)
 
-    # 2) 更新内部标的 mu/vol (美国/日本/香港/大中华 — 同一套逻辑)
-    def _update_internal(internal_map, cal_sub):
+    # 2) 内部标的（美国/日本/香港/大中华，同一套逻辑）
+    for internal_map in (US_INTERNAL, JP_INTERNAL, HK_INTERNAL, GC_INTERNAL):
         for ticker, info in internal_map.items():
-            src = cal_sub.get(ticker) or cal_assets.get(ticker)
-            if src:
-                info["mu"] = src["mu"]
-                info["vol"] = src["vol"]
-
-    _update_internal(US_INTERNAL, cal_us)
-    _update_internal(JP_INTERNAL, cal.get("jp_internal", {}))
-    _update_internal(HK_INTERNAL, cal.get("hk_internal", {}))
-    _update_internal(GC_INTERNAL, cal.get("gc_internal", {}))
+            _assign(info, ticker, cal_assets)
 
     broad_keys = {a["key"] for a in BROAD_ASSETS}
     internal_keys = set(US_INTERNAL.keys())
@@ -983,15 +1018,18 @@ def _apply_calibration():
     hk_keys = set(HK_INTERNAL.keys())
     gc_keys = set(GC_INTERNAL.keys())
 
-    # 3) 用校准相关性重建大类相关性矩阵
-    BROAD_CORR.clear()
-    for pair, v in cal_corr.items():
-        a, b = pair.split("|")
-        if a in broad_keys and b in broad_keys:
-            BROAD_CORR[(a, b)] = v
+    # 3) 用校准相关性重建大类相关性矩阵（校准缺失时保留文件里写死的兜底表）
+    if cal_corr:
+        BROAD_CORR.clear()
+        for pair, v in cal_corr.items():
+            a, b = pair.split("|")
+            if a in broad_keys and b in broad_keys:
+                BROAD_CORR[(a, b)] = v
 
     # 4) 用校准相关性重建内部相关性矩阵 (美国/日本/香港/大中华 — 同一套逻辑)
     def _rebuild_corr(corr_dict, valid_keys):
+        if not cal_corr:
+            return
         corr_dict.clear()
         for pair, v in cal_corr.items():
             a, b = pair.split("|")
@@ -1004,6 +1042,7 @@ def _apply_calibration():
     _rebuild_corr(GC_INTERNAL_CORR, gc_keys)
 
     # 5) 前瞻微调：aistockresearcher 生成的 forward_adjusted.json 若存在则覆盖大类 mu
+    fwd_applied = 0
     try:
         with open(_resolve_data_file("forward_adjusted.json"), encoding="utf-8") as f:
             fwd = json.load(f)
@@ -1011,19 +1050,62 @@ def _apply_calibration():
         for a in BROAD_ASSETS:
             if a["key"] in fwd_assets and a["key"] != "O_US_CORE":
                 a["mu"] = fwd_assets[a["key"]]["mu"]
-        CALIBRATION_SUMMARY = {"loaded": True, "path": "calibrated + forward_adjusted",
-                               "assets": len(cal_assets), "corr_pairs": len(cal_corr)}
+                PARAM_SOURCE[a["key"]] = "forward_adjusted"
+                fwd_applied += 1
     except Exception:
         pass
+    if fwd_applied == 0:
+        CALIBRATION_WARNINGS.append(
+            "未找到 forward_adjusted.json（前瞻微调），大类 μ 完全来自校准文件/人工兜底")
 
-    CALIBRATION_LOADED = True
+    # 6) 报告人工兜底了哪些标的（这些标的的口径弱于有行情的标的）
+    fallback = sorted(k for k, v in PARAM_SOURCE.items() if v == "written_fallback")
+    if fallback:
+        CALIBRATION_WARNINGS.append(
+            "以下标的没有行情数据，已用人工兜底值（μ=先验、σ=下限）: " + "、".join(fallback))
+
     CALIBRATION_SUMMARY = {
-        "loaded": True,
-        "path": CALIBRATION_PATH,
+        "loaded": CALIBRATION_LOADED,
+        "path": str(CALIBRATION_PATH),
         "assets": len(cal_assets),
         "corr_pairs": len(cal_corr),
         "generated_at": cal.get("generated_at"),
+        "written_fallback": fallback,
+        "forward_adjusted": fwd_applied,
     }
+
+
+def param_origin(key):
+    """该标的的参数来自哪里：calibrated / written_fallback / fixed / forward_adjusted / aggregated / missing。"""
+    return PARAM_SOURCE.get(key, "unknown")
+
+
+def describe_param_source(key):
+    """中文一句话，说明该标的 μ/σ 的来历（结果页与 CLI 展示用）。"""
+    cls = _AC.asset_class(key)
+    origin = param_origin(key)
+    if origin == "aggregated":
+        return "由美股内部持仓动态聚合（不用校准值）"
+    if origin == "fixed":
+        return "写死值（货币基金：净值不反映货币收益，固定 μ=2%、σ=1%）"
+    if origin == "calibrated":
+        p = CALIBRATION_PROVENANCE.get(key, {})
+        note = p.get("note")
+        if note == "history_only":
+            return "纯历史年化（该类无人工先验，口径与其它标的不同）"
+        if note == "prior_fallback":
+            return "无行情历史，用人工先验 μ + 下限 σ"
+        if note == "fixed":
+            return "写死值（货币基金）"
+        base = _AC.describe_class(cls) if cls else "未登记类别"
+        return base
+    if origin == "written_fallback":
+        return "人工兜底（μ=先验、σ=下限），该标的没有可用行情"
+    if origin == "forward_adjusted":
+        return "前瞻微调值（forward_adjusted.json）"
+    if origin == "missing":
+        return "既无校准值也无人工兜底，本次不参与优化"
+    return "来源未知"
 
 
 _apply_calibration()
