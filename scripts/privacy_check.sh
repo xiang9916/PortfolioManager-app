@@ -70,8 +70,19 @@ if [ "$MODE" != "message" ]; then
     sqlite3 "$DB" "select distinct key from assets where length(key)>=5" > "$TOKENS" 2>/dev/null || true
     if [ -s "$TOKENS" ]; then
       if [ "$MODE" = "staged" ]; then
-        HITS="$(git diff --cached -U0 "${STAGED_EXCLUDE[@]}" | grep '^+' | grep -v '^+++' | grep -oFf "$TOKENS" | sort -u || true)"
-        [ -n "$HITS" ] && report "暂存区里出现真实持仓 key："$'\n'"$(echo "$HITS" | sed 's/^/      /')"
+        # 与工作区扫描同一套分级：候选池文件跳过、登记的通用文件打印待人工确认、其余失败
+        STAGED_FILES="$(git diff --cached --name-only "${STAGED_EXCLUDE[@]}" || true)"
+        POOL_F="$(echo "$STAGED_FILES" | grep -E "$POOL_RE" || true)"
+        GEN_F="$(echo "$STAGED_FILES" | grep -E "$GENERIC_RE" | grep -Ev "$POOL_RE" || true)"
+        OTHER_F="$(echo "$STAGED_FILES" | grep -Ev "$POOL_RE" | grep -Ev "$GENERIC_RE" | grep -v '^$' || true)"
+        [ -n "$POOL_F" ] && echo "  · 候选池文件命中（预期，跳过）：$(echo "$POOL_F" | wc -l | tr -d ' ') 个"
+        [ -n "$GEN_F" ] && echo "  · 需人工确认（AGENTS §1 已登记）："$'\n'"$(echo "$GEN_F" | sed 's/^/      /')"
+        if [ -n "$OTHER_F" ]; then
+          for f in $OTHER_F; do
+            K="$(git show ":$f" 2>/dev/null | grep -oFf "$TOKENS" | sort -u || true)"
+            [ -n "$K" ] && report "暂存区 $f 出现真实持仓 key："$'\n'"$(echo "$K" | sed 's/^/      /')"
+          done
+        fi
       else
         FILES="$(grep -rIlFf "$TOKENS" . "${EXCLUDES[@]}" 2>/dev/null || true)"
         POOL="$(echo "$FILES" | grep -E "$POOL_RE" || true)"
