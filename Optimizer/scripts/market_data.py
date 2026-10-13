@@ -229,12 +229,6 @@ SOURCES = {
     "1478": ("yahoo", "1478.T"),
     "1490": ("yahoo", "1490.T"),
     "2529": ("yahoo", "2529.T"),
-    "2800": ("yahoo", "2800.HK"),
-    "2828": ("yahoo", "2828.HK"),
-    "3031": ("yahoo", "3031.HK"),
-    "3067": ("yahoo", "3067.HK"),
-    "3110": ("yahoo", "3110.HK"),
-    "3070": ("yahoo", "3070.HK"),
     "CSI300": ("fund", "110020"),
     "DIVLOWVOL": ("fund", "008163"),
     "DIVLOWVOL100": ("fund", "021550"),
@@ -249,6 +243,9 @@ SOURCES = {
 # Long-history proxies: when the actual fund/ETF has short history, use a broad
 # index/futures proxy that covers a longer economic cycle.
 PROXY_MAP = {
+    # 短样本标的的长历史代理（真实标的历史太短会让 μ 每次校准都跳）
+    "HK_DIV": ("yahoo", "^HSI"),              # 3031.HK 仅 129 天 → 恒指长历史
+    "DIVLOWVOL100": ("fund", "005051"),        # 021550 仅 532 天 → 同类红利低波策略长历史
     "D_HSBC_SP500": ("yahoo", "^GSPC"),
     "D_HSBC_CDB": None,
     "D_HSBC_MMF": None,
@@ -260,7 +257,7 @@ PROXY_MAP = {
     "O_US_CORE": ("yahoo", "^GSPC"),
     "O_BTC": None,
     "O_HYLB": None,
-    "O_JP_EQ": ("yahoo", "^N225"),
+    "O_JP_EQ": None,                         # 与执行标的 1698.T 同源，避免同敞口两套参数
     "O_SG_EQ": ("yahoo", "^STI"),
     "O_US_TLT": None,
     "O_US_REIT": ("yahoo", "VNQ"),

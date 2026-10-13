@@ -48,7 +48,7 @@ CLASS_RULES = {
         "mu_lo": 0.00,
         "mu_hi": 0.20,
         "window_years": None,          # None = 全历史
-        "use_vol_floor": True,
+        "use_vol_floor": True
     },
     "strategy": {
         "label": "策略指数",
@@ -56,7 +56,7 @@ CLASS_RULES = {
         "mu_lo": -0.05,
         "mu_hi": 0.30,
         "window_years": 20,
-        "use_vol_floor": True,
+        "use_vol_floor": True
     },
     "active": {
         "label": "个股/主动",
@@ -64,18 +64,18 @@ CLASS_RULES = {
         "mu_lo": -0.10,
         "mu_hi": 0.40,
         "window_years": 10,
-        "use_vol_floor": False,
-    },
+        "use_vol_floor": False
+    }
 }
 
 # 单标的覆盖：比特币的截断线放宽到 −20% ~ 60%
 CLASS_OVERRIDES = {
-    "O_BTC": {"mu_lo": -0.20, "mu_hi": 0.60},
+    "O_BTC": {"mu_lo": -0.20, "mu_hi": 0.60}
 }
 
 # 完全写死的标的（货币基金：净值不反映货币收益）
 SPECIAL_FIXED = {
-    "D_HSBC_MMF": {"mu": 0.02, "vol": 0.01},
+    "D_HSBC_MMF": {"mu": 0.02, "vol": 0.01}
 }
 
 # 聚合项：由内部持仓动态合成（运行时用美股内部权重聚合，params.py 不会用校准值覆盖它）。
@@ -133,11 +133,6 @@ ASSET_CLASS = {
     "1478": "strategy",               # 日本高股息
     "1490": "strategy",               # 日本高息低波
     "2529": "strategy",               # 股东收益 70
-    # ---- 香港内部（HK_INTERNAL）----
-    "2800": "broad",                  # 盈富基金（恒指宽基）
-    "2828": "broad",                  # 国企指数（宽基）
-    "3031": "strategy", "3110": "strategy", "3070": "strategy",   # 港股高股息
-    "3067": "strategy",               # 恒生科技（主题）
     # ---- 大中华内部（GC_INTERNAL）----
     "CSI300": "broad",                # 沪深300
     "INDEX": "broad",                 # 其他指数（用户指定按桶名归 class1）
@@ -171,12 +166,12 @@ ASSET_CLASS = {
 BOND_PRIOR_FORMULA = {
     "D_HSBC_CDB": {
         "market": "cn", "reg_yield": "cn_10y", "anchor": "cn_5y", "fallback": 0.035,
-        "desc": "国开债 3-5 年：先验 =（5 年远期收益回归 μ + 中国国债 5 年期收益率）/2",
+        "desc": "国开债 3-5 年：先验 =（5 年远期收益回归 μ + 中国国债 5 年期收益率）/2"
     },
     "O_US_TLT": {
         "market": "us", "reg_yield": "us_10y", "anchor": "us_20y", "fallback": 0.040,
-        "desc": "美国长久期国债：先验 =（5 年远期收益回归 μ + 美国国债 20 年期收益率）/2",
-    },
+        "desc": "美国长久期国债：先验 =（5 年远期收益回归 μ + 美国国债 20 年期收益率）/2"
+    }
 }
 
 # 锚定收益率的数据来源。东财 RPTA_WEB_TREASURYYIELD 有中/美各期限，但**没有美国 20 年档**
@@ -187,7 +182,7 @@ ANCHOR_SPECS = {
     "us_10y": {"label": "美国国债 10 年期", "source": "eastmoney", "field": "EMG00001310"},
     "us_30y": {"label": "美国国债 30 年期", "source": "eastmoney", "field": "EMG00001312"},
     "us_20y": {"label": "美国国债 20 年期（10Y/30Y 线性插值合成）",
-               "source": "synth_mid", "of": ("us_10y", "us_30y")},
+               "source": "synth_mid", "of": ("us_10y", "us_30y")}
 }
 
 # 运行期动态先验（由 calibrate_params 算出后注入；不在仓库里写死）
@@ -201,8 +196,19 @@ def set_prior_overrides(mapping):
 
 
 def prior_for(key):
-    """该标的当前生效的先验：动态值优先，否则用静态兜底表。"""
-    return PRIOR_OVERRIDE.get(key, PRIOR.get(key))
+    """该标的当前生效的先验，优先级：
+    ① PRIOR_OVERRIDE（校准阶段解析出的债券公式值等）
+    ② RF_PREMIUM：本币无风险利率 + 溢价（0.5% 粒度）
+    ③ PRIOR：利率不可用时的兜底表
+    """
+    if key in PRIOR_OVERRIDE:
+        return PRIOR_OVERRIDE[key]
+    spec = RF_PREMIUM.get(key)
+    if spec is not None:
+        rf = _RF.get(spec[1])
+        if rf is not None:
+            return rf + spec[0]
+    return PRIOR.get(key)
 
 
 def resolve_anchor(name, anchors):
@@ -257,24 +263,70 @@ def bond_prior(key, anchors=None, fits=None):
 
 DEFAULT_PRIOR = 0.07
 
+# 先验的**正常路径**：本币无风险利率 + 溢价（2026-10-13 定稿）。
+#   · 溢价写死（0.5% 粒度，见 RF_PREMIUM）；RF 由校准阶段从东财「中美国债收益率」取来，
+#     经 set_rf() 注入，并随解析结果写进校准 JSON 的 priors 字段 → 离线也能复现。
+#   · 债券大类另有更细的动态公式（BOND_PRIOR_FORMULA），优先级高于本表。
+#   · 🔴 RF **只来自数据源**（东财「中美国债收益率」：美元 10 年期 / 中国 10 年期），
+#     程序里**不写死利率**；校准阶段取到后经 set_rf() 注入，并写进校准 JSON 的 prior_rf 字段，
+#     运行时由 params.py 再注入 → 离线也能复现当时那组利率。
+#   · RF 取不到时回落到下面的 PRIOR 兜底表（同样 0.5% 粒度），并报警。
+_RF = {}
+
+
+def set_rf(values):
+    """注入本币无风险利率 {"usd": x, "cny": y}（校准阶段调用）。
+
+    传 None 表示**清除**该币种（clear_rf() 清空全部），供测试与异常路径使用。
+    """
+    for k, v in (values or {}).items():
+        if v is None:
+            _RF.pop(k, None)
+        else:
+            _RF[k] = float(v)
+
+
+def reset_rf():
+    """清空注入的利率（回到"无数据 → 用兜底先验"的状态）。"""
+    _RF.clear()
+
+
+def rf_for(ccy):
+    """当前生效的本币无风险利率；未注入（无数据）时返回 None。"""
+    return _RF.get(ccy)
+
+RF_PREMIUM = {
+    # 先验 = 本币 10 年期国债收益率(RF) + 溢价；溢价写死且**统一 0.5% 粒度**。
+    # 币种按标的**实际敞口**判定：境内 A 股/债券基金 = cny，其余（含港币、美元资产）= usd。
+    # 人民币敞口
+    "CSI300": (+0.060, "cny"), "DIVLOWVOL": (+0.055, "cny"), "DIVLOWVOL100": (+0.060, "cny"),
+    "D_CN_CREDIT_BOND": (+0.015, "cny"), "D_GREATER_CN": (+0.060, "cny"), "D_HSBC_CDB": (+0.020, "cny"),
+    "D_HSBC_MMF": (+0.005, "cny"), "INDEX": (+0.060, "cny"),
+    # 美元敞口
+    "1364": (+0.020, "usd"), "1477": (+0.015, "usd"), "1478": (+0.020, "usd"),
+    "1490": (+0.015, "usd"), "1698": (+0.020, "usd"), "2516": (+0.030, "usd"),
+    "2529": (+0.025, "usd"), "BUFFER": (+0.020, "usd"), "D_CN_QDII_COMMODITY": (-0.010, "usd"),
+    "D_CN_QDII_STABLE": (+0.000, "usd"), "D_CN_QDII_STOCK": (+0.035, "usd"), "D_HSBC_SP500": (+0.040, "usd"),
+    "HK_BROAD": (+0.020, "usd"), "HK_DIV": (+0.020, "usd"), "HK_TECH": (+0.030, "usd"),
+    "O_BTC": (+0.100, "usd"), "O_GOLD": (-0.010, "usd"), "O_HYLB": (+0.025, "usd"),
+    "O_JP_EQ": (+0.020, "usd"), "O_SG_EQ": (+0.015, "usd"), "O_US_CORE": (+0.040, "usd"),
+    "O_US_REIT": (+0.015, "usd"), "O_US_TLT": (-0.010, "usd"), "SPLG": (+0.040, "usd"),
+    "SPMO": (+0.045, "usd"), "VTV": (+0.035, "usd"),
+}
+
 PRIOR = {
-    # 大类
-    "D_HSBC_SP500": 0.090, "D_HSBC_CDB": 0.035, "D_HSBC_MMF": 0.020,
-    "D_CN_CREDIT_BOND": 0.045, "D_CN_QDII_STOCK": 0.085, "D_CN_QDII_STABLE": 0.045,
-    "D_CN_QDII_COMMODITY": 0.050, "D_GREATER_CN": 0.075, "O_GOLD": 0.060,
-    "O_BTC": 0.150, "O_HYLB": 0.065, "O_JP_EQ": 0.070, "O_SG_EQ": 0.065,
-    "O_US_TLT": 0.040, "O_US_REIT": 0.065, "O_US_CORE": 0.090,
-    # 美股内部（宽基 + 策略）
-    "SPLG": 0.090, "VTV": 0.085, "SPMO": 0.095, "BUFFER": 0.070,
-    # 日本内部
-    "1364": 0.070, "1698": 0.070, "2516": 0.080, "1477": 0.065, "1478": 0.070,
-    "1490": 0.065, "2529": 0.075,
-    # 香港内部
-    "2800": 0.070, "2828": 0.075, "3031": 0.070, "3067": 0.080, "3110": 0.070,
-    "3070": 0.070,
-    # 大中华内部
-    "CSI300": 0.075, "DIVLOWVOL": 0.070, "DIVLOWVOL100": 0.075, "INDEX": 0.075,
-    "HK_BROAD": 0.070, "HK_DIV": 0.070, "HK_TECH": 0.080,
+    # 公式/利率不可用时的**兜底**先验（0.5% 粒度）。正常路径见 RF_PREMIUM + set_rf()。
+    # 人民币敞口
+    "CSI300": 0.075, "DIVLOWVOL": 0.070, "DIVLOWVOL100": 0.075, "D_CN_CREDIT_BOND": 0.030,
+    "D_GREATER_CN": 0.075, "D_HSBC_CDB": 0.035, "D_HSBC_MMF": 0.020, "INDEX": 0.075,
+    # 美元敞口（含港币；日元/新元暂按美元基准建模）
+    "1364": 0.070, "1477": 0.065, "1478": 0.070, "1490": 0.065,
+    "1698": 0.070, "2516": 0.080, "2529": 0.075, "BUFFER": 0.070,
+    "D_CN_QDII_COMMODITY": 0.040, "D_CN_QDII_STABLE": 0.050, "D_CN_QDII_STOCK": 0.085, "D_HSBC_SP500": 0.090,
+    "HK_BROAD": 0.070, "HK_DIV": 0.070, "HK_TECH": 0.080, "O_BTC": 0.150,
+    "O_GOLD": 0.040, "O_HYLB": 0.075, "O_JP_EQ": 0.070, "O_SG_EQ": 0.065,
+    "O_US_CORE": 0.090, "O_US_REIT": 0.065, "O_US_TLT": 0.040, "SPLG": 0.090,
+    "SPMO": 0.095, "VTV": 0.085,
 }
 
 # 波动率下限：仅在"历史波动低于下限"时生效（防止 3 年温和样本低估风险）。
@@ -291,11 +343,9 @@ VOL_FLOOR = {
     "1364": 0.15, "1698": 0.13, "2516": 0.18, "1477": 0.10, "1478": 0.12,
     "1490": 0.10, "2529": 0.14,
     # 香港内部
-    "2800": 0.18, "2828": 0.20, "3031": 0.14, "3067": 0.25, "3110": 0.14,
-    "3070": 0.14,
     # 大中华内部
     "CSI300": 0.17, "DIVLOWVOL": 0.14, "DIVLOWVOL100": 0.14, "INDEX": 0.15,
-    "HK_BROAD": 0.20, "HK_DIV": 0.14, "HK_TECH": 0.25,
+    "HK_BROAD": 0.20, "HK_DIV": 0.14, "HK_TECH": 0.25
 }
 
 # ---------------------------------------------------------------- 规则函数

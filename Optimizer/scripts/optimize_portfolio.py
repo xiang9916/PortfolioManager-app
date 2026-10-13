@@ -27,8 +27,6 @@ from params import (
     US_INTERNAL_CORR,
     JP_INTERNAL,
     JP_INTERNAL_CORR,
-    HK_INTERNAL,
-    HK_INTERNAL_CORR,
     GC_INTERNAL,
     GC_INTERNAL_CORR,
     build_broad_cov,
@@ -85,7 +83,7 @@ def _active_cap_map(assets):
 
     for a in assets or []:
         consider(a.get("key", ""), a.get("test_class"))
-    for internal in (US_INTERNAL, JP_INTERNAL, HK_INTERNAL, GC_INTERNAL):
+    for internal in (US_INTERNAL, JP_INTERNAL, GC_INTERNAL):
         for key in internal:
             consider(key)
     return caps
@@ -411,11 +409,6 @@ def stage2_japan_optimize(stage1_weights, assets, total_assets, cap_map=None):
                                    total_assets, seed=31, cap_map=cap_map)
 
 
-def stage2_hk_optimize(stage1_weights, assets, total_assets, cap_map=None):
-    """Optimize Hong Kong equity internal factor weights."""
-    return _internal_pool_optimize(stage1_weights, assets, HK_INTERNAL, HK_INTERNAL_CORR, "O_HK_HSTECH",
-                                   total_assets, seed=37, cap_map=cap_map)
-
 
 def stage2_gc_optimize(stage1_weights, assets, total_assets, cap_map=None):
     """Optimize Greater China equity internal (沪深300/红利低波/主动/混合/指数/港股宽基/高股息/科技)."""
@@ -496,26 +489,6 @@ def build_result_summary(output, hsbc_pool=None):
             assets.append({
                 "key": f"JP:{ticker}",
                 "name": f"[{ticker}] 日本·{info['name']}",
-                "weight": w,
-                "expected_return": mu,
-                "volatility": vol,
-                "sharpe": (mu - RF) / vol if vol else 0.0,
-            })
-
-    # Hong Kong equity internal factor split
-    hk = output.get("hk_selection")
-    if hk is not None:
-        for ticker, w in hk.get("internal_weights_total", {}).items():
-            if w <= 1e-8:
-                continue
-            info = HK_INTERNAL.get(ticker)
-            if info is None:
-                continue
-            mu = info["mu"]
-            vol = info["vol"]
-            assets.append({
-                "key": f"HK:{ticker}",
-                "name": f"[{ticker}] 香港·{info['name']}",
                 "weight": w,
                 "expected_return": mu,
                 "volatility": vol,
@@ -611,7 +584,7 @@ def build_result_summary(output, hsbc_pool=None):
     # (O_US_CORE→美股内部标的、O_JP_EQ/O_HK_HSTECH/D_GREATER_CN→各内部桶、境内大类→选中基金)。
     expanded = set(output.get("domestic_selection", {}).keys())
     for sel_key, broad_key in (("stage2", "O_US_CORE"), ("japan_selection", "O_JP_EQ"),
-                               ("hk_selection", "O_HK_HSTECH"), ("gc_selection", "D_GREATER_CN")):
+                               ("gc_selection", "D_GREATER_CN")):
         if output.get(sel_key) is not None:
             expanded.add(broad_key)
     emitted = {a["key"] for a in assets}
@@ -964,7 +937,6 @@ def main():
     log_step("select_domestic", "境内基金选择完成", log_path=args.log_path)
 
     japan_selection = stage2_japan_optimize(w1, assets, total_assets, cap_map=cap_map)
-    hk_selection = stage2_hk_optimize(w1, assets, total_assets, cap_map=cap_map)
     gc_selection = stage2_gc_optimize(w1, assets, total_assets, cap_map=cap_map)
 
     log_step("stage2_internal", "第二阶段：美国权益内部标的优化", log_path=args.log_path)
@@ -1060,7 +1032,6 @@ def main():
         "stage2": None,
         "domestic_selection": domestic_selection,
         "japan_selection": japan_selection,
-        "hk_selection": hk_selection,
         "gc_selection": gc_selection,
         "final": final,
         "target_return": TARGET_RETURN,

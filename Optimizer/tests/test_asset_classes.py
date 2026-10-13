@@ -168,11 +168,64 @@ def test_unregistered_key_is_flagged():
     assert mu is None and note == "unregistered"
 
 
+# ---------------------------------------------------------------- RF + 溢价（2026-10-13）
+
+def test_rf_is_not_hardcoded():
+    """本币无风险利率必须来自数据源：程序里不写死利率常量。"""
+    assert not hasattr(AC, "RF_BY_CCY"), "不应再有写死的 RF 表"
+    import inspect
+    src = inspect.getsource(AC)
+    # 允许出现"0.5% 粒度"这类注释数字，但不允许把利率塞进 _RF 的初始值
+    assert AC._RF == {} or "set_rf" in src
+    AC.reset_rf()
+    assert AC.rf_for("usd") is None and AC.prior_for("O_US_CORE") == AC.PRIOR["O_US_CORE"]
+
+
+def test_prior_follows_rf():
+    """先验 = 本币 RF + 溢价；RF 变了先验必须跟着变（这才是"动态"）。"""
+    try:
+        AC.set_rf({"usd": 0.0524, "cny": 0.0167})
+        a = AC.prior_for("O_US_CORE")
+        AC.set_rf({"usd": 0.0624, "cny": 0.0167})
+        b = AC.prior_for("O_US_CORE")
+        assert abs((b - a) - 0.01) < 1e-9, (a, b)
+        # 币种隔离：改美元利率不影响人民币标的
+        c = AC.prior_for("CSI300")
+        AC.set_rf({"usd": 0.0724, "cny": 0.0167})
+        assert abs(AC.prior_for("CSI300") - c) < 1e-12
+        AC.set_rf({"cny": 0.0267})
+        assert abs(AC.prior_for("CSI300") - (c + 0.01)) < 1e-9
+    finally:
+        AC.reset_rf()
+
+
+def test_premium_and_fallback_are_half_point():
+    """写死的数字（溢价与兜底先验）必须是 0.5% 粒度。"""
+    for key, (prem, ccy) in AC.RF_PREMIUM.items():
+        assert ccy in ("usd", "cny"), key
+        assert abs(round(prem / 0.005) * 0.005 - prem) < 1e-9, (key, prem)
+    for key, v in AC.PRIOR.items():
+        assert abs(round(v / 0.005) * 0.005 - v) < 1e-9, (key, v)
+    for key, v in AC.VOL_FLOOR.items():
+        assert abs(round(v / 0.005) * 0.005 - v) < 1e-9, (key, v)
+
+
+def test_proxy_and_internal_pool_cleanup():
+    """HK 内部池（父大类已不存在）必须已清除；短样本标的要有长历史代理。"""
+    for key in ("2800", "2828", "3031", "3067", "3110", "3070"):
+        assert key not in AC.ASSET_CLASS, key
+    import market_data as M
+    assert M.PROXY_MAP.get("HK_DIV") is not None      # 香港高股息桶的真实标的历史仅 129 天
+    assert M.PROXY_MAP.get("DIVLOWVOL100") is not None  # 境内红利低波 100 桶仅 532 天
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
     for name, fn in tests:
         try:
+            if hasattr(AC, "reset_rf"):
+                AC.reset_rf()          # 每个用例从"无 RF 注入"的干净状态开始
             fn()
             print(f"  ✓ {name}")
         except AssertionError as exc:

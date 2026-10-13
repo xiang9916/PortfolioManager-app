@@ -130,33 +130,6 @@ JP_INTERNAL_CORR = {
     ("1490", "2529"): 0.80,
 }
 
-# 香港权益大类内部：宽基/中企/高股息/科技
-HK_INTERNAL = {
-    "2800": {"name": "Tracker Fund of Hong Kong"},
-    "2828": {"name": "Hang Seng China Enterprises Index ETF"},
-    "3031": {"name": "Fullgoal HSI High Dividend ETF"},
-    "3067": {"name": "iShares Hang Seng TECH ETF"},
-    "3110": {"name": "Global X HSI High Dividend Yield ETF"},
-    "3070": {"name": "Ping An CSI HK Dividend ETF"},
-}
-
-HK_INTERNAL_CORR = {
-    ("2800", "2828"): 0.90,
-    ("2800", "3031"): 0.80,
-    ("2800", "3067"): 0.70,
-    ("2800", "3110"): 0.80,
-    ("2800", "3070"): 0.80,
-    ("2828", "3031"): 0.75,
-    ("2828", "3067"): 0.75,
-    ("2828", "3110"): 0.75,
-    ("2828", "3070"): 0.75,
-    ("3031", "3067"): 0.55,
-    ("3031", "3110"): 0.90,
-    ("3031", "3070"): 0.90,
-    ("3067", "3110"): 0.55,
-    ("3067", "3070"): 0.55,
-    ("3110", "3070"): 0.90,
-}
 
 # 大中华权益一级大类内部：9 个二级风格/因子
 GC_INTERNAL = {
@@ -991,8 +964,10 @@ def _apply_calibration():
     cal_assets = cal.get("assets", {})
     # 动态先验（债券公式）：校准文件里带着解析结果，离线也能复现；缺了就用静态兜底表
     _cal_priors = cal.get("priors") or {}
+    if cal.get("prior_rf"):
+        _AC.set_rf(cal["prior_rf"])          # 当次校准用的本币无风险利率（数据源，非写死）
     if _cal_priors:
-        _AC.set_prior_overrides(_cal_priors)
+        _AC.set_prior_overrides(_cal_priors)  # 解析后的先验（RF+溢价 / 债券公式）
 
     cal_corr = cal.get("corr", {})
     CALIBRATION_PROVENANCE = cal.get("provenance", {}) or {}
@@ -1008,14 +983,13 @@ def _apply_calibration():
         _assign(a, a["key"], cal_assets)
 
     # 2) 内部标的（美国/日本/香港/大中华，同一套逻辑）
-    for internal_map in (US_INTERNAL, JP_INTERNAL, HK_INTERNAL, GC_INTERNAL):
+    for internal_map in (US_INTERNAL, JP_INTERNAL, GC_INTERNAL):
         for ticker, info in internal_map.items():
             _assign(info, ticker, cal_assets)
 
     broad_keys = {a["key"] for a in BROAD_ASSETS}
     internal_keys = set(US_INTERNAL.keys())
     jp_keys = set(JP_INTERNAL.keys())
-    hk_keys = set(HK_INTERNAL.keys())
     gc_keys = set(GC_INTERNAL.keys())
 
     # 3) 用校准相关性重建大类相关性矩阵（校准缺失时保留文件里写死的兜底表）
@@ -1038,7 +1012,6 @@ def _apply_calibration():
 
     _rebuild_corr(US_INTERNAL_CORR, internal_keys)
     _rebuild_corr(JP_INTERNAL_CORR, jp_keys)
-    _rebuild_corr(HK_INTERNAL_CORR, hk_keys)
     _rebuild_corr(GC_INTERNAL_CORR, gc_keys)
 
     # 5) 前瞻微调：aistockresearcher 生成的 forward_adjusted.json 若存在则覆盖大类 mu

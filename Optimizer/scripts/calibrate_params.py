@@ -89,15 +89,23 @@ retired = []
 BOND_ANCHORS = {}
 BOND_DETAIL = {}
 _YIELD_HISTORY = []
-if AC.BOND_PRIOR_FORMULA:
-    try:
-        import bond_prior as _BP
-        _YIELD_HISTORY = _BP.fetch_yield_series(log=lambda m: print(m))
-        BOND_ANCHORS = _BP.latest_anchors(_YIELD_HISTORY)
-        if not BOND_ANCHORS:
-            WARNINGS.append("债券先验动态公式：取不到国债收益率锚，本次回落到静态先验")
-    except Exception as exc:  # noqa: BLE001
-        WARNINGS.append(f"债券先验动态公式不可用（{type(exc).__name__}: {exc}），本次回落到静态先验")
+try:
+    import bond_prior as _BP
+    _YIELD_HISTORY = _BP.fetch_yield_series(log=lambda m: print(m))
+    BOND_ANCHORS = _BP.latest_anchors(_YIELD_HISTORY)
+except Exception as exc:  # noqa: BLE001
+    WARNINGS.append(f"国债收益率取数失败（{type(exc).__name__}: {exc}），"
+                    f"债券公式与 RF+溢价 先验本次均回落到兜底表")
+
+# 本币无风险利率：**只来自数据源**（东财中美国债收益率），程序里不写死。
+# 先验 = 本币 RF + 溢价（溢价见 asset_classes.RF_PREMIUM）。
+_PRIOR_RF = {"usd": BOND_ANCHORS.get("us_10y"), "cny": BOND_ANCHORS.get("cn_10y")}
+if any(v is None for v in _PRIOR_RF.values()):
+    WARNINGS.append(f"本币无风险利率不完整（usd={_PRIOR_RF['usd']}、cny={_PRIOR_RF['cny']}），"
+                    f"相关先验回落到兜底表")
+else:
+    AC.set_rf(_PRIOR_RF)
+    print(f"本币无风险利率（数据源）：USD 10y {_PRIOR_RF['usd']:.3%}、CNY 10y {_PRIOR_RF['cny']:.3%}")
 
 
 def _resolve_bond_prior(key, prices, adjusted_prices=None):
@@ -254,7 +262,10 @@ calib = {
     "warnings": WARNINGS,
     # 运行期解析出的先验（债券动态公式的结果）。params.py 加载时用它覆盖静态兜底表，
     # 于是"公式"这条路径离线也能复现（bundle 里就带这个 JSON）。
-    "priors": {k: round(float(v), 6) for k, v in AC.PRIOR_OVERRIDE.items()},
+    # 解析后的全部先验（RF+溢价 / 债券公式）——params.py 加载时注入，离线可复现
+    "priors": {k: round(float(AC.prior_for(k)), 6) for k in AC.ASSET_CLASS
+               if AC.prior_for(k) is not None},
+    "prior_rf": {k: v for k, v in _PRIOR_RF.items() if v is not None},
     "bond_anchors": {k: round(float(v), 6) for k, v in BOND_ANCHORS.items()},
     "bond_prior_detail": BOND_DETAIL,
 }
