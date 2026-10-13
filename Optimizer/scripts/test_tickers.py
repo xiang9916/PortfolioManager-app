@@ -53,13 +53,18 @@ def classify_source(ticker):
     return "yahoo", ticker
 
 
-def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None):
+def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, corr_keys=None):
     """解析并估算测试标的, 返回 (assets, corr_pairs, skipped, estimates).
 
     - assets: 追加进第一阶段 assets 的大类资产 dict (key 前缀 T_)
     - corr_pairs: {("T_X", 宽基key): corr}, 合并进 build_broad_cov 的相关性表
     - skipped: [(代码, 原因)]
     - estimates: 写入结果 JSON 的估算元数据 (Swift 测试结果弹窗展示)
+
+    corr_keys: 要计算相关性的宽基 key 集合, 默认 = existing_keys (本次实际参与
+    第一阶段的大类)。基准对比 (_build_benchmark) 会用到全量 BROAD_ASSETS 的行,
+    所以调用方可以传更大的集合 (例如所有 BROAD_ASSETS 的 key), 否则测试标的与
+    被过滤掉的大类之间的相关性会缺失, 组合 Beta 会被低估。
     """
     def _log(msg, level="info"):
         if log:
@@ -125,7 +130,7 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None):
         return rets
 
     for ticker, key, rets in chosen:
-        for broad_key in existing_keys:
+        for broad_key in (corr_keys if corr_keys is not None else existing_keys):
             if broad_key == "D_GREATER_CN":
                 prox = _broad_rets(broad_key)
                 if prox and all(prox):

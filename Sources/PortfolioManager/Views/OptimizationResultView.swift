@@ -64,13 +64,16 @@ public struct OptimizationResultView: View {
             }
 
             // Weights bar chart
+            // 测试标的 (isTest) 用橙色区分: 它们是 what-if 临时注入的仓位, 不进执行清单,
+            // 但同样占权重 —— 必须出现在这张图里, 否则权重合计看起来不足 100%。
             Text("资产权重").font(.headline)
             Chart(result.assets.sorted(by: { $0.weight > $1.weight }), id: \.key) { a in
                 BarMark(
                     x: .value("权重", a.weight),
                     y: .value("标的", a.name)
                 )
-                .foregroundStyle(.blue.gradient)
+                .foregroundStyle(a.isTest == true ? AnyShapeStyle(.orange.gradient)
+                                                  : AnyShapeStyle(.blue.gradient))
                 .annotation(position: .trailing) {
                     Text(pct(a.weight)).font(.caption2).monospacedDigit()
                 }
@@ -93,6 +96,9 @@ public struct OptimizationResultView: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 6) {
                     Text("测试标的估算参数（μ = 100% 历史年化）").font(.headline)
+                    Text("口径提示：测试标的的 μ 是纯历史年化（不做先验混合），组合内资产的 μ 是 50% 历史 + 50% 先验假设。"
+                         + "两者口径不同，横向比较时测试标的的预期收益偏乐观；图中橙色行即为测试标的。")
+                        .font(.caption).foregroundStyle(.secondary)
                     ForEach(ta, id: \.key) { e in
                         HStack(spacing: 8) {
                             Text(e.ticker).fontWeight(.medium)
@@ -102,6 +108,18 @@ public struct OptimizationResultView: View {
                             Text("μ \(pct(e.mu))   σ \(pct(e.vol))")
                                 .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                         }
+                    }
+                }
+            }
+
+            // 汇总自检/管线提示（含"权重未全覆盖"这类映射漏项告警）
+            if let ws = result.warnings, !ws.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("优化器提示（\(ws.count)）").font(.headline)
+                    ForEach(Array(ws.enumerated()), id: \.offset) { _, w in
+                        Text("· \(w)").font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

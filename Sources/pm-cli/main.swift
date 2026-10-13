@@ -244,6 +244,10 @@ if args.count >= 2 && args[1] == "optimize" {
                 }
             }
             print("步骤日志: \(out.logPath)")
+            if let ws = r.warnings, !ws.isEmpty {
+                print("  优化器提示 (\(ws.count)):")
+                for w in ws { print("    · \(w)") }
+            }
         } else {
             FileHandle.standardError.write(("优化失败: " + (out.error ?? "未知")).data(using: .utf8)!)
             exit(1)

@@ -203,6 +203,9 @@ public struct OptimizedAsset: Codable, Hashable {
     public let expectedReturn: Double
     public let volatility: Double
     public let sharpe: Double
+    /// 「新标的测试」临时注入的标的 (key 以 T_ 开头)。这类行是 what-if 口径,
+    /// 不进执行清单, 界面上单独着色。普通优化结果为 nil/false。
+    public let isTest: Bool?
 }
 
 public struct PortfolioSummary: Codable, Hashable {
@@ -241,6 +244,9 @@ public struct OptimizationResult: Codable {
     public let assets: [OptimizedAsset]
     public let benchmark: Benchmark?
     public let testAssets: [TestAssetEstimate]?
+    /// 汇总阶段的自检/管线提示（结果清单是否覆盖了全部权重、基金剔除原因等）。
+    /// 旧结果文件没有这个键 → nil。
+    public let warnings: [String]?
     public let sourceDetail: String?
 }
 

@@ -52,10 +52,16 @@ def build_corr_matrix(n, tickers, corr_pairs, fallback=0.5):
 
 
 def feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng):
-    """Generate a random feasible starting point satisfying pool-weight constraints."""
+    """Generate a random feasible starting point satisfying pool-weight constraints.
+
+    两个池各自填到自己的目标 (dom→dom_w, ov→ov_w)。此前这里把境内块也填成了 ov_w,
+    于是每个起点都违反 sum(w)=1 与境内池等式 （实测：起点合计与境内权重都会超出约束）,
+    SLSQP 每次都要先花迭代把点拉回可行域; 最优解本身没受影响(第一阶段是凸问题),
+    但 120 次重启的多样性形同虚设 (2026-10-13 修)。
+    """
     n = len(lower)
     x = np.zeros(n)
-    for idx, target in ((dom_idx, ov_w), (ov_idx, ov_w)):
+    for idx, target in ((dom_idx, dom_w), (ov_idx, ov_w)):
         if not idx:
             continue
         lo = lower[idx]

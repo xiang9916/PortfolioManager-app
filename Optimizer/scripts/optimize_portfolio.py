@@ -470,6 +470,31 @@ def build_result_summary(output, hsbc_pool=None):
             "volatility": vol,
             "sharpe": (mu - RF) / vol if vol else 0.0,
         })
+    # 测试标的 (T_ 前缀): 它们是"新标的测试"临时注入的大类, 不在 BROAD_ASSETS 里,
+    # 但同样占用第一阶段权重。以前这里直接 continue 掉, 后果是:
+    # (a) 权重合计 < 1(看起来"没买满"), (b) 用户看到的清单里永远没有新标的,
+    # 于是"加入新标的值不值得"这个问题的答案被整段吞掉 (2026-10-13 修)。
+    test_meta = {t["key"]: t for t in (output.get("test") or {}).get("assets", [])}
+    listed = {a["key"] for a in assets}
+    for key, w in output.get("stage1", {}).get("weights", {}).items():
+        if key in listed:
+            continue
+        m = test_meta.get(key)
+        if m is None:
+            continue
+        mu = float(m["mu"])
+        vol = float(m["vol"])
+        src = "天天基金" if m.get("source") == "eastmoney" else "Yahoo"
+        pool = "境内池" if m.get("pool") == "domestic" else "境外池"
+        assets.append({
+            "key": key,
+            "name": f"[测试] {m['ticker']}（{src} · {pool} · what-if，不进执行清单）",
+            "weight": w,
+            "expected_return": mu,
+            "volatility": vol,
+            "sharpe": (mu - RF) / vol if vol else 0.0,
+            "is_test": True,
+        })
     assets.sort(key=lambda x: -x["weight"])
     for a in assets:
         a["weight"] = round(float(a["weight"]), 6)
@@ -477,6 +502,28 @@ def build_result_summary(output, hsbc_pool=None):
         a["volatility"] = round(float(a["volatility"]), 6)
         a["sharpe"] = round(float(a["sharpe"]), 6)
     final = output.get("final") or {}
+    # 自检: 报告清单必须覆盖第一阶段所有权重。历史上测试标的(T_)被静默丢弃过一次,
+    # 于是"清单合计 82%、指标却按 100% 算"这种错能一路滑到界面上 —— 这里把它变成显式提示。
+    # 注意有些 key 是**故意**不出现在清单里的: 它们被拆成了第二阶段的子行
+    # (O_US_CORE→美股内部标的、O_JP_EQ/O_HK_HSTECH/D_GREATER_CN→各内部桶、境内大类→选中基金)。
+    expanded = set(output.get("domestic_selection", {}).keys())
+    for sel_key, broad_key in (("stage2", "O_US_CORE"), ("japan_selection", "O_JP_EQ"),
+                               ("hk_selection", "O_HK_HSTECH"), ("gc_selection", "D_GREATER_CN")):
+        if output.get(sel_key) is not None:
+            expanded.add(broad_key)
+    emitted = {a["key"] for a in assets}
+    missing = [k for k, w in output.get("stage1", {}).get("weights", {}).items()
+               if w > 1e-6 and k not in emitted and k not in expanded]
+    total_w = sum(float(a["weight"]) for a in assets)
+    # 优化器自身的提示(候选被剔除、池口径、数据源计数…)必须原样带上:
+    # 它们解释了"为什么这次的可投大类和上次不一样", 是解读结果的前提。
+    summary_warnings = list(output.get("warnings", []))
+    if missing:
+        summary_warnings.append(
+            "自检: 以下权重没有出现在结果清单里（映射漏项）: " + ", ".join(sorted(missing)))
+    if abs(total_w - 1.0) > 1e-4:
+        summary_warnings.append(
+            f"自检: 结果清单权重合计为 {total_w:.4f}，不等于 1 —— 请对照第一阶段权重核对映射是否漏项。")
     summary = {
         "generated_at": output.get("availability", {}).get("checked_at"),
         "portfolio": {
@@ -488,6 +535,7 @@ def build_result_summary(output, hsbc_pool=None):
         "assets": assets,
         "benchmark": _build_benchmark(output, final),
         "test_assets": (output.get("test") or {}).get("assets"),
+        "warnings": summary_warnings,
         "source_detail": None,
     }
     return summary
@@ -507,10 +555,20 @@ def _build_benchmark(output, final):
                 item["mu"] = core.get("mu", a.get("mu"))
                 item["vol"] = core.get("vol", a.get("vol"))
             broad.append(item)
+        # 测试标的也要进这张协方差表: 组合 Beta 用的是"组合权重 × 基准权重"的协方差,
+        # 漏掉测试标的等于把它们当空仓, Beta 被低估、Alpha 被高估 (2026-10-13 修)。
+        test_block = output.get("test") or {}
+        test_meta = {t["key"]: t for t in test_block.get("assets", [])}
+        for key, m in test_meta.items():
+            broad.append({"key": key, "name": key, "mu": m["mu"], "vol": m["vol"],
+                          "pool": m.get("pool")})
         keys = [a["key"] for a in broad]
         mu = np.array([a["mu"] if a["mu"] is not None else 0.0 for a in broad])
         vols = np.array([a["vol"] if a["vol"] is not None else 0.0 for a in broad])
-        cov = build_broad_cov([{"key": k, "vol": v} for k, v in zip(keys, vols)], BROAD_CORR)
+        corr_pairs = dict(BROAD_CORR)
+        for i, j, v in test_block.get("corr", []) or []:
+            corr_pairs[(i, j)] = float(v)
+        cov = build_broad_cov([{"key": k, "vol": v} for k, v in zip(keys, vols)], corr_pairs)
 
         w_bench = np.zeros(len(keys))
         if "D_GREATER_CN" in keys:
@@ -700,6 +758,9 @@ def main():
             work_dir,
             existing_keys={a["key"] for a in assets},
             internal_keys=set(US_INTERNAL.keys()),
+            # 相关性要覆盖全量大类 (不只是本次可投的那几个): 基准对比用
+            # D_HSBC_SP500 / D_GREATER_CN 算组合 Beta, 缺了这些行 Beta 会被低估。
+            corr_keys={a["key"] for a in BROAD_ASSETS},
             log=lambda msg, level="info": log_step(
                 "test_tickers", msg, level=level, log_path=args.log_path),
         )
@@ -857,6 +918,9 @@ def main():
             "tickers": parse_test_tickers(args.test_tickers),
             "assets": test_estimates,
             "skipped": [{"ticker": t, "reason": r} for t, r in test_skipped],
+            # 测试标的与各大类的相关性: 基准对比要用它把测试标的并入协方差,
+            # 否则 Beta/Alpha 会因为权重质量不足 1 而失真 (2026-10-13 修)。
+            "corr": [[i, j, float(v)] for (i, j), v in test_corr_pairs.items()],
         }
 
     if internal is not None:
