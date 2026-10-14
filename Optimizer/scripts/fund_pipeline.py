@@ -262,7 +262,10 @@ def load_pipeline(work_dir, max_age_hours=12.0):
 
 
 def filter_available_assets(assets, avail_funds, warnings, hsbc_status=None):
-    """按天天基金口径过滤可投大类; 与汇丰搜索易口径冲突时显式提示, 强制采信天天基金。"""
+    """按实时申赎状态过滤可投大类（以申赎状态数据源为准，在售列表仅作兜底）。
+
+    提示只讲"这只基金能不能买"（结果页不点名数据源，2026-10-14 用户定稿）。
+    """
     kept = []
     for a in assets:
         code = a.get("fund_code")
@@ -272,15 +275,15 @@ def filter_available_assets(assets, avail_funds, warnings, hsbc_status=None):
         info = avail_funds.get(code)
         hsbc = (hsbc_status or {}).get(code)
         if info is None:
-            msg = f"基金 {a['name']}（{code}）未在天天基金校验结果中，已剔除。"
+            msg = f"基金 {a['name']}（{code}）没有实时申赎状态，已剔除"
             if hsbc is not None and hsbc.get("open", True):
-                msg += f"（汇丰搜索易显示{hsbc.get('status', '开放')}；两源冲突，以天天基金口径为准）"
-            warnings.append(msg)
+                msg += "（在售列表显示可买，但以申赎状态口径为准）"
+            warnings.append(msg + "。")
             continue
         if not info.get("open", False):
-            msg = f"基金 {a['name']}（{code}）天天基金状态为 {info.get('status', '未知')}，已剔除"
+            msg = f"基金 {a['name']}（{code}）当前状态为 {info.get('status', '未知')}，已剔除"
             if hsbc is not None and hsbc.get("open", True):
-                msg += "（汇丰搜索易显示开放申购；两源冲突，以天天基金口径为准）"
+                msg += "（在售列表显示可买，但以申赎状态口径为准）"
             warnings.append(msg + "。")
             continue
         kept.append(a)

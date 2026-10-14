@@ -43,7 +43,7 @@ bash scripts/build_app.sh --with-venv  # 额外打包 Python venv（优化器 si
 
 ## CLI 命令（pm-cli）
 ```
-pm-cli extract [portfolio.numbers]                 # 从 .numbers 提取
+pm-cli extract <表格文件路径>                        # 从外部表格提取
 pm-cli import [db] [extract.json]                     # 导入持仓到 SQLite
 pm-cli refresh [db] [keys...]                         # 抓行情落库
 pm-cli optimize [extract.json] [--total-assets N]     # 运行优化器

@@ -8,15 +8,19 @@
 三个类别
 --------
 - **broad 宽基/大类**：宽基被动指数、债券、货币、黄金、商品、大中华 INDEX 桶…
-    μ = clamp(0.5×历史年化 + 0.5×先验, 0%, 20%)；σ = max(历史年化波动, 写死下限)，**无上限**
+    μ = clamp(0.5×历史年化 + 0.5×先验, 0%, 20%)；σ = 历史年化波动（**无下限、无上限**）
     历史窗口 = **全历史**
 - **strategy 策略指数**：smart beta / 因子 / 主题：红利低波、价值、动量、高股息、恒生科技、
     REIT、缓冲期权…
-    μ = clamp(0.67×历史年化 + 0.33×先验, −5%, 30%)；σ = max(历史, 写死下限)，无上限
+    μ = clamp(0.67×历史年化 + 0.33×先验, −5%, 30%)；σ = 历史年化波动（无下限、无上限）
     历史窗口 = **20 年**（取不到那么长就用可得全历史）
 - **active 个股/主动基金**：单只股票、主动管理基金
-    μ = clamp(1.00×历史年化, −10%, 40%)，**不使用先验**；σ = 历史年化波动，**不设下限**，无上限
+    μ = clamp(1.00×历史年化, −10%, 40%)，**不使用先验**；σ = 历史年化波动
     历史窗口 = **10 年**（取不到那么长就用可得全历史）
+
+σ **没有人工下限**（2026-10-14 用户定稿，此前 broad/strategy 有一张人工下限表）：
+历史波动多低就是多低——人工下限会系统性地把「真实低波资产」抬成「中等波资产」，
+并让过短的样本看起来比实际更温和。样本不足的问题改用「长历史代理」解决（见 PROXY_MAP）。
 
 特例
 ----
@@ -28,9 +32,9 @@
 | 情况 | broad/strategy | active |
 |---|---|---|
 | 有写死 + 有行情 | 按上表混合 | 100% 历史 |
-| 有写死 + 无行情 | 用写死值（μ=先验、σ=下限）并报警 | — |
+| 有写死 + 无行情 | 用写死值（μ/σ 都写死）并报警 | — |
 | 无写死 + 有行情 | 用纯历史并报警 | 100% 历史 |
-| 无写死 + 无行情 | 丢弃并报警 | 丢弃并报警 |
+| 无写死 + 无行情 | 丢弃并报警（不再编造 σ） | 丢弃并报警 |
 
 其它约定
 --------
@@ -48,7 +52,6 @@ CLASS_RULES = {
         "mu_lo": 0.00,
         "mu_hi": 0.20,
         "window_years": None,          # None = 全历史
-        "use_vol_floor": True
     },
     "strategy": {
         "label": "策略指数",
@@ -56,7 +59,6 @@ CLASS_RULES = {
         "mu_lo": -0.05,
         "mu_hi": 0.30,
         "window_years": 20,
-        "use_vol_floor": True
     },
     "active": {
         "label": "个股/主动",
@@ -64,7 +66,6 @@ CLASS_RULES = {
         "mu_lo": -0.10,
         "mu_hi": 0.40,
         "window_years": 10,
-        "use_vol_floor": False
     }
 }
 
@@ -89,8 +90,8 @@ SIGMA_SANITY_MAX = 1.50    # σ 超过这个值按数据毛刺处理（丢弃 + 
 CLASS_PARAM_HELP = (
     "标的类别：broad=宽基/大类（预期收益 50% 历史 + 50% 人工先验）、"
     "strategy=策略指数（67% 历史 + 33% 人工先验）、active=个股/主动基金（100% 历史，不用先验）。"
-    "类别同时决定历史窗口（全历史 / 20 年 / 10 年）、μ 截断线（0~20% / −5~30% / −10~40%）"
-    "以及是否套用人工波动率下限（前两类套、个股/主动不套）。默认 active。"
+    "类别同时决定历史窗口（全历史 / 20 年 / 10 年）与 μ 截断线（0~20% / −5~30% / −10~40%）；"
+    "σ 一律取历史年化波动，没有人工下限。默认 active。"
     "\n"
     "债券大类（国开债、长久期美债）的预期收益不用写死值，而是动态公式："
     "先验 =（5 年远期收益回归 μ + 当期同久期国债收益率）/2；回归自变量固定为 10 年期国债收益率，"
@@ -108,7 +109,7 @@ ASSET_CLASS = {
     "D_CN_QDII_STOCK": "broad",       # QDII 全球股票（宽基股票大类）
     "D_CN_QDII_STABLE": "broad",      # QDII 稳健配置（债性）
     "D_CN_QDII_COMMODITY": "broad",   # QDII 商品/原油（商品）
-    "D_GREATER_CN": "broad",          # 大中华权益一级大类（无行情 → 走写死兜底）
+    "D_GREATER_CN": "broad",          # 大中华权益一级大类（沪深+港股混合，取恒生指数长历史作为代表）
     "O_GOLD": "broad",                # 黄金
     "O_BTC": "broad",                 # 比特币（截断线特例）
     "O_US_CORE": "broad",             # 美国核心权益（聚合项，运行时用内部持仓动态合成）
@@ -143,8 +144,8 @@ ASSET_CLASS = {
     "MIXED": "active",                # 主动混合
 }
 
-# ---------------------------------------------------------------- 写死的先验与下限
-# 只保留 broad / strategy（active 类不用先验、不用下限）。
+# ---------------------------------------------------------------- 写死的先验
+# 只保留 broad / strategy（active 类不用先验）。
 # 缺省先验 0.07 用于"表里没写但需要先验"的 broad/strategy 标的。
 # ---------------------------------------------------------------------------
 # 债券大类先验：**动态公式**（2026-10-13 用户定稿，不是写死数值）
@@ -329,24 +330,9 @@ PRIOR = {
     "SPMO": 0.095, "VTV": 0.085,
 }
 
-# 波动率下限：仅在"历史波动低于下限"时生效（防止 3 年温和样本低估风险）。
-VOL_FLOOR = {
-    # 大类 / 债券 / 黄金 / 商品
-    "D_HSBC_SP500": 0.15, "D_HSBC_CDB": 0.02, "D_CN_CREDIT_BOND": 0.04,
-    "D_CN_QDII_STOCK": 0.15, "D_CN_QDII_STABLE": 0.05, "D_CN_QDII_COMMODITY": 0.20,
-    "D_GREATER_CN": 0.20, "O_GOLD": 0.15, "O_BTC": 0.40, "O_HYLB": 0.08,
-    "O_JP_EQ": 0.15, "O_SG_EQ": 0.13, "O_US_TLT": 0.10, "O_US_REIT": 0.15,
-    "O_US_CORE": 0.15,
-    # 美股内部
-    "SPLG": 0.15, "VTV": 0.13, "SPMO": 0.18, "BUFFER": 0.08,
-    # 日本内部
-    "1364": 0.15, "1698": 0.13, "2516": 0.18, "1477": 0.10, "1478": 0.12,
-    "1490": 0.10, "2529": 0.14,
-    # 香港内部
-    # 大中华内部
-    "CSI300": 0.17, "DIVLOWVOL": 0.14, "DIVLOWVOL100": 0.14, "INDEX": 0.15,
-    "HK_BROAD": 0.20, "HK_DIV": 0.14, "HK_TECH": 0.25
-}
+# 波动率：**没有人工下限表**（2026-10-14 用户定稿）。σ = 窗口内历史年化波动，
+# 只在超过 SIGMA_SANITY_MAX 时按数据毛刺丢弃。样本太短的问题靠长历史代理解决
+# （见 market_data.PROXY_MAP），不再靠"抬到某个下限"掩盖。
 
 # ---------------------------------------------------------------- 规则函数
 
@@ -437,30 +423,22 @@ def build_vol(key, vol_hist):
     """按标的类别构造 σ，返回 (vol, note)。见 vol_for_class 的 note 说明。"""
     if key in SPECIAL_FIXED:
         return SPECIAL_FIXED[key]["vol"], "fixed"
-    floor = VOL_FLOOR.get(key) if asset_class(key) in ("broad", "strategy") else None
-    return vol_for_class(asset_class(key), vol_hist, floor, key)
+    return vol_for_class(asset_class(key), vol_hist, key)
 
 
-def vol_for_class(cls, vol_hist, floor=None, key=None):
-    """按类别构造 σ = max(历史年化波动, 人工下限)（active 不设下限），返回 (vol, note)。
+def vol_for_class(cls, vol_hist, key=None):
+    """按类别构造 σ = 窗口内历史年化波动（**没有人工下限**），返回 (vol, note)。
 
-    note: None / "vol_floor"（历史低于人工下限，取了下限）/
-    "no_floor_written"（该类本应有下限但没提供）/ "no_data" / "sigma_glitch"。
+    note: None（历史值直接用）/ "no_data"（没有行情，构造不出 σ → 调用方丢弃）/
+    "sigma_glitch"（历史波动超过 SIGMA_SANITY_MAX，按数据毛刺丢弃）/ "unregistered"。
     """
     rule = rule_for_class(cls, key)
     if rule is None:
         return None, "unregistered"
-    floor = floor if rule["use_vol_floor"] else None
     if vol_hist is None:
-        if floor is None:
-            return None, "no_data"
-        return floor, "prior_fallback"
+        return None, "no_data"
     if vol_hist > SIGMA_SANITY_MAX:
         return None, "sigma_glitch"
-    if rule["use_vol_floor"] and floor is None:
-        return vol_hist, "no_floor_written"
-    if floor is not None:
-        return max(vol_hist, floor), ("vol_floor" if vol_hist < floor else None)
     return vol_hist, None
 
 
@@ -479,9 +457,8 @@ def describe_class(cls):
         blend = "100% 历史年化（不用先验）"
     else:
         blend = f"{w:.0%} 历史年化 + {1 - w:.0%} 人工先验"
-    floor = "套用人工波动率下限" if r["use_vol_floor"] else "不设波动率下限"
     return (f"{r['label']}：μ = {blend}，截断 {r['mu_lo']:+.0%}~{r['mu_hi']:.0%}，"
-            f"历史窗口 {win}；σ = max(历史, 下限) 中的「{floor}」，无上限")
+            f"历史窗口 {win}；σ = 历史年化波动（无人工下限、无上限）")
 
 
 def audit_table():
@@ -493,22 +470,16 @@ def audit_table():
         if cls == "active":
             if key in PRIOR:
                 errors.append(f"{key}: active 类不应有先验")
-            if key in VOL_FLOOR:
-                errors.append(f"{key}: active 类不应有波动率下限")
         else:
             if key not in PRIOR:
                 errors.append(f"{key}: {cls} 类缺少先验（可用缺省 {DEFAULT_PRIOR:.0%}，但建议显式登记）")
     for key in PRIOR:
         if key not in ASSET_CLASS:
             errors.append(f"{key}: 先验表里的 key 未登记类别")
-    for key in VOL_FLOOR:
-        if key not in ASSET_CLASS:
-            errors.append(f"{key}: 波动率下限表里的 key 未登记类别")
     counts = {}
     for cls in ASSET_CLASS.values():
         counts[cls] = counts.get(cls, 0) + 1
-    stats = {"assets": len(ASSET_CLASS), "prior": len(PRIOR), "vol_floor": len(VOL_FLOOR),
-             "by_class": counts}
+    stats = {"assets": len(ASSET_CLASS), "prior": len(PRIOR), "by_class": counts}
     return errors, stats
 
 
@@ -516,7 +487,7 @@ if __name__ == "__main__":
     errs, stats = audit_table()
     print(f"标的 {stats['assets']} 个：",
           "、".join(f"{CLASS_RULES[c]['label']} {n}" for c, n in sorted(stats['by_class'].items())))
-    print(f"先验 {stats['prior']} 条，波动率下限 {stats['vol_floor']} 条")
+    print(f"先验 {stats['prior']} 条（σ 无人工下限表）")
     for cls in ("broad", "strategy", "active"):
         print(" -", describe_class(cls))
     print("\n自检:", "通过" if not errs else f"{len(errs)} 个问题")

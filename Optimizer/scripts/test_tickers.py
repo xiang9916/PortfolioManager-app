@@ -6,10 +6,10 @@
   * broad    宽基/大类   : μ = 0.5×历史 + 0.5×先验，截断 0%~20%，窗口全历史
   * strategy 策略指数     : μ = 0.67×历史 + 0.33×先验，截断 −5%~30%，窗口 20 年
   * active   个股/主动    : μ = 100% 历史，截断 −10%~40%，窗口 10 年
-- **测试标的没有人工先验/下限**（用户临时输入的代码不在表里），因此：
+- **测试标的没有人工先验**（用户临时输入的代码不在表里），因此：
   * broad/strategy 只能退化成"纯历史年化"（会显式报警，口径与组合内同类标的不同）
   * active 天然就是纯历史，不需要先验
-- σ = 历史年化波动（broad/strategy 无人工下限可套）；σ > 150% 视为数据毛刺 → 丢弃
+- σ = 历史年化波动（**没有人工下限**）；σ > 150% 视为数据毛刺 → 丢弃
 - 相关性 = 与各宽基大类代表序列的日收益皮尔逊相关 (重叠 < 180 天回退 0.30);
   多个测试标的之间直接互相计算
 
@@ -121,7 +121,7 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
         if mu_hist is None or vol_hist is None:
             skipped.append((ticker, "收益/波动估算失败 (数据无效)"))
             continue
-        # 测试标的没有登记先验/下限：broad/strategy 会退化成纯历史（note 里带出来，调用方报警）
+        # 测试标的没有登记先验：broad/strategy 会退化成纯历史（note 里带出来，调用方报警）
         mu, mu_note = AC.mu_for_class(test_class, mu_hist)
         vol, vol_note = AC.vol_for_class(test_class, vol_hist)
         if mu is None or vol is None:

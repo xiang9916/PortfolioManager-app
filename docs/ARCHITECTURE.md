@@ -47,9 +47,9 @@ pm-cli (CLI executableTarget) ──▶ 复用 PortfolioCore (headless 验证/�
 
 ## 数据流
 
-### 主路径：.numbers → 优化 → 结果
+### 主路径：外部表格 → 优化 → 结果
 ```
-Finance/portfolio.numbers
+<外部表格文件>
         │ extract_portfolio.py (子进程)
         ▼
 tmp/extract_app.json ──▶ optimize_portfolio.py ──▶ JSON 结果

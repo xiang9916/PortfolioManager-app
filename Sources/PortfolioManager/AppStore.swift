@@ -53,7 +53,7 @@ public enum AppPaths {
         return "/usr/bin/env python3"
     }
 
-    /// Extracted .numbers state (input to the optimizer).
+    /// Extracted workbook state (input to the optimizer).
     public static func extractJSONURL() -> URL {
         if isBundled { return supportDir().appendingPathComponent("extract_app.json") }
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -234,7 +234,7 @@ public final class AppStore {
     }
 
     /// Delete all assets (cascade holdings/prices/quotes) and snapshots.
-    /// Used for one-time purge of seeded .numbers data.
+    /// Used for one-time purge of seeded (imported) data.
     public func purgeAllData() {
         do {
             try db.exec("DELETE FROM quotes")
@@ -671,7 +671,7 @@ public final class AppStore {
     // MARK: 能力1 — 比较基准 (沪深300 + 标普500 加权, 与优化器基准一致)
 
     /// 境内/境外池权重 — 来自资产总览的实时统计 (池由每个标的的**市场**派生),
-    /// 不再使用 .numbers 提取文件的预填比例; 无持仓数据时回退 50/50.
+    /// 不再使用提取文件的预填比例; 无持仓数据时回退 50/50.
     /// 池只有境内/境外两种, 因此两者必然归一 (旧的「跨池余量」已随 cross 一起废除)。
     public var livePoolWeights: (domestic: Double, overseas: Double) {
         guard let alloc = allocation, alloc.totalValue > 0 else { return (0.5, 0.5) }
@@ -731,11 +731,11 @@ public final class AppStore {
     // MARK: 能力2 — optimizer
 
     /// Copy of extract_app.json with pool stats + us_equity + domestic_holdings + rf
-    /// overwritten by LIVE 资产总览/资产明细 statistics — 优化器不再使用 .numbers 冻结快照.
+    /// overwritten by LIVE 资产总览/资产明细 statistics — 优化器不再使用提取时的冻结快照.
     /// - 境内/境外权重 = 占总市值比例 (未归一化); 池由每个标的的市场派生, 只有两种, 必然归一.
-    /// - us_equity.holdings = 实时美股持仓 (替代 .numbers 导入日冻结值 → O_US_CORE 聚合 mu/vol + stage2 优先级).
+    /// - us_equity.holdings = 实时美股持仓 (替代导入日冻结值 → O_US_CORE 聚合 mu/vol + stage2 优先级).
     /// - domestic_holdings = 实时境内基金持仓 (动态锚定, 替代 params.py 写死的 fund_code).
-    /// - rf = 池比例加权中美10年国债收益率 (替代 params.py 写死的 0.025).
+    /// - rf = 池比例加权中美10年国债收益率 (params.py 里不写死利率，取不到就按 0 计).
     private func liveExtractURL() -> URL? {
         let src = AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: src.path),
@@ -755,7 +755,7 @@ public final class AppStore {
             obj["overseas_weight"] = ovW
         }
 
-        // us_equity: live 美股持仓 (替代 .numbers 冻结快照).
+        // us_equity: live 美股持仓 (替代导入时的冻结快照).
         let assets = (try? db.fetchAssets()) ?? []
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let usRows = perspectives.filter { $0.assetClass == "us_equity" && $0.valueCny > 0 }
@@ -772,7 +772,7 @@ public final class AppStore {
             }
             obj["us_equity"] = ["total_value": totalUs, "holdings": holdings] as [String: Any]
         }
-        // 美股为空时跳过覆盖 → 保留 .numbers 原值 (Python us_core_params 空权重会 div-zero, 不可覆盖为空).
+        // 美股为空时跳过覆盖 → 保留原值 (Python us_core_params 空权重会 div-zero, 不可覆盖为空).
 
         // domestic_holdings: live 境内基金持仓 (动态锚定, 替代 params.py 写死的 fund_code).
         let domFunds: [[String: Any]] = perspectives.filter { $0.pool == .domestic }
@@ -803,7 +803,7 @@ public final class AppStore {
         let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: extract.path) else {
             optimizeError = "未找到优化器输入文件 extract_app.json：\n\(extract.path)\n\n"
-                + "请先用 .numbers 生成提取文件（终端执行 pm-cli extract \"portfolio.numbers\"），"
+                + "请先生成提取文件（终端执行 pm-cli extract <表格文件路径>），"
                 + "再把生成的 extract_app.json 放到上面这个目录后重试。"
             return
         }
@@ -852,13 +852,13 @@ public final class AppStore {
     /// 不影响 lastOptimization 与资产总览数据; 仅 optimization_runs 留痕
     /// (paramsDesc 带 test=...)。与普通优化互斥。
     /// testClass: 标的类别 broad / strategy / active（见 asset_classes.py 的口径说明），
-    /// 决定 μ 的构造方式、历史窗口与是否套用人工波动率下限；缺省 active。
+    /// 决定 μ 的构造方式与历史窗口（σ 一律取历史年化波动，无人工下限）；缺省 active。
     public func runTestOptimization(tickers: [String], testClass: String = "active") {
         guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }
         let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
         guard FileManager.default.fileExists(atPath: extract.path) else {
             testOptimizeError = "未找到优化器输入文件 extract_app.json：\n\(extract.path)\n\n"
-                + "请先用 .numbers 生成提取文件（终端执行 pm-cli extract \"portfolio.numbers\"），"
+                + "请先生成提取文件（终端执行 pm-cli extract <表格文件路径>），"
                 + "再把生成的 extract_app.json 放到上面这个目录后重试。"
             return
         }

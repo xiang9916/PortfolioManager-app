@@ -98,10 +98,10 @@ def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
             cat = pool_meta["categories"].get(a["key"])
             if cat:
                 warnings.append(
-                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选在天天基金"
-                    f"全部为暂停申购/校验失败，已剔除。")
+                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选当前均不可申购，"
+                    f"已剔除。")
             else:
-                warnings.append(f"境内大类 {a['name']}（{a['key']}）在汇丰在售池中无候选基金，已剔除。")
+                warnings.append(f"境内大类 {a['name']}（{a['key']}）没有在售候选基金，已剔除。")
             continue
         item = dict(a)
         if item["key"] == "O_US_CORE":

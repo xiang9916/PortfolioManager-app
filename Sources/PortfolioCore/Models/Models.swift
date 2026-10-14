@@ -237,12 +237,12 @@ public struct TestAssetEstimate: Codable, Hashable {
     public let vol: Double
     public let nDays: Int
     /// 测试标的的类别：broad（宽基/大类）/ strategy（策略指数）/ active（个股、主动）。
-    /// 类别决定 μ 的构造、历史窗口、是否套人工波动率下限（旧结果文件无此字段 → nil）。
+    /// 类别决定 μ 的构造与历史窗口（旧结果文件无此字段 → nil）。
     public let testClass: String?
     public let windowYears: Int?
     /// μ 的口径备注：history_only（无先验，退化为纯历史）/ prior_fallback / fixed。
     public let muNote: String?
-    /// σ 的口径备注：no_floor_written（本应套下限但没登记）/ vol_floor（取到下限）/ history。
+    /// σ 的口径备注：history（历史年化波动；σ 已无人工下限）。
     public let volNote: String?
     public let muHist: Double?
     public let volHist: Double?

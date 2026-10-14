@@ -18,9 +18,9 @@ public enum SidecarError: Error, CustomStringConvertible {
     }
 }
 
-/// Runs the vendored Python scripts (numbers extraction / optimization) as a subprocess.
-/// This is the single integration point reused by .numbers import (Phase 1) and the
-/// optimizer (Phase 6 / capability 2).
+/// Runs the vendored Python scripts (workbook extraction / optimization) as a subprocess.
+/// This is the single integration point reused by the external-workbook import (Phase 1)
+/// and the optimizer (Phase 6 / capability 2).
 public final class PythonSidecar {
     public let interpreterPath: String
     public let scriptsDir: URL

@@ -200,7 +200,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
                     cap_map=None):
     """Optimize internal US equity weights with total US core weight fixed and no per-ticker caps."""
     # Always consider the full US internal candidate pool, even for tickers the
-    # Numbers file does not currently hold. Keeping file tickers first preserves
+    # extract file does not currently hold. Keeping file tickers first preserves
     # current-holding priority in tie cases, but the optimizer may add back
     # UNH/GOOG/VTV etc. if they improve the risk-adjusted result.
     file_tickers = [h["ticker"] for h in extract["us_equity"]["holdings"] if h["ticker"] in US_INTERNAL]
@@ -719,11 +719,11 @@ def main():
         help="联网管线临时文件目录 (hsbc_funds.json / availability.json)；缺省用系统临时目录共享目录",
     )
     parser.add_argument("--check-timeout", type=float, default=300.0,
-                        help="天天基金状态校验子进程总超时秒数")
+                        help="申赎状态校验子进程总超时秒数")
     parser.add_argument("--hsbc-timeout", type=float, default=60.0,
-                        help="基金搜索易抓取单请求超时秒数")
+                        help="基金在售列表抓取单请求超时秒数")
     parser.add_argument("--request-timeout", type=float, default=12.0,
-                        help="天天基金单只请求超时秒数")
+                        help="申赎状态单只请求超时秒数")
     parser.add_argument("--json", dest="out_path", help="Write detailed JSON output to file")
     parser.add_argument("--result-json", dest="result_path", help="Write clean summary JSON to file")
     parser.add_argument("--log", dest="log_path", help="JSONL step log path")
@@ -741,15 +741,20 @@ def main():
         extract = json.load(f)
     log_step("load_extract", f"已加载提取结果 total={extract.get('total_value')}", log_path=args.log_path)
 
-    # RF (无风险利率) 动态覆盖: App 侧按池比例加权中美10年国债收益率算出 rf,
-    # 通过 extract_live.json 的 "rf" 字段传入, 替代 params.py 写死的 0.025.
+    # RF (无风险利率) 动态注入: App 侧按池比例加权中美10年国债收益率算出 rf,
+    # 通过 extract_live.json 的 "rf" 字段传入（params.py 里不写死利率）。
     # RF 是模块级全局, 同 TARGET_RETURN 模式: global 重绑后约束 lambda 生效.
     global RF
     if extract.get("rf") is not None:
         RF = float(extract["rf"])
         log_step("rf", f"无风险利率覆盖为 {RF:.2%} (动态中美10年国债加权)", log_path=args.log_path)
+    else:
+        log_step("rf", "提取文件未带 rf，本次夏普按 rf=0 计算", log_path=args.log_path)
 
-    warnings = list(extract.get("warnings", []))
+    # 提取阶段的提示由 `pm-cli extract` 当场打印；**不再**从提取文件里转发到结果页 ——
+    # 提取文件是缓存，转发的旧提示会在改口径后长期滞留（2026-10-14 实测：去掉的两条
+    # 资金池口径提示仍从本地缓存的 extract_app.json 里冒出来）。
+    warnings = []
     CAP_HITS.clear()
     # 参数口径的提示（缺行情用人工兜底、σ 毛刺丢弃、相关性兜底…）一并带给结果页
     warnings.extend(CALIBRATION_WARNINGS)
@@ -780,7 +785,7 @@ def main():
         )
     except RuntimeError as exc:
         print(json.dumps(
-            {"error": "联网管线失败（基金搜索易/天天基金）", "detail": str(exc)},
+            {"error": "联网管线失败（基金在售/申赎状态数据源）", "detail": str(exc)},
             ensure_ascii=False))
         sys.exit(2)
     avail_funds = availability["funds"]
@@ -792,14 +797,13 @@ def main():
     # (组内顺序 = 锚定优先 → 费率升序 → A/C 备选垫后; 无数据的互认基金已按汇丰口径兜底)
     hsbc_pool, pool_meta = build_open_pool_from_status(
         hsbc_funds_live, availability, live_anchors=live_anchors)
-    warnings.append(
-        f"基金搜索易实时抓取：在售 {hsbc_data.get('total_count', '?')} 只，"
-        f"开放申购 {hsbc_data.get('open_count', '?')} 只。")
+    # 基金数据源的抓取/校验计数只写进运行日志（结果页不再展示管线遥测，2026-10-14 用户定稿）
     stats = availability.get("stats", {})
-    warnings.append(
-        f"天天基金实时校验（分组早停）：实际请求 {stats.get('checked', len(avail_funds))} 只，"
-        f"开放 {availability.get('open_count', '?')} 只，"
-        f"汇丰口径兜底 {stats.get('hsbc_fallback', 0)} 只。")
+    log_step("pipeline_counts",
+             f"在售 {hsbc_data.get('total_count', '?')} 只 / 开放申购 {hsbc_data.get('open_count', '?')} 只；"
+             f"实时校验请求 {stats.get('checked', '?')} 只 / 开放 {availability.get('open_count', '?')} 只 / "
+             f"兜底 {stats.get('hsbc_fallback', 0)} 只",
+             log_path=args.log_path)
     log_step("build_open_pool",
              f"开放基金池：{len(hsbc_pool)} 个类别、代表基金 {pool_meta['kept']} 只"
              f"（{stats.get('checked', '?')} 只候选实时校验, 耗时 {availability.get('elapsed_seconds', '?')}s）",
@@ -819,10 +823,10 @@ def main():
             cat = pool_meta["categories"].get(a["key"])
             if cat:
                 warnings.append(
-                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选在天天基金"
-                    f"全部为暂停申购/校验失败，已从第一阶段剔除。")
+                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选当前均不可申购，"
+                    f"已从第一阶段剔除。")
             else:
-                warnings.append(f"境内大类 {a['name']}（{a['key']}）在汇丰在售池中无候选基金，已从第一阶段剔除。")
+                warnings.append(f"境内大类 {a['name']}（{a['key']}）没有在售候选基金，已从第一阶段剔除。")
             continue
         item = dict(a)
         if a["key"] == "O_US_CORE":
@@ -834,7 +838,7 @@ def main():
     if not any(a["pool"] == "domestic" for a in assets):
         print(
             json.dumps(
-                {"error": "没有通过天天基金校验的境内基金", "warnings": warnings},
+                {"error": "没有可申购的境内基金", "warnings": warnings},
                 ensure_ascii=False,
             )
         )
@@ -857,7 +861,7 @@ def main():
         )
         for t, reason in test_skipped:
             warnings.append(f"测试标的 {t} 已跳过: {reason}")
-        # 测试标的没有登记先验/下限：broad/strategy 会退化成纯历史，必须显式说明口径不同
+        # 测试标的没有登记先验：broad/strategy 会退化成纯历史，必须显式说明口径不同
         for e in test_estimates:
             if e.get("mu_note") == "history_only":
                 warnings.append(
@@ -866,10 +870,6 @@ def main():
                     f"μ={e['mu']:.2%}（组合内同类标的的口径是"
                     f"{AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 历史 + "
                     f"{1-AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 先验，两者不可直接横比）。")
-            if e.get("vol_note") == "no_floor_written":
-                warnings.append(
-                    f"测试标的 {e['ticker']} 按「{AC.CLASS_RULES[e['test_class']]['label']}」本应套用人工波动率下限，"
-                    f"但新标的没有登记下限，本次直接用历史波动 σ={e['vol']:.2%}。")
         if test_assets:
             assets = assets + test_assets
             for a in test_assets:
@@ -888,6 +888,14 @@ def main():
                 {"error": "所有测试标的均不可用", "detail": detail, "warnings": warnings},
                 ensure_ascii=False))
             sys.exit(3)
+
+    # 缺 μ/σ 的标的（校准文件里没有它、也没有写死值可用）不能进优化：显式剔除并报警，
+    # 不静默用 0 顶上（0 波动会直接霸占权重）。σ 已无人工下限，所以这类标的只能缺席。
+    unusable = [a["key"] for a in assets if a.get("mu") is None or a.get("vol") is None]
+    if unusable:
+        warnings.append(
+            "以下标的取不到 μ/σ（校准文件里没有、也没有写死值），本次不参与优化: " + "、".join(unusable))
+        assets = [a for a in assets if a.get("mu") is not None and a.get("vol") is not None]
 
     keys = [a["key"] for a in assets]
     mu = np.array([a["mu"] for a in assets])

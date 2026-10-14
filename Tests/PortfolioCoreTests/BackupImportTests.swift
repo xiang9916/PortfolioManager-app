@@ -81,7 +81,7 @@ final class BackupImportTests: XCTestCase {
         let db = try makeDB("export.db")
         try db.upsertAssets([
             Asset(key: "B", name: "second", pool: .domestic, currency: "CNY",
-                  source: "numbers", feeRate: 0.0012, sortOrder: 2),
+                  source: "external", feeRate: 0.0012, sortOrder: 2),
             Asset(key: "A", name: "first", ticker: "A", market: .us,
                   assetClass: "us_equity", pool: .overseas, currency: "USD", sortOrder: 1),
         ])
@@ -95,7 +95,7 @@ final class BackupImportTests: XCTestCase {
         XCTAssertEqual(rows.map(\.key), ["A", "B"], "manual sort_order must survive the roundtrip")
         XCTAssertEqual(rows.first?.sortOrder, 1)
         let b = rows.first { $0.key == "B" }
-        XCTAssertEqual(b?.source, "numbers")
+        XCTAssertEqual(b?.source, "external")
         XCTAssertEqual(b?.feeRate ?? 0, 0.0012, accuracy: 1e-9)
     }
 

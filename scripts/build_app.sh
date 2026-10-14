@@ -81,7 +81,7 @@ if [ -d "Optimizer/data" ]; then
   cp -R "Optimizer/data" "${BUNDLE}/Contents/Resources/Optimizer/data"
 fi
 
-# One-time purge marker: if present in bundle, app purges all numbers-sourced
+# One-time purge marker: if present in bundle, app purges all previously imported
 # assets on first launch (only once per install, gated by .purge_done in App Support).
 cp "Resources/purge_request.txt" "${BUNDLE}/Contents/Resources/purge_request.txt"
 

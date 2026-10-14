@@ -201,6 +201,9 @@ SOURCES = {
     "D_CN_QDII_STOCK": ("fund", "000043"),
     "D_CN_QDII_STABLE": ("fund", "017970"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
+    # 大中华权益一级大类（桶内＝沪深300/红利低波/主动/港股混合，没有自己的行情）
+    # → 用恒生指数长历史作为代表（2026-10-14 用户定稿）
+    "D_GREATER_CN": ("yahoo", "^HSI"),
     "O_US_CORE": ("yahoo", "SPY"),
     "O_BTC": ("yahoo", "BTC-USD"),
     "O_HYLB": ("yahoo", "HYLB"),
@@ -254,6 +257,7 @@ PROXY_MAP = {
     "D_CN_QDII_STOCK": ("yahoo", "^GSPC"),
     "D_CN_QDII_STABLE": ("yahoo", "BND"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
+    "D_GREATER_CN": None,                      # 代表序列本身就是恒指，无需再配代理
     "O_US_CORE": ("yahoo", "^GSPC"),
     "O_BTC": None,
     "O_HYLB": None,

@@ -245,10 +245,6 @@ public struct OptimizationResultView: View {
             if let h = e.muHist { parts.append("历史年化 μ \(pct(h))") }
         }
         switch e.volNote {
-        case "no_floor_written":
-            parts.append("本类在册时套人工波动率下限，此测试标的未登记下限 → 直接用历史波动")
-        case "vol_floor":
-            parts.append("历史波动低于人工下限，σ 取下限")
         default:
             if let h = e.volHist, e.muNote != "prior_fallback" { parts.append("历史波动 σ \(pct(h))") }
         }
@@ -290,12 +286,12 @@ private struct NewTickerTestInputView: View {
                         .tag("broad")
                 }
                 .pickerStyle(.radioGroup)
-                Text("类别决定三件事：① 预期收益怎么估（先验占比不同）；② 历史窗口多长；③ 是否套用人工波动率下限。\n个股 / 主动类还额外受「单个标的组合权重 ≤ 10%」约束（触顶会在结果里提示）。")
+                Text("类别决定两件事：① 预期收益怎么估（先验占比不同）；② 历史窗口多长。σ 一律取历史年化波动（没有人工下限）。\n个股 / 主动类还额外受「单个标的组合权重 ≤ 10%」约束（触顶会在结果里提示）。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("测试标的一律没有人工先验与波动率下限（只有登记在册的标的才有），所以选「宽基 / 策略」时预期收益会退化为纯历史年化，并给出提示——这与组合内同类标的的口径不同，不能直接横比。相关性 = 与各类资产代理指数的历史相关。6 位纯数字按境内基金（天天基金净值）处理并参与境内池约束；其余走 Yahoo 代码（美股 / 港股 0700.HK / 日股 7203.T / A股 600519.SS）。已在优化池内的标的会被跳过。")
+            Text("测试标的一律没有人工先验（只有登记在册的标的才有），所以选「宽基 / 策略」时预期收益会退化为纯历史年化，并给出提示——这与组合内同类标的的口径不同，不能直接横比。相关性 = 与各类资产代理指数的历史相关。6 位纯数字按境内基金（天天基金净值）处理并参与境内池约束；其余走 Yahoo 代码（美股 / 港股 0700.HK / 日股 7203.T / A股 600519.SS）。已在优化池内的标的会被跳过。")
                 .font(.caption).foregroundStyle(.secondary)
             if store.isTestOptimizing {
                 HStack(spacing: 8) {

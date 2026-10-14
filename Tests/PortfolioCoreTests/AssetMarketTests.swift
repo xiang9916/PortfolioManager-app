@@ -182,15 +182,15 @@ final class AssetMarketTests: XCTestCase {
         // 绕过 upsertAssets，直接写入旧版数据（pool='cross'、market 是自由文本）
         try db.exec("""
         INSERT INTO assets(key, name, ticker, market, asset_class, pool, currency, source, fee_rate, sort_order)
-        VALUES('GOOG','谷歌','GOOG','nasdaq','us_equity','cross','USD','numbers',0,0)
+        VALUES('GOOG','谷歌','GOOG','nasdaq','us_equity','cross','USD','external',0,0)
         """)
         try db.exec("""
         INSERT INTO assets(key, name, ticker, market, asset_class, pool, currency, source, fee_rate, sort_order)
-        VALUES('001234.CN_FUND','QDII','001234.CN_Fund','','greater_cn_equity','cross','CNY','numbers',0,1)
+        VALUES('001234.CN_FUND','QDII','001234.CN_Fund','','greater_cn_equity','cross','CNY','external',0,1)
         """)
         try db.exec("""
         INSERT INTO assets(key, name, ticker, market, asset_class, pool, currency, source, fee_rate, sort_order)
-        VALUES('VOD.L','伦敦','VOD.L','LSE','other','overseas','GBP','numbers',0,2)
+        VALUES('VOD.L','伦敦','VOD.L','LSE','other','overseas','GBP','external',0,2)
         """)
 
         try db.normalizeAssetClassification()

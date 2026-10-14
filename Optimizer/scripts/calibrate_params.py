@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Calibrate portfolio-optimizer parameters from market data.
 
-规则（混合比例、截断线、历史窗口、波动率下限、兜底矩阵）全部定义在
+规则（混合比例、截断线、历史窗口、兜底矩阵）全部定义在
 `asset_classes.py` —— 本文件只负责取数、算历史年化收益/波动、按规则组装。
 
 Data sources:
@@ -10,7 +10,7 @@ Data sources:
 
 Method:
 - 历史窗口按类别：宽基/大类 = 全历史；策略指数 = 20 年；个股/主动 = 10 年（不足则用可得全历史）。
-- σ = 日收益标准差 × √252（窗口内），再按类别套人工下限。
+- σ = 日收益标准差 × √252（窗口内），**无人工下限**（2026-10-14 取消）。
 - 相关性 = 窗口内日收益的皮尔逊相关（共同日期 ≥180 天），不足填 0.30。
 - 见 asset_classes.py 的 docstring：三个类别各自的 μ 构造与兜底矩阵。
 
@@ -152,8 +152,11 @@ for key, (typ, sym) in sources.items():
                                     f"{type(exc).__name__}: {exc}，尝试代理源")
         best_prices, best_sym = _pick_series(key, sym, fetched, years)
         if not best_prices:
-            WARNINGS.append(f"{_label(key)}: 所有数据源都取不到行情，"
-                            + ("将用人工先验/下限兜底" if cls != "active" else "active 类无法兜底，已丢弃"))
+            if key in AC.SPECIAL_FIXED:
+                WARNINGS.append(f"{_label(key)}: 所有数据源都取不到行情，该标的另有写死值，用写死值兜底")
+            else:
+                WARNINGS.append(f"{_label(key)}: 所有数据源都取不到行情，且没有写死值可用 → 丢弃（不再参与优化）")
+                DROPPED.append(key)
             PROVENANCE[key] = {"class": cls, "window_years": years, "n_days": 0,
                                "source": None, "note": "no_history"}
             continue
@@ -161,9 +164,11 @@ for key, (typ, sym) in sources.items():
         windowed = AC.slice_window(best_prices, years)
         df = to_series(windowed)
         if df is None or len(windowed) < 30:
-            WARNINGS.append(
-                f"{_label(key)}: 行情历史不足 30 天（{best_sym}），"
-                + ("已用人工先验/下限兜底" if cls != "active" else "active 类无法兜底，已丢弃"))
+            if key in AC.SPECIAL_FIXED:
+                WARNINGS.append(f"{_label(key)}: 行情历史不足 30 天（{best_sym}），用写死值兜底")
+            else:
+                WARNINGS.append(f"{_label(key)}: 行情历史不足 30 天（{best_sym}）→ 丢弃（不再参与优化）")
+                DROPPED.append(key)
             PROVENANCE[key] = {"class": cls, "window_years": years, "n_days": len(windowed or []),
                                "source": best_sym, "note": "no_history"}
             continue
@@ -207,11 +212,9 @@ for key, (typ, sym) in sources.items():
             continue
 
         if note == "prior_fallback":
-            WARNINGS.append(f"{_label(key)}: 无行情历史，改用人工先验 μ={mu:.2%}、下限 σ={vol:.2%}")
+            WARNINGS.append(f"{_label(key)}: 无行情历史，改用人工先验 μ={mu:.2%}")
         elif note == "history_only":
             WARNINGS.append(f"{_label(key)}: 无人工先验，broad/strategy 类改用纯历史 μ={mu:.2%}（口径与其它标的不同）")
-        if vol_note == "vol_floor":
-            WARNINGS.append(f"{_label(key)}: 历史波动 {ann_vol:.2%} 低于人工下限，σ 取 {vol:.2%}")
         if note == "fixed":
             WARNINGS.append(f"{_label(key)}: 货币基金按写死值 μ=2%、σ=1%")
 
@@ -221,7 +224,7 @@ for key, (typ, sym) in sources.items():
             "mu_hist": round(ann_ret, 6), "vol_hist": round(ann_vol, 6),
             "mu": round(mu, 6), "vol": round(vol, 6),
             "note": note or "blend", "vol_note": vol_note or "history",
-            "prior": AC.prior_for(key), "vol_floor": AC.VOL_FLOOR.get(key) if AC.CLASS_RULES[cls]["use_vol_floor"] else None,
+            "prior": AC.prior_for(key),
             "prior_formula": BOND_DETAIL.get(key),
         }
         print(f"{key:22} {best_sym:12} {AC.CLASS_RULES[cls]['label']:<6} n={n:>6} "
@@ -285,8 +288,8 @@ for key, st in meta.items():
     if key in GC_KEYS:
         calib["gc_internal"][key] = entry
 
-# 没有行情的 broad/strategy 标的：这里**不写兜底值**——兜底由 params.py 在加载时
-# 用 asset_classes.py 的类别规则（μ=先验、σ=下限）补齐，避免两套写死值并存。
+# 没有行情的标的：这里**不写兜底值**——params.py 加载时只对"有写死值"的标的
+# （SPECIAL_FIXED，如货币基金）兜底，其余一律按缺失处理并报警，避免编造 σ。
 for key, cls in AC.ASSET_CLASS.items():
     if key in calib["assets"]:
         continue

@@ -26,7 +26,7 @@ struct ExtractedHolding: Codable {
     let weight: Double?
 }
 
-/// Maps a .numbers table name to an **asset class**.
+/// Maps an external workbook's table name to an **asset class**.
 /// 池归属不再由表名硬编码决定：它由 `AssetMarket`（market → 池）派生，
 /// 旧的 `.cross` 第三态已废除（见 `docs/adr/0002-remove-cross-pool.md`）。
 /// 注意「大中华权益」「黄金」两张表是**混币种**的（A股基金 + 港股），
@@ -48,7 +48,7 @@ public enum AssetClassMapper {
     }
 }
 
-/// Imports the extracted .numbers state into SQLite (assets + holdings + snapshot).
+/// Imports the extracted workbook state into SQLite (assets + holdings + snapshot).
 public enum PortfolioImporter {
     public static func importExtract(url: URL, into db: Database, asOfDate: String) throws {
         let data = try Data(contentsOf: url)
@@ -67,7 +67,7 @@ public enum PortfolioImporter {
             assets.append(Asset(key: h.ticker, name: h.name, ticker: h.ticker,
                                 market: market, assetClass: cls,
                                 pool: AssetMarket.pool(market: nil, ticker: h.ticker, currency: currency),
-                                currency: currency, source: "numbers"))
+                                currency: currency, source: "external"))
             // 份额/成本留空(0), 由用户在资产明细手填; 市值 = 份额 × 最后价 (派生).
             holdings.append(Holding(assetKey: h.ticker, quantity: 0, costBasis: 0,
                                     currency: currency, asOfDate: asOfDate))

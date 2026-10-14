@@ -11,7 +11,7 @@ from optimize_common import solve_min_var, solve_max_sharpe, stage1_bounds  # no
 
 # 虚构的池拆分：任何有效比例都能跑这个测试；**不要**把真实组合的境内/境外比例写进来
 DOM_W, OV_W = 0.30, 0.70
-assets = [a for a in BROAD_ASSETS if a["mu"] is not None]
+assets = [a for a in BROAD_ASSETS if a.get("mu") is not None and a.get("vol") is not None]
 mu = np.array([a["mu"] for a in assets])
 vols = np.array([a["vol"] for a in assets])
 cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], BROAD_CORR)

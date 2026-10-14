@@ -5,10 +5,14 @@ import json
 
 import numpy as np
 
-# 类别规则、人工先验与波动率下限的唯一事实来源（见 asset_classes.py 的 docstring）
+# 类别规则与人工先验的唯一事实来源（见 asset_classes.py 的 docstring）
 import asset_classes as _AC
 
-RF = 0.025
+# 无风险利率（夏普分子用）。🔴 程序里**不写死利率**：正常路径由调用方注入
+# （App 侧按境内/境外池比例加权中美 10 年期国债收益率，写进提取文件的 "rf" 字段；
+#  optimize_portfolio.py / sensitivity_analysis.py 收到后覆盖这里）。
+# 提取文件没带 rf 时按 0 计（= 不假设任何无风险收益），只影响夏普的相对排序。
+RF = 0.0
 TARGET_RETURN = 0.10
 
 US_INTERNAL = {
@@ -905,11 +909,12 @@ def build_open_pool_from_status(hsbc_funds, availability, live_anchors=None):
 
 
 # ---------------------------------------------------------------------------
-# 参数来源：校准文件（历史数据）+ 类别兜底（asset_classes.py 的人工先验/下限）
+# 参数来源：校准文件（历史数据）+ 类别兜底（asset_classes.py 的人工先验/写死值）
 # ---------------------------------------------------------------------------
-# 规则本身（混合比例、截断线、历史窗口、波动率下限、兜底矩阵）见 asset_classes.py，
+# 规则本身（混合比例、截断线、历史窗口、兜底矩阵）见 asset_classes.py，
 # 本模块不再保存任何"静态 μ/σ"——它们已全部退役：
-#   有校准值 → 用校准值；没有 → 用类别兜底（μ=先验、σ=下限）；两者皆无 → 该标的缺失并报警。
+#   有校准值 → 用校准值；没有 → 只对"有写死值"的标的兜底（货币基金）；
+#   其余（无行情且无写死值）→ 该标的缺失并报警（σ 没有人工下限，不编造）。
 # 行业口径变化记录：
 #   - 2026-10-13 之前：所有标的都是 0.5×历史 + 0.5×先验、截断 [0,15%]，σ 上限 0.6。
 #   - 2026-10-13 起：按 broad/strategy/active 三类分别处理（见 asset_classes.py）。
@@ -922,7 +927,10 @@ PARAM_SOURCE = {}              # key → "calibrated" | "written_fallback" | "mi
 
 
 def _class_fallback(key):
-    """没有校准值时的人工兜底：μ=先验、σ=波动率下限（来自 asset_classes.py）。"""
+    """没有校准值时的兜底：只对"有写死值"的标的成立（SPECIAL_FIXED，如货币基金）。
+
+    σ 已无人工下限（2026-10-14），因此没有行情的普通标的构造不出 σ → 返回 (None, None)。
+    """
     mu, _ = _AC.build_mu(key, None)
     vol, _ = _AC.build_vol(key, None)
     return mu, vol
@@ -940,7 +948,8 @@ def _assign(entry, key, cal_assets):
     if mu is None or vol is None:
         PARAM_SOURCE[key] = "missing"
         CALIBRATION_WARNINGS.append(
-            f"{key}（{_AC.asset_class(key) or '未登记'}）：既无校准值也无人工兜底，本次优化不参与")
+            f"{key}（{_AC.asset_class(key) or '未登记'}）：校准文件里没有它、也没有写死值兜底 "
+            f"→ 本次优化不参与（若该标的应参与，请重新校准）")
         return False
     entry["mu"] = mu
     entry["vol"] = vol
@@ -949,7 +958,11 @@ def _assign(entry, key, cal_assets):
 
 
 def _apply_calibration():
-    """把校准值/类别兜底写进各标的表。任何情况下都要让 μ/σ 齐全（表里已不再存静态值）。"""
+    """把校准值/类别兜底写进各标的表（表里已不再存静态值）。
+
+    有校准值就用校准值；没有的只对"有写死值"的标的兜底（货币基金）；
+    其余记为 missing（缺 σ 就没有可用的风险度量，宁可不参与也不编造）。
+    """
     global CALIBRATION_LOADED, CALIBRATION_SUMMARY, CALIBRATION_WARNINGS, CALIBRATION_PROVENANCE
     cal = {}
     try:
@@ -959,7 +972,8 @@ def _apply_calibration():
     except Exception as exc:
         CALIBRATION_SUMMARY = {"loaded": False, "reason": str(exc)}
         CALIBRATION_WARNINGS.append(
-            f"校准文件不可用（{type(exc).__name__}），本次全部使用人工兜底值（类别：先验 μ + 下限 σ）")
+            f"校准文件不可用（{type(exc).__name__}）：只有写死值的标的（货币基金）还能兜底，"
+            f"其余标的都会因缺 μ/σ 而缺席本次优化")
 
     cal_assets = cal.get("assets", {})
     # 动态先验（债券公式）：校准文件里带着解析结果，离线也能复现；缺了就用静态兜底表
@@ -1014,28 +1028,13 @@ def _apply_calibration():
     _rebuild_corr(JP_INTERNAL_CORR, jp_keys)
     _rebuild_corr(GC_INTERNAL_CORR, gc_keys)
 
-    # 5) 前瞻微调：aistockresearcher 生成的 forward_adjusted.json 若存在则覆盖大类 mu
-    fwd_applied = 0
-    try:
-        with open(_resolve_data_file("forward_adjusted.json"), encoding="utf-8") as f:
-            fwd = json.load(f)
-        fwd_assets = fwd.get("assets", {})
-        for a in BROAD_ASSETS:
-            if a["key"] in fwd_assets and a["key"] != "O_US_CORE":
-                a["mu"] = fwd_assets[a["key"]]["mu"]
-                PARAM_SOURCE[a["key"]] = "forward_adjusted"
-                fwd_applied += 1
-    except Exception:
-        pass
-    if fwd_applied == 0:
-        CALIBRATION_WARNINGS.append(
-            "未找到 forward_adjusted.json（前瞻微调），大类 μ 完全来自校准文件/人工兜底")
-
-    # 6) 报告人工兜底了哪些标的（这些标的的口径弱于有行情的标的）
+    # 5) 报告写死值兜底了哪些标的（这些标的的口径弱于有行情的标的）
+    # 说明：前瞻微调（forward_adjusted.json / aistockresearcher）已于 2026-10-14 整体退役，
+    # 大类 μ 只来自校准文件 + 类别规则，不再叠加任何事后的前瞻调整。
     fallback = sorted(k for k, v in PARAM_SOURCE.items() if v == "written_fallback")
     if fallback:
         CALIBRATION_WARNINGS.append(
-            "以下标的没有行情数据，已用人工兜底值（μ=先验、σ=下限）: " + "、".join(fallback))
+            "以下标的没有行情数据，已用人工兜底值: " + "、".join(fallback))
 
     CALIBRATION_SUMMARY = {
         "loaded": CALIBRATION_LOADED,
@@ -1044,12 +1043,11 @@ def _apply_calibration():
         "corr_pairs": len(cal_corr),
         "generated_at": cal.get("generated_at"),
         "written_fallback": fallback,
-        "forward_adjusted": fwd_applied,
     }
 
 
 def param_origin(key):
-    """该标的的参数来自哪里：calibrated / written_fallback / fixed / forward_adjusted / aggregated / missing。"""
+    """该标的的参数来自哪里：calibrated / written_fallback / fixed / aggregated / missing。"""
     return PARAM_SOURCE.get(key, "unknown")
 
 
@@ -1067,15 +1065,13 @@ def describe_param_source(key):
         if note == "history_only":
             return "纯历史年化（该类无人工先验，口径与其它标的不同）"
         if note == "prior_fallback":
-            return "无行情历史，用人工先验 μ + 下限 σ"
+            return "无行情历史，用人工先验 μ"
         if note == "fixed":
             return "写死值（货币基金）"
         base = _AC.describe_class(cls) if cls else "未登记类别"
         return base
     if origin == "written_fallback":
-        return "人工兜底（μ=先验、σ=下限），该标的没有可用行情"
-    if origin == "forward_adjusted":
-        return "前瞻微调值（forward_adjusted.json）"
+        return "写死值兜底，该标的没有可用行情"
     if origin == "missing":
         return "既无校准值也无人工兜底，本次不参与优化"
     return "来源未知"

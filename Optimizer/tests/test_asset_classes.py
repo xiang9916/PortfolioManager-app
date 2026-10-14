@@ -22,18 +22,23 @@ def test_audit_table_clean():
     assert set(stats["by_class"]) <= {"broad", "strategy", "active"}
 
 
-def test_active_has_no_prior_no_floor():
+def test_no_vol_floor_table():
+    """σ 的人工下限表已整体退役（2026-10-14 用户定稿）。"""
+    assert not hasattr(AC, "VOL_FLOOR"), "不应再有波动率下限表"
+    for cls, rule in AC.CLASS_RULES.items():
+        assert "use_vol_floor" not in rule, cls
+
+
+def test_active_has_no_prior():
     for key, cls in AC.ASSET_CLASS.items():
         if cls == "active":
             assert key not in AC.PRIOR, f"{key} 是 active，不该有先验"
-            assert key not in AC.VOL_FLOOR, f"{key} 是 active，不该有波动率下限"
 
 
 def test_broad_and_strategy_have_prior():
     for key, cls in AC.ASSET_CLASS.items():
         if cls in ("broad", "strategy") and key not in AC.SPECIAL_FIXED:
             assert key in AC.PRIOR, f"{key} 是 {cls}，应有先验"
-            assert key in AC.VOL_FLOOR, f"{key} 是 {cls}，应有波动率下限"
 
 
 # ---------------------------------------------------------------- μ 构造
@@ -85,9 +90,9 @@ def test_missing_history_fallback_matrix():
     assert mu is None and note == "no_data"
     vol, vnote = AC.build_vol("NVDA", None)
     assert vol is None and vnote == "no_data"
-    # broad + 无行情 → σ 退到人工下限
+    # broad + 无行情 → 构造不出 σ（没有人工下限，不编造）→ 调用方丢弃
     vol, vnote = AC.build_vol("D_HSBC_SP500", None)
-    assert abs(vol - 0.15) < 1e-9 and vnote == "prior_fallback"
+    assert vol is None and vnote == "no_data"
 
 
 def test_history_only_when_no_prior():
@@ -102,13 +107,15 @@ def test_history_only_when_no_prior():
 
 # ---------------------------------------------------------------- σ 构造
 
-def test_vol_floor_only_when_history_lower():
-    # DIVLOWVOL 下限 14%：历史 10% → 取 14%（报警）
+def test_vol_is_pure_history_for_every_class():
+    # 历史波动多低就是多低：DIVLOWVOL 曾有人工下限 14%，现在 10% 就取 10%
     vol, note = AC.build_vol("DIVLOWVOL", 0.10)
-    assert abs(vol - 0.14) < 1e-9 and note == "vol_floor"
-    # 历史 25% → 保留历史，不触及下限
+    assert abs(vol - 0.10) < 1e-9 and note is None
     vol, note = AC.build_vol("DIVLOWVOL", 0.25)
     assert abs(vol - 0.25) < 1e-9 and note is None
+    # 债券同理（国开债曾有人工下限 2%）
+    vol, note = AC.build_vol("D_HSBC_CDB", 0.0135)
+    assert abs(vol - 0.0135) < 1e-9 and note is None
 
 
 def test_no_sigma_upper_cap():
@@ -117,9 +124,12 @@ def test_no_sigma_upper_cap():
     assert abs(vol - 0.80) < 1e-9 and note is None
 
 
-def test_active_vol_has_no_floor():
+def test_low_vol_asset_keeps_its_own_sigma():
     vol, note = AC.build_vol("GOOG", 0.05)
     assert abs(vol - 0.05) < 1e-9 and note is None
+    # 曾经被 15% 下限抬起来的宽基，现在按真实历史波动
+    vol, note = AC.build_vol("D_HSBC_SP500", 0.10)
+    assert abs(vol - 0.10) < 1e-9 and note is None
 
 
 def test_sigma_glitch_dropped():
@@ -206,8 +216,6 @@ def test_premium_and_fallback_are_half_point():
         assert abs(round(prem / 0.005) * 0.005 - prem) < 1e-9, (key, prem)
     for key, v in AC.PRIOR.items():
         assert abs(round(v / 0.005) * 0.005 - v) < 1e-9, (key, v)
-    for key, v in AC.VOL_FLOOR.items():
-        assert abs(round(v / 0.005) * 0.005 - v) < 1e-9, (key, v)
 
 
 def test_proxy_and_internal_pool_cleanup():
@@ -217,6 +225,8 @@ def test_proxy_and_internal_pool_cleanup():
     import market_data as M
     assert M.PROXY_MAP.get("HK_DIV") is not None      # 香港高股息桶的真实标的历史仅 129 天
     assert M.PROXY_MAP.get("DIVLOWVOL100") is not None  # 境内红利低波 100 桶仅 532 天
+    # 大中华权益一级大类没有自己的行情 → 用恒生指数长历史作代表（2026-10-14）
+    assert M.SOURCES.get("D_GREATER_CN") == ("yahoo", "^HSI")
 
 
 def main():

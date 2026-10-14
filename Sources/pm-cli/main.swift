@@ -51,12 +51,12 @@ func installExtractForApp(_ data: Data) -> URL? {
     }
 }
 
-func runExtract(numbersPath: String) -> Int32 {
+func runExtract(sourcePath: String) -> Int32 {
     do {
         let outPath = "tmp/extract_app.json"
         try FileManager.default.createDirectory(atPath: "tmp", withIntermediateDirectories: true)
         let sc = sidecar()
-        try sc.run(script: "extract_portfolio.py", args: [numbersPath, "--json", outPath])
+        try sc.run(script: "extract_portfolio.py", args: [sourcePath, "--json", outPath])
         let data = try Data(contentsOf: URL(fileURLWithPath: outPath))
         if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
             print("提取成功")
@@ -200,8 +200,11 @@ if args.count >= 2 && (args[1] == "backup" || args[1] == "list" || args[1] == "r
     }
 }
 if args.count >= 2 && args[1] == "extract" {
-    let numbersPath = args.count >= 3 ? args[2] : "portfolio.numbers"
-    exit(runExtract(numbersPath: numbersPath))
+    guard args.count >= 3 else {
+        FileHandle.standardError.write("用法: pm-cli extract <表格文件路径>\n".data(using: .utf8)!)
+        exit(1)
+    }
+    exit(runExtract(sourcePath: args[2]))
 }
 if args.count >= 2 && args[1] == "summarize" && args.count >= 3 {
     do {
@@ -311,7 +314,7 @@ if args.count >= 2 && args[1] == "financials" {
 
 print("用法:")
 print("  pm-cli summarize <portfolio_result.json>")
-print("  pm-cli extract [portfolio.numbers]")
+print("  pm-cli extract <表格文件路径>")
 print("  pm-cli fetch <yahoo|fund> [symbol]")
 print("  pm-cli optimize [extract.json] [--total-assets N]")
 print("      --test-tickers A,B   临时测试标的（逗号分隔）")

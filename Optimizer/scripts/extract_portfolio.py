@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Extract pool ratios and full holdings from a Numbers file.
+"""Extract pool ratios and full holdings from an external workbook.
 
-Adds a "holdings" field (all tickers with currency + value) on top of the
-original pool / US-equity output, so the app can show the full allocation.
+Reads an Apple Numbers document through the `numbers_parser` library (the file
+format is the only thing that library is needed for), and writes a neutral JSON
+the app/optimizer consume. Adds a "holdings" field (all tickers with currency +
+value) on top of the original pool / US-equity output.
 Backward compatible: us_equity + pool fields are unchanged.
 """
 
@@ -91,8 +93,9 @@ def classify_by_currency(doc):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("numbers_file")
-    parser.add_argument("--override-pool", help='JSON like {"domestic": 131862, "overseas": 468260}')
+    parser.add_argument("workbook", help="外部表格文件路径（Apple Numbers 文档）")
+    parser.add_argument("--override-pool",
+                        help='JSON like {"domestic": 123456, "overseas": 234567}（示例数字为虚构）')
     parser.add_argument("--json", dest="out_path", help="Write JSON to file instead of stdout")
     args = parser.parse_args()
 
@@ -102,7 +105,7 @@ def main():
         print("numbers_parser is required. Install it or set PYTHONPATH.", file=sys.stderr)
         sys.exit(2)
 
-    doc = Document(args.numbers_file)
+    doc = Document(args.workbook)
     warnings = []
     domestic = overseas = 0.0
 
@@ -116,15 +119,13 @@ def main():
     else:
         domestic, overseas = cur_domestic, cur_overseas
         pool_mode = "currency"
-        warnings.append("未找到明确的境内/境外资金池表，已按货币分类：CNY=境内，其他=境外。")
-        warnings.append("该口径只统计 .numbers 中已记录的投资资产，不含现金。")
 
     if args.override_pool:
         override = json.loads(args.override_pool)
         domestic = float(override.get("domestic", domestic))
         overseas = float(override.get("overseas", overseas))
         pool_mode = "override"
-        warnings.append("已使用 --override-pool 覆盖 .numbers 提取的境内/境外金额。")
+        warnings.append("已使用 --override-pool 覆盖表格里提取到的境内/境外金额。")
 
     total = domestic + overseas
     if total <= 0:
@@ -136,7 +137,7 @@ def main():
         h["weight"] = h["value_cny"] / us_total if us_total else 0.0
 
     result = {
-        "source_file": args.numbers_file,
+        "source_file": args.workbook,
         "pool_mode": pool_mode,
         "domestic_value": domestic,
         "overseas_value": overseas,
