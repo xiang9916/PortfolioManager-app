@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Charts
 import PortfolioCore
 
@@ -22,132 +23,165 @@ public struct OptimizationResultView: View {
     // 新标的测试 state
     @State private var showTestInput = false
 
+    // 长列表可折叠（弹窗尺寸固定 + 内部滚动，折叠后不用滚）
+    @State private var showTestAssets = true
+    @State private var showWarnings = true
+
+    /// 顶部固定栏（标题 + 入口按钮）：正文很长时它不参与滚动，关闭按钮始终可见
+    private var headerRow: some View {
+        HStack(spacing: 10) {
+            MacCloseButton { dismiss() }
+            Text(isTestResult ? "测试结果" : "优化结果").font(.title2).fontWeight(.semibold)
+            if store != nil && !isTestResult {
+                Button {
+                    showTestInput = true
+                } label: {
+                    Label("新标的测试", systemImage: "plus.magnifyingglass")
+                }
+                .buttonStyle(.bordered)
+                .disabled(store?.isTestOptimizing ?? false)
+            }
+            if !isTestResult {
+                Button {
+                    Task { await runSensitivity() }
+                } label: {
+                    if sensitivityLoading {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("敏感性分析")
+                        }
+                    } else {
+                        Label("敏感性分析", systemImage: "chart.line.uptrend.xyaxis")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(sensitivityLoading)
+            }
+            Spacer()
+        }
+    }
+
+    /// 弹窗尺寸：内容长度不可控，此前只给 minHeight，sheet 会按内容一路长到屏幕之外。
+    /// 现在固定成「屏幕可见高度 − 余量」，超出部分在内部滚动。
+    private var panelSize: CGSize {
+        let visible = NSScreen.main?.visibleFrame.height ?? 900
+        return CGSize(width: 900, height: max(420, min(800, visible - 150)))
+    }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                MacCloseButton { dismiss() }
-                Text(isTestResult ? "测试结果" : "优化结果").font(.title2).fontWeight(.semibold)
-                if store != nil && !isTestResult {
-                    Button {
-                        showTestInput = true
-                    } label: {
-                        Label("新标的测试", systemImage: "plus.magnifyingglass")
+        VStack(alignment: .leading, spacing: 12) {
+            headerRow
+            // 正文长度不可控（标的数、提示条数都能把它撑长）→ 固定尺寸 + 内部滚动
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Summary
+                    HStack(spacing: 12) {
+                        statCard("预期收益", pct(result.portfolio.expectedReturn))
+                        statCard("波动率", pct(result.portfolio.volatility))
+                        statCard("夏普比率", String(format: "%.3f", result.portfolio.sharpe))
+                        statCard("95%最差年度", pct(result.portfolio.worstYear95))
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(store?.isTestOptimizing ?? false)
-                }
-                if !isTestResult {
-                    Button {
-                        Task { await runSensitivity() }
-                    } label: {
-                        if sensitivityLoading {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.small)
-                                Text("敏感性分析")
-                            }
-                        } else {
-                            Label("敏感性分析", systemImage: "chart.line.uptrend.xyaxis")
+
+                    // 目标收益率只是下限：优化目标是最大化夏普，实际收益可以高于目标。
+                    if let target = result.targetReturn, !isTestResult {
+                        let gap = result.portfolio.expectedReturn - target
+                        HStack(spacing: 6) {
+                            Image(systemName: gap > 0.002 ? "info.circle" : "checkmark.circle")
+                                .foregroundStyle(gap > 0.002 ? Color.orange : Color.secondary)
+                            Text(gap > 0.002
+                                 ? "目标收益率 \(pct(target)) 只是下限：优化目标是最大化夏普，实际取到 \(pct(result.portfolio.expectedReturn))，高出 \(pct(gap))。把目标提到最优夏普组合的收益之上，滑杆才真正起作用。"
+                                 : "实际收益 \(pct(result.portfolio.expectedReturn)) 已贴合目标下限 \(pct(target))。")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(sensitivityLoading)
-                }
-                Spacer()
-            }
 
-            // Summary
-            HStack(spacing: 12) {
-                statCard("预期收益", pct(result.portfolio.expectedReturn))
-                statCard("波动率", pct(result.portfolio.volatility))
-                statCard("夏普比率", String(format: "%.3f", result.portfolio.sharpe))
-                statCard("95%最差年度", pct(result.portfolio.worstYear95))
-            }
+                    // Weights bar chart
+                    // 测试标的 (isTest) 用橙色区分: 它们是 what-if 临时注入的仓位, 不进执行清单,
+                    // 但同样占权重 —— 必须出现在这张图里, 否则权重合计看起来不足 100%。
+                    Text("资产权重").font(.headline)
+                    Chart(result.assets.sorted(by: { $0.weight > $1.weight }), id: \.key) { a in
+                        BarMark(
+                            x: .value("权重", a.weight),
+                            y: .value("标的", a.name)
+                        )
+                        .foregroundStyle(a.isTest == true ? AnyShapeStyle(.orange.gradient)
+                                                          : AnyShapeStyle(.blue.gradient))
+                        .annotation(position: .trailing) {
+                            Text(pct(a.weight)).font(.caption2).monospacedDigit()
+                        }
+                    }
+                    // 标的很多时不再无限变高（弹窗内滚动，图本身给个上限）
+                    .frame(height: min(max(220, CGFloat(result.assets.count) * 28), 440))
 
-            // 目标收益率只是下限：优化目标是最大化夏普，实际收益可以高于目标。
-            if let target = result.targetReturn, !isTestResult {
-                let gap = result.portfolio.expectedReturn - target
-                HStack(spacing: 6) {
-                    Image(systemName: gap > 0.002 ? "info.circle" : "checkmark.circle")
-                        .foregroundStyle(gap > 0.002 ? Color.orange : Color.secondary)
-                    Text(gap > 0.002
-                         ? "目标收益率 \(pct(target)) 只是下限：优化目标是最大化夏普，实际取到 \(pct(result.portfolio.expectedReturn))，高出 \(pct(gap))。把目标提到最优夏普组合的收益之上，滑杆才真正起作用。"
-                         : "实际收益 \(pct(result.portfolio.expectedReturn)) 已贴合目标下限 \(pct(target))。")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+                    if let b = result.benchmark {
+                        Divider()
+                        Text("基准对比（沪深300 + 标普500）").font(.headline)
+                        HStack(spacing: 12) {
+                            statCard("组合 Alpha", pct(b.portfolioAlpha))
+                            statCard("组合 Beta", String(format: "%.2f", b.portfolioBeta))
+                            statCard("波动降低", pct(b.volatilityReduction))
+                            statCard("最差年度改善", pct(b.worstYearImprovement))
+                        }
+                    }
 
-            // Weights bar chart
-            // 测试标的 (isTest) 用橙色区分: 它们是 what-if 临时注入的仓位, 不进执行清单,
-            // 但同样占权重 —— 必须出现在这张图里, 否则权重合计看起来不足 100%。
-            Text("资产权重").font(.headline)
-            Chart(result.assets.sorted(by: { $0.weight > $1.weight }), id: \.key) { a in
-                BarMark(
-                    x: .value("权重", a.weight),
-                    y: .value("标的", a.name)
-                )
-                .foregroundStyle(a.isTest == true ? AnyShapeStyle(.orange.gradient)
-                                                  : AnyShapeStyle(.blue.gradient))
-                .annotation(position: .trailing) {
-                    Text(pct(a.weight)).font(.caption2).monospacedDigit()
-                }
-            }
-            .frame(height: max(220, CGFloat(result.assets.count) * 28))
-
-            if let b = result.benchmark {
-                Divider()
-                Text("基准对比（沪深300 + 标普500）").font(.headline)
-                HStack(spacing: 12) {
-                    statCard("组合 Alpha", pct(b.portfolioAlpha))
-                    statCard("组合 Beta", String(format: "%.2f", b.portfolioBeta))
-                    statCard("波动降低", pct(b.volatilityReduction))
-                    statCard("最差年度改善", pct(b.worstYearImprovement))
-                }
-            }
-
-            // 测试结果形态: 展示测试标的的估算参数
-            if isTestResult, let ta = result.testAssets, !ta.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("测试标的估算参数（μ = 100% 历史年化）").font(.headline)
-                    Text("口径提示：测试标的的 μ 是纯历史年化（不做先验混合），组合内资产的 μ 是 50% 历史 + 50% 先验假设。"
-                         + "两者口径不同，横向比较时测试标的的预期收益偏乐观；图中橙色行即为测试标的。")
-                        .font(.caption).foregroundStyle(.secondary)
-                    ForEach(ta, id: \.key) { e in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 8) {
-                                Text(e.ticker).fontWeight(.medium)
-                                Text(classLabel(e.testClass))
-                                    .font(.caption2).foregroundStyle(.orange)
-                                Text("\(e.source == "eastmoney" ? "天天基金" : "Yahoo") · \(e.pool == "domestic" ? "境内池" : "境外池") · \(windowLabel(e.windowYears)) · \(e.nDays) 天")
+                    // 测试结果形态: 展示测试标的的估算参数
+                    if isTestResult, let ta = result.testAssets, !ta.isEmpty {
+                        Divider()
+                        DisclosureGroup(isExpanded: $showTestAssets) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("口径提示：测试标的的 μ 是纯历史年化（不做先验混合），组合内资产的 μ 是 50% 历史 + 50% 先验假设。"
+                                     + "两者口径不同，横向比较时测试标的的预期收益偏乐观；图中橙色行即为测试标的。")
                                     .font(.caption).foregroundStyle(.secondary)
-                                Spacer()
-                                Text("μ \(pct(e.mu))   σ \(pct(e.vol))")
-                                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                ForEach(ta, id: \.key) { e in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 8) {
+                                            Text(e.ticker).fontWeight(.medium)
+                                            Text(classLabel(e.testClass))
+                                                .font(.caption2).foregroundStyle(.orange)
+                                            Text("\(e.source == "eastmoney" ? "天天基金" : "Yahoo") · \(e.pool == "domestic" ? "境内池" : "境外池") · \(windowLabel(e.windowYears)) · \(e.nDays) 天")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                            Spacer()
+                                            Text("μ \(pct(e.mu))   σ \(pct(e.vol))")
+                                                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                        }
+                                        let note = provenanceNote(e)
+                                        if !note.isEmpty {
+                                            Text(note).font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
                             }
-                            let note = provenanceNote(e)
-                            if !note.isEmpty {
-                                Text(note).font(.caption2).foregroundStyle(.secondary)
+                        } label: {
+                            Text("测试标的估算参数（\(ta.count) 只 · μ = 100% 历史年化）").font(.headline)
+                        }
+                    }
+
+                    // 汇总自检/管线提示（含"权重未全覆盖"这类映射漏项告警）
+                    if let ws = result.warnings, !ws.isEmpty {
+                        Divider()
+                        DisclosureGroup(isExpanded: $showWarnings) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(Array(ws.enumerated()), id: \.offset) { _, w in
+                                    Text("· \(w)").font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
+                        } label: {
+                            Text("优化器提示（\(ws.count)）").font(.headline)
                         }
                     }
                 }
             }
-
-            // 汇总自检/管线提示（含"权重未全覆盖"这类映射漏项告警）
-            if let ws = result.warnings, !ws.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("优化器提示（\(ws.count)）").font(.headline)
-                    ForEach(Array(ws.enumerated()), id: \.offset) { _, w in
-                        Text("· \(w)").font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+            // 滚动到底也能关：底部再给一个关闭出口（Esc 同样有效）
+            HStack {
+                Spacer()
+                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
             }
         }
         .padding()
-        .frame(minWidth: 640, minHeight: 460)
+        .frame(width: panelSize.width, height: panelSize.height)
+        .onExitCommand { dismiss() }
         .sheet(isPresented: $showSensitivity) {
             if let sr = sensitivityResult {
                 SensitivityAnalysisView(result: sr)
