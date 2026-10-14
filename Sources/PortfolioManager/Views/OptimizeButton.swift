@@ -146,7 +146,7 @@ public struct OptimizeButton: View {
                 Text(String(format: "%.1f%%", targetReturnInput * 100))
                     .monospacedDigit().foregroundStyle(.secondary)
             }
-            Slider(value: $targetReturnInput, in: 0.05...0.20, step: 0.005)
+            Slider(value: $targetReturnInput, in: 0.05...0.25, step: 0.005)
                 .onChange(of: targetReturnInput) { _, newValue in
                     store.targetReturn = newValue
                     UserDefaults.standard.set(newValue, forKey: "optimizer.targetReturn")
