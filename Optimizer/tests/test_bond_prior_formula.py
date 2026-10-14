@@ -14,9 +14,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import asset_classes as AC
 
 ANCHORS = {"cn_10y": 0.016654, "cn_5y": 0.013974, "us_10y": 0.0524, "us_30y": 0.0560}
+# source 字段只用于展示"拟合用的是哪条序列"，这里填虚构标记（测试不走真实取数）
 FITS = {
-    "D_HSBC_CDB": {"a": 0.8534810, "b": 0.0086641, "r2": 0.5435, "n_years": 3, "source": "007485"},
-    "O_US_TLT":   {"a": 3.3636809, "b": -0.0853867, "r2": 0.5298, "n_years": 15, "source": "TLH"},
+    "D_HSBC_CDB": {"a": 0.8534810, "b": 0.0086641, "r2": 0.5435, "n_years": 3, "source": "fixture"},
+    "O_US_TLT":   {"a": 3.3636809, "b": -0.0853867, "r2": 0.5298, "n_years": 15, "source": "fixture"},
 }
 
 
@@ -39,7 +40,7 @@ def test_tlt_uses_synthesised_20y():
 def test_missing_inputs_fall_back():
     assert AC.bond_prior("D_HSBC_CDB", {}, FITS)[1]["reason"] == "missing_anchor"
     assert AC.bond_prior("D_HSBC_CDB", ANCHORS, {})[1]["reason"] == "missing_fit"
-    assert AC.bond_prior("SPLG", ANCHORS, FITS)[1]["reason"] == "not_formula_key"
+    assert AC.bond_prior("SPY", ANCHORS, FITS)[1]["reason"] == "not_formula_key"
 
 
 def test_override_plumbing_reaches_build_mu():

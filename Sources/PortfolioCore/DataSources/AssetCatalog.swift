@@ -42,8 +42,8 @@ public enum AssetCatalog {
         AssetRef("O_US_ENERGY", .yahoo, "XOM", name: "美能源"),
         AssetRef("O_HK_GOLD", .yahoo, "3170.HK", name: "港股黄金"),
         AssetRef("O_GOLD", .yahoo, "GC=F", name: "黄金"),
-        // 发行方已把代码 SPLG 改成 SPYM（同一只基金）；旧代码在 Yahoo 上 404
-        AssetRef("SPLG", .yahoo, "SPYM", name: "State Street SPDR Portfolio S&P 500 ETF"),
+        // 标普500 宽基这一档用 SPY（原写 SPLG，发行方改了代码后 Yahoo 一律 404）
+        AssetRef("SPY", .yahoo, "SPY", name: "SPDR S&P 500 ETF Trust"),
         AssetRef("VTV", .yahoo, "VTV"),
         AssetRef("SPMO", .yahoo, "SPMO", name: "Invesco S&P 500 Momentum ETF"),
         AssetRef("UNH", .yahoo, "UNH", name: "UnitedHealth Group"),

@@ -80,7 +80,7 @@ SPECIAL_FIXED = {
 }
 
 # 聚合项：由内部持仓动态合成（运行时用美股内部权重聚合，params.py 不会用校准值覆盖它）。
-# 仍然给它登记 broad 类别：一是相关性矩阵里需要它这一行，二是 SPLG 取不到数据时用它兜底。
+# 仍然给它登记 broad 类别：一是相关性矩阵里需要它这一行，二是 SPY 取不到数据时用它兜底。
 AGGREGATES = {"O_US_CORE"}
 
 ACTIVE_CAP = 0.10          # active 类单标的的组合权重上限
@@ -120,7 +120,7 @@ ASSET_CLASS = {
     "O_US_REIT": "strategy",          # 住宅 REIT（被动但行业/策略属性）
     "O_US_ENERGY": "active",          # 能源生产商 XOM —— 名字像大类，实际是个股
     # ---- 美股内部（US_INTERNAL）----
-    "SPLG": "broad",                  # 标普500 宽基
+    "SPY": "broad",                   # 标普500 宽基（SPDR S&P 500 ETF Trust）
     "VTV": "strategy",                # 价值因子
     "SPMO": "strategy",               # 动量因子
     "BUFFER": "strategy",             # MAXJ/DMAX 缓冲期权（策略型产品）
@@ -311,7 +311,7 @@ RF_PREMIUM = {
     "HK_BROAD": (+0.020, "usd"), "HK_DIV": (+0.020, "usd"), "HK_TECH": (+0.030, "usd"),
     "O_BTC": (+0.100, "usd"), "O_GOLD": (-0.010, "usd"), "O_HYLB": (+0.025, "usd"),
     "O_JP_EQ": (+0.020, "usd"), "O_SG_EQ": (+0.015, "usd"), "O_US_CORE": (+0.040, "usd"),
-    "O_US_REIT": (+0.015, "usd"), "O_US_TLT": (-0.010, "usd"), "SPLG": (+0.040, "usd"),
+    "O_US_REIT": (+0.015, "usd"), "O_US_TLT": (-0.010, "usd"), "SPY": (+0.040, "usd"),
     "SPMO": (+0.045, "usd"), "VTV": (+0.035, "usd"),
 }
 
@@ -326,7 +326,7 @@ PRIOR = {
     "D_CN_QDII_COMMODITY": 0.040, "D_CN_QDII_STABLE": 0.050, "D_CN_QDII_STOCK": 0.085, "D_HSBC_SP500": 0.090,
     "HK_BROAD": 0.070, "HK_DIV": 0.070, "HK_TECH": 0.080, "O_BTC": 0.150,
     "O_GOLD": 0.040, "O_HYLB": 0.075, "O_JP_EQ": 0.070, "O_SG_EQ": 0.065,
-    "O_US_CORE": 0.090, "O_US_REIT": 0.065, "O_US_TLT": 0.040, "SPLG": 0.090,
+    "O_US_CORE": 0.090, "O_US_REIT": 0.065, "O_US_TLT": 0.040, "SPY": 0.090,
     "SPMO": 0.095, "VTV": 0.085,
 }
 

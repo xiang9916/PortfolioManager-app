@@ -213,10 +213,11 @@ SOURCES = {
     "O_US_REIT": ("yahoo", "REZ"),
     "O_US_ENERGY": ("yahoo", "XOM"),
     "O_GOLD": ("yahoo", "GC=F"),
-    # SPDR Portfolio S&P 500 ETF：发行方（SSGA）把代码从 SPLG 改成了 SPYM（同一只基金，
-    # 2005-11 成立、名称一致），Yahoo 对旧代码 SPLG 一律 404。搜索 "SPLG" 只会返回
-    # LSE 上的另一只基金（Invesco 标普500低波 UCITS），**不是**这一只，别照抄。
-    "SPLG": ("yahoo", "SPYM"),
+    # 标普500 宽基档用 SPY（SPDR S&P 500 ETF Trust，1993 年成立、数据最稳）。
+    # 历史坑：这一档原写 SPLG（SPDR Portfolio S&P 500 ETF）——发行方后来把代码改成 SPYM，
+    # 旧代码在 Yahoo 一律 404；而 Yahoo 搜 "SPLG" 命中的是 LSE 上的 Invesco 标普500低波
+    # UCITS（另一只基金）。2026-10-14 用户定稿：直接用 SPY，不再挂会 404 的旧代码。
+    "SPY": ("yahoo", "SPY"),
     "VTV": ("yahoo", "VTV"),
     "SPMO": ("yahoo", "SPMO"),
     "UNH": ("yahoo", "UNH"),
@@ -269,7 +270,7 @@ PROXY_MAP = {
     "O_US_TLT": None,
     "O_US_REIT": ("yahoo", "VNQ"),
     "O_US_ENERGY": ("yahoo", "CL=F"),
-    "SPLG": ("yahoo", "^GSPC"),
+    "SPY": ("yahoo", "^GSPC"),
     "VTV": None,
     "SPMO": None,
     "UNH": None,

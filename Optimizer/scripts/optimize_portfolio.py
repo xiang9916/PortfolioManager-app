@@ -175,7 +175,7 @@ def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, bro
         for j, ticker in enumerate(internal_tickers):
             idx = len(fixed_assets) + j
             if a["key"] == "D_HSBC_SP500":
-                base_ij = {"SPLG": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60}.get(ticker, 0.75)
+                base_ij = {"SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60}.get(ticker, 0.75)
             else:
                 base_ij = base
             corr[i, idx] = corr[idx, i] = base_ij

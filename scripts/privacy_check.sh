@@ -25,7 +25,9 @@ EXCLUDES=(--exclude-dir=.git --exclude-dir=.build --exclude-dir=dist --exclude-d
 
 # 分级：① 候选池文件（装的是候选资产全集，本来就在仓库里公开，不是持仓清单）
 #       ② AGENTS.md §1 已登记的"通用公开行情代码"命中（需人工确认，不算失败）
-POOL_RE='(^|/)(AssetCatalog\.swift|params\.py|market_data\.py|calibrated_params\.json|asset_classes\.py|bond_prior\.py)$|^\./Optimizer/tests/'
+# ⚠️ 测试目录**不在**豁免里：测试一律用虚构 fixture（2026-10-14 实测抓到过真实基金代码），
+# 谁在测试里写了真实持仓代码，就让检查失败。
+POOL_RE='(^|/)(AssetCatalog\.swift|params\.py|market_data\.py|calibrated_params\.json|asset_classes\.py|bond_prior\.py)$'
 GENERIC_RE='AssetMarketTests\.swift$|AssetEditorViews\.swift$|YahooFinanceSource\.swift$|^\./AGENTS\.md$|^\./README\.md$' 
 
 # 自身含规则文本，不参与 ②（同 AGENTS.md §1 的既有例外：占位符与「123,456.78」是规则内容）

@@ -16,7 +16,8 @@ RF = 0.0
 TARGET_RETURN = 0.10
 
 US_INTERNAL = {
-    "SPLG": {"name": "State Street SPDR Portfolio S&P 500 ETF（代码已由 SPLG 改为 SPYM）"},
+    # 标普500 宽基这一档用 SPY（SPDR S&P 500 ETF Trust）：最标准、数据最稳的那只
+    "SPY": {"name": "SPDR S&P 500 ETF Trust"},
     "VTV": {"name": "Vanguard Value ETF"},
     "SPMO": {"name": "Invesco S&P 500 Momentum ETF"},
     "UNH": {"name": "UnitedHealth Group"},
@@ -31,16 +32,16 @@ US_INTERNAL = {
 }
 
 US_INTERNAL_CORR = {
-    ("SPLG", "VTV"): 0.85,
-    ("SPLG", "SPMO"): 0.75,
-    ("SPLG", "UNH"): 0.75,
-    ("SPLG", "GOOG"): 0.75,
-    ("SPLG", "AAPL"): 0.70,
-    ("SPLG", "MSFT"): 0.70,
-    ("SPLG", "NVDA"): 0.65,
-    ("SPLG", "AMZN"): 0.70,
-    ("SPLG", "META"): 0.70,
-    ("SPLG", "TSLA"): 0.55,
+    ("SPY", "VTV"): 0.85,
+    ("SPY", "SPMO"): 0.75,
+    ("SPY", "UNH"): 0.75,
+    ("SPY", "GOOG"): 0.75,
+    ("SPY", "AAPL"): 0.70,
+    ("SPY", "MSFT"): 0.70,
+    ("SPY", "NVDA"): 0.65,
+    ("SPY", "AMZN"): 0.70,
+    ("SPY", "META"): 0.70,
+    ("SPY", "TSLA"): 0.55,
     ("VTV", "SPMO"): 0.70,
     ("VTV", "UNH"): 0.75,
     ("VTV", "GOOG"): 0.70,
@@ -86,7 +87,7 @@ US_INTERNAL_CORR = {
     ("AMZN", "META"): 0.65,
     ("AMZN", "TSLA"): 0.50,
     ("META", "TSLA"): 0.50,
-    ("BUFFER", "SPLG"): 0.60,
+    ("BUFFER", "SPY"): 0.60,
     ("BUFFER", "VTV"): 0.55,
     ("BUFFER", "SPMO"): 0.60,
     ("BUFFER", "UNH"): 0.50,

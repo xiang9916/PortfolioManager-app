@@ -145,7 +145,7 @@ for key, (typ, sym) in sources.items():
         for _typ, _sym in ((typ, sym),) + (((proxy_map[key]),) if proxy_map.get(key) else ()):
             try:
                 fetched[_sym] = _fetch(_typ, _sym, years)
-            except Exception as exc:  # 单个源失败不该丢掉整个标的（如 Yahoo 对 SPLG 返回 404）
+            except Exception as exc:  # 单个源失败不该丢掉整个标的（源站偶尔 404/限流）
                 fetched[_sym] = []
                 if _sym == sym:
                     WARNINGS.append(f"{_label(key)}: {_sym} 取数失败 "
@@ -245,12 +245,12 @@ corr = corr.fillna(0.30)
 if missing_pairs:
     WARNINGS.append(f"相关性：{missing_pairs} 对共同历史不足 180 天，已按保守先验 0.30 填充")
 
-# SPLG 兜底：Yahoo 若没给足 SPLG，用 SPY（同指数）代理
-if "SPLG" not in series and "O_US_CORE" in series:
+# SPY 兜底：这一档与 O_US_CORE 是同一个敞口，取数失败时直接借它的相关性行
+if "SPY" not in series and "O_US_CORE" in series:
     for other in list(corr.index):
-        corr.loc["SPLG", other] = corr.loc["O_US_CORE", other]
-        corr.loc[other, "SPLG"] = corr.loc["O_US_CORE", other]
-    corr.loc["SPLG", "SPLG"] = 1.0
+        corr.loc["SPY", other] = corr.loc["O_US_CORE", other]
+        corr.loc[other, "SPY"] = corr.loc["O_US_CORE", other]
+    corr.loc["SPY", "SPY"] = 1.0
 
 calib = {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -279,7 +279,7 @@ for key, st in meta.items():
     p = PROVENANCE[key]
     entry = {"mu": round(p["mu"], 4), "vol": round(p["vol"], 4)}
     calib["assets"][key] = entry
-    if key in ["SPLG", "VTV", "SPMO", "UNH", "GOOG", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "BUFFER"]:
+    if key in ["SPY", "VTV", "SPMO", "UNH", "GOOG", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "BUFFER"]:
         calib["us_internal"][key] = entry
     if key in JP_KEYS:
         calib["jp_internal"][key] = entry

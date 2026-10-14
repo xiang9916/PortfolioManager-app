@@ -160,7 +160,7 @@ def test_slice_window_takes_tail():
 
 
 def test_window_years_by_class():
-    assert AC.window_years("SPLG") is None      # broad 全历史
+    assert AC.window_years("SPY") is None       # broad 全历史
     assert AC.window_years("SPMO") == 20       # strategy 20 年
     assert AC.window_years("NVDA") == 10       # active 10 年
 
