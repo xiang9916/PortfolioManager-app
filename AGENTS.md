@@ -247,6 +247,10 @@ pm-cli (headless CLI) 复用 PortfolioCore
   （`market_data.SOURCES`）；④ `RF` 默认值不再写死利率（改 `0.0` = 不假设无风险收益，正常路径由 App 注入）；
   ⑤ 结果页提示精简：去掉境内/境外资金池口径提示、基金在售/申赎状态的抓取计数、以及"某候选全部暂停申购"
   这类点名数据源的文案（后者的**结论**保留，只不再点名来源）。
+- **标的代码会变**：`SPLG`（SPDR Portfolio S&P 500 ETF）的发行方已把代码改成 **SPYM**，Yahoo 对旧代码
+  一律 404；而 Yahoo 搜 "SPLG" 命中的是 LSE 上的 **Invesco 标普500低波 UCITS**（另一只基金，别照抄）。
+  仓库里保留 `SPLG` 作为**内部 key**（数据库/相关性/校准 JSON 的主键，改 key 要迁移），
+  但取数符号（`market_data.SOURCES` 与 `AssetCatalog`）指向 `SPYM`。
 - **调试用得到的两个坑**：① 选源逻辑不能"谁点数多用谁"——窗口化后原油期货 `CL=F` 的点数会超过 `XOM`，
   把个股 σ 算成 114%；规则是"窗口内够长就用真实标的，代理只在真实标的铺不满窗口时顶上"（`_pick_series`）。
   ② `argparse` 的 help 走 %-格式化，中文说明里的 `%` 必须写成 `%%`。

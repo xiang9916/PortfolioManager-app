@@ -16,7 +16,7 @@ RF = 0.0
 TARGET_RETURN = 0.10
 
 US_INTERNAL = {
-    "SPLG": {"name": "SPDR Portfolio S&P 500 ETF"},
+    "SPLG": {"name": "State Street SPDR Portfolio S&P 500 ETF（代码已由 SPLG 改为 SPYM）"},
     "VTV": {"name": "Vanguard Value ETF"},
     "SPMO": {"name": "Invesco S&P 500 Momentum ETF"},
     "UNH": {"name": "UnitedHealth Group"},
