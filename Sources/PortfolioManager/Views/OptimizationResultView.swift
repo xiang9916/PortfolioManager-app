@@ -89,7 +89,7 @@ public struct OptimizationResultView: View {
                             Image(systemName: gap > 0.002 ? "info.circle" : "checkmark.circle")
                                 .foregroundStyle(gap > 0.002 ? Color.orange : Color.secondary)
                             Text(gap > 0.002
-                                 ? "目标收益率 \(pct(target)) 只是下限：优化目标是最大化夏普，实际取到 \(pct(result.portfolio.expectedReturn))，高出 \(pct(gap))。把目标提到最优夏普组合的收益之上，滑杆才真正起作用。"
+                                 ? "目标收益率 \(pct(target)) 是收益**下限**（不是锚）：求解目标是最大化夏普，实际交付 \(pct(result.portfolio.expectedReturn))，高出 \(pct(gap))。目标低于切点收益时结果不随滑杆变化，把目标提到切点收益以上才会沿前沿上移（切点收益见「敏感性分析」曲线上开始下滑的那一点）。"
                                  : "实际收益 \(pct(result.portfolio.expectedReturn)) 已贴合目标下限 \(pct(target))。")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -184,7 +184,12 @@ public struct OptimizationResultView: View {
         .onExitCommand { dismiss() }
         .sheet(isPresented: $showSensitivity) {
             if let sr = sensitivityResult {
-                SensitivityAnalysisView(result: sr)
+                // 把主结果的实际落点一并带过去：图上一眼能看出"主结果就在这条曲线上"
+                SensitivityAnalysisView(
+                    result: sr,
+                    currentTarget: result.targetReturn,
+                    currentSharpe: result.portfolio.sharpe,
+                    currentVol: result.portfolio.volatility)
             } else if let err = sensitivityError {
                 VStack(spacing: 16) {
                     Text("敏感性分析失败").font(.headline)

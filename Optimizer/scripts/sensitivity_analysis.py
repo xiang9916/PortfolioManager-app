@@ -41,6 +41,9 @@ from optimize_common import (
     max_feasible_return,
     stage1_bounds,
 )
+# 完整求解（阶段一 + 袖内固定点 + 阶段二）：与 optimize_portfolio 主流程同源，
+# 否则敏感性扫描只扫了阶段一，与结果页对不上（2026-10-14 修）
+from optimize_portfolio import solve_portfolio
 from fund_pipeline import (
     ensure_pipeline,
     ensure_work_dir,
@@ -242,44 +245,78 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
     if max_ret > 0 and (not targets or abs(targets[-1] - max_ret) > 0.005):
         targets.append(round(max_ret, 4))
 
+    # 逐点跑**完整**流水线（阶段一 + 袖内固定点 + 阶段二）：图上每一点就是
+    # 「把目标设成 T 时实际会交付的那个组合」，与结果页同源。
+    # 用上一点的袖参数热启动，避免每个点都从 live 篮子从头迭代。
+    total_assets = float(extract["total_value"])
     points = []
-    for target in targets:
-        solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
-        if solved is None:  # 约束绷紧时退到 min 方差（两者在该区间等价）
-            solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, seed=23, rf=RF)
-        if solved is not None:
-            w, ret, vol, sharpe = solved
-            worst = ret - 1.96 * vol
+    sleeve_start = None
+    last_mu, last_cov = mu, cov
+
+    def _add_point(target):
+        """求解一个目标点并追加到 points；返回是否可行。"""
+        nonlocal sleeve_start, last_mu, last_cov
+        point_warnings = []
+        solved = solve_portfolio(
+            assets, BROAD_CORR, dom_w=dom_w, ov_w=ov_w, target=target, rf=RF,
+            extract=extract, total_assets=total_assets, warnings=point_warnings,
+            sleeve_start=sleeve_start,
+        )
+        if solved is None:
             points.append({
-                "target_return": round(target, 4),
-                "feasible": True,
-                "achieved_return": round(ret, 6),
-                "volatility": round(vol, 6),
-                "sharpe": round(sharpe, 6),
-                "worst_year_95": round(worst, 6),
-                "cagr_lognormal": round(lognormal_cagr(ret, vol), 6),
-                # 键名必须是 cagr_fat_tail（蛇形→驼峰得 cagrFatTail）：
-                # cagr_fattail 会转成 cagrFattail，与 Swift 属性 cagrFatTail
-                # 不匹配，可选字段静默解码为 nil → UI 回退旧近似。
-                "cagr_fat_tail": round(fattail_cagr(ret, vol, nu=tail_dof), 6),
-            })
-        else:
-            points.append({
-                "target_return": round(target, 4),
+                "target_return": round(float(target), 4),
                 "feasible": False,
                 "achieved_return": None,
                 "volatility": None,
                 "sharpe": None,
                 "worst_year_95": None,
             })
+            return False
+        sleeve_start = {k: tuple(v) for k, v in solved["sleeve_params"].items()}
+        last_mu, last_cov = solved["mu"], solved["cov"]
+        for w in point_warnings:
+            if w not in warnings:
+                warnings.append(w)
+        fin = solved["final"]
+        ret, vol, sharpe = float(fin["ret"]), float(fin["vol"]), float(fin["sharpe"])
+        points.append({
+            "target_return": round(float(target), 4),
+            "feasible": True,
+            "achieved_return": round(ret, 6),
+            "volatility": round(vol, 6),
+            "sharpe": round(sharpe, 6),
+            "worst_year_95": round(ret - 1.96 * vol, 6),
+            "cagr_lognormal": round(lognormal_cagr(ret, vol), 6),
+            # 键名必须是 cagr_fat_tail（蛇形→驼峰得 cagrFatTail）：
+            # cagr_fattail 会转成 cagrFattail，与 Swift 属性 cagrFatTail
+            # 不匹配，可选字段静默解码为 nil → UI 回退旧近似。
+            "cagr_fat_tail": round(fattail_cagr(ret, vol, nu=tail_dof), 6),
+        })
+        return True
+
+    for target in targets:
+        _add_point(target)
+
+    # 上面那张目标清单是用"当前持仓篮子"的袖参数估的上限；收敛后再算一次真实的
+    # 最大可行收益率，并把中间缺的目标点补齐（否则曲线会在末端跳一段）。
+    dom_idx2 = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
+    ov_idx2 = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
+    max_ret_final = float(max_feasible_return(last_mu, lower, upper, dom_idx2, ov_idx2, dom_w, ov_w))
+    t = (points[-1]["target_return"] if points else step_min) + 0.005
+    while t <= max_ret_final - 0.002 and len(points) < 200:
+        _add_point(t)
+        t += 0.005
+    if max_ret_final > 0 and (not points or abs(points[-1]["target_return"] - max_ret_final) > 0.002):
+        _add_point(max_ret_final - 1e-4)
 
     return {
-        "max_feasible_return": round(max_ret, 6),
+        "max_feasible_return": round(max_ret_final, 6),
         "tail_dof": float(tail_dof),
         "rf": round(RF, 6),
         "domestic_weight": round(dom_w, 6),
         "overseas_weight": round(ov_w, 6),
         "points": points,
+        "scope": "完整流水线（阶段一 + 袖内固定点 + 阶段二），与结果页同源",
         "warnings": warnings,
         "pipeline": pipeline_info,
     }

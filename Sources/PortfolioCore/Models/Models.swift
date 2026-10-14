@@ -310,6 +310,9 @@ public struct SensitivityPoint: Codable, Hashable, Identifiable {
 
 public struct SensitivityAnalysisResult: Codable {
     public let maxFeasibleReturn: Double
+    /// 扫描口径（Python 侧 scope 字段）：一句话说明这一点是怎么算出来的
+    /// （2026-10-14 起 = 完整流水线：阶段一 + 袖内固定点 + 阶段二，与结果页同源）。
+    public let scope: String?
     /// 肥尾模型自由度（尾部指数 α），对应 Python 端 --tail-dof
     public let tailDof: Double?
     public let rf: Double

@@ -5,6 +5,11 @@ import PortfolioCore
 /// 敏感性分析弹窗：展示目标收益率从 5% 步进到最大可行收益率的结果。
 public struct SensitivityAnalysisView: View {
     let result: SensitivityAnalysisResult
+    /// 主结果的实际落点（目标收益率 / 夏普 / 波动），用来在图上标一个「当前交付」参考点 ——
+    /// 图与结果页必须同源，这个点应当正好落在曲线上（2026-10-14 起）。
+    var currentTarget: Double? = nil
+    var currentSharpe: Double? = nil
+    var currentVol: Double? = nil
     @Environment(\.dismiss) private var dismiss
 
     public var body: some View {
@@ -13,6 +18,11 @@ public struct SensitivityAnalysisView: View {
                 MacCloseButton { dismiss() }
                 Text("敏感性分析").font(.title2).fontWeight(.semibold)
                 Spacer()
+            }
+            if let scope = result.scope {
+                Text("口径：\(scope)。每一点都是「把目标设成它、实际会交付的组合」。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Summary
@@ -40,18 +50,28 @@ public struct SensitivityAnalysisView: View {
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("夏普比率 vs 目标收益率").font(.headline)
-                    Chart(feasiblePoints, id: \.targetReturn) { (p: SensitivityPoint) in
-                        LineMark(
-                            x: .value("目标收益率", p.targetReturn * 100),
-                            y: .value("夏普比率", p.sharpe ?? 0)
-                        )
-                        .foregroundStyle(.blue)
-                        .interpolationMethod(.catmullRom)
-                        PointMark(
-                            x: .value("目标收益率", p.targetReturn * 100),
-                            y: .value("夏普比率", p.sharpe ?? 0)
-                        )
-                        .foregroundStyle(.blue)
+                    Chart {
+                        ForEach(feasiblePoints, id: \.targetReturn) { (p: SensitivityPoint) in
+                            LineMark(
+                                x: .value("目标收益率", p.targetReturn * 100),
+                                y: .value("夏普比率", p.sharpe ?? 0)
+                            )
+                            .foregroundStyle(.blue)
+                            .interpolationMethod(.monotone)
+                            PointMark(
+                                x: .value("目标收益率", p.targetReturn * 100),
+                                y: .value("夏普比率", p.sharpe ?? 0)
+                            )
+                            .foregroundStyle(.blue)
+                        }
+                        if let t = currentTarget, let s = currentSharpe {
+                            PointMark(x: .value("目标收益率", t * 100), y: .value("夏普比率", s))
+                                .foregroundStyle(.green)
+                                .symbolSize(90)
+                                .annotation(position: .top) {
+                                    Text("当前交付").font(.caption2).foregroundStyle(.green)
+                                }
+                        }
                     }
                     .chartXScale(domain: minTargetPct...maxTargetPct)
                     .chartYAxis { AxisMarks(position: .leading) }

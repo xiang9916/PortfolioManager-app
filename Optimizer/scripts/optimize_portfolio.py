@@ -197,8 +197,10 @@ def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, bro
 
 
 def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, broad_keys, broad_vols,
-                    cap_map=None):
+                    cap_map=None, target=None, rf=None, n_starts=80):
     """Optimize internal US equity weights with total US core weight fixed and no per-ticker caps."""
+    target = TARGET_RETURN if target is None else target
+    rf = RF if rf is None else rf
     # Always consider the full US internal candidate pool, even for tickers the
     # extract file does not currently hold. Keeping file tickers first preserves
     # current-holding priority in tie cases, but the optimizer may add back
@@ -236,7 +238,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
 
     def objective(internal_w):
         w = total_weights(internal_w)
-        _, _, sharpe = portfolio_stats(w, mus, cov, rf=RF)
+        _, _, sharpe = portfolio_stats(w, mus, cov, rf=rf)
         return -sharpe
 
     bounds = [(0.0, None)] * n_internal
@@ -249,11 +251,11 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
 
     cons = [
         {"type": "eq", "fun": lambda x: x.sum() - core_total},
-        {"type": "ineq", "fun": lambda x: mus @ total_weights(x) - TARGET_RETURN},
+        {"type": "ineq", "fun": lambda x: mus @ total_weights(x) - target},
     ]
     rng = np.random.default_rng(19)
     best = None
-    for _ in range(80):
+    for _ in range(n_starts):
         caps = np.array([core_total] * n_internal)
         start = np.zeros(n_internal)
         remaining = core_total
@@ -280,9 +282,9 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
             continue
         if np.any(x < -1e-6) or np.any(x > _upper_array(bounds) + 1e-6):
             continue
-        if mus @ w < TARGET_RETURN - 1e-4:
+        if mus @ w < target - 1e-4:
             continue
-        ret, vol, sharpe = portfolio_stats(w, mus, cov, rf=RF)
+        ret, vol, sharpe = portfolio_stats(w, mus, cov, rf=rf)
         if best is None or sharpe > best[3]:
             best = (x, ret, vol, sharpe, w, internal_tickers)
     if best is not None and cap_map:
@@ -332,8 +334,9 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
 
 
 def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
-                            seed=31, cap_map=None):
+                            seed=31, cap_map=None, rf=None):
     """Generic second-level optimization inside a broad equity bucket."""
+    rf = RF if rf is None else rf
     tickers = list(internal_pool.keys())
     if not tickers:
         return None
@@ -354,7 +357,7 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     def obj(w):
         ret = float(w @ mu)
         vol = float(np.sqrt(w @ cov @ w))
-        return -((ret - RF) / vol if vol > 0 else 0.0)
+        return -((ret - rf) / vol if vol > 0 else 0.0)
 
     cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
     bounds = [(0.0, 1.0)] * n
@@ -382,7 +385,7 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
             continue
         ret = float(x @ mu)
         vol = float(np.sqrt(x @ cov @ x))
-        sharpe = (ret - RF) / vol if vol > 0 else 0.0
+        sharpe = (ret - rf) / vol if vol > 0 else 0.0
         if best is None or sharpe > best[0]:
             best = (sharpe, x, ret, vol)
     if best is None:
@@ -403,17 +406,16 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     }
 
 
-def stage2_japan_optimize(stage1_weights, assets, total_assets, cap_map=None):
+def stage2_japan_optimize(stage1_weights, assets, total_assets, cap_map=None, rf=None):
     """Optimize Japan equity internal factor weights."""
     return _internal_pool_optimize(stage1_weights, assets, JP_INTERNAL, JP_INTERNAL_CORR, "O_JP_EQ",
-                                   total_assets, seed=31, cap_map=cap_map)
+                                   total_assets, seed=31, cap_map=cap_map, rf=rf)
 
 
-
-def stage2_gc_optimize(stage1_weights, assets, total_assets, cap_map=None):
+def stage2_gc_optimize(stage1_weights, assets, total_assets, cap_map=None, rf=None):
     """Optimize Greater China equity internal (沪深300/红利低波/主动/混合/指数/港股宽基/高股息/科技)."""
     return _internal_pool_optimize(stage1_weights, assets, GC_INTERNAL, GC_INTERNAL_CORR, "D_GREATER_CN",
-                                   total_assets, seed=43, cap_map=cap_map)
+                                   total_assets, seed=43, cap_map=cap_map, rf=rf)
 
 
 def build_result_summary(output, hsbc_pool=None):
@@ -687,6 +689,198 @@ def _build_benchmark(output, final):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+# ---------------------------------------------------------------- 完整求解（阶段一 + 袖内固定点）
+#
+# 2026-10-14 修正（用户实测发现）：阶段一过去把「袖」——由内部标的动态组成的大类
+# （美股核心 O_US_CORE、日本权益 O_JP_EQ、大中华权益 D_GREATER_CN）——当成"当前持仓那一篮子"
+# （O_US_CORE 的 μ/σ 按 live 权重聚合），而阶段二会在袖内**重新选标的**。
+# 于是阶段一的模型 ≠ 交付组合：目标落在切点收益以下时，阶段一正好贴着目标交付，阶段二却把
+# 交付收益顶出目标一大截；只扫阶段一的敏感性分析因此与结果页对不上（同一目标点两处结论矛盾）。
+# 现在把袖内 μ/σ 迭代到固定点：**阶段一假设的袖内参数 = 阶段二实际交付的那一篮子**，
+# 于是"目标 ≥ T"这条约束对交付组合同样有效，敏感性扫描也与主结果同源。
+SLEEVE_KEYS = ("O_US_CORE", "O_JP_EQ", "D_GREATER_CN")
+MAX_SLEEVE_ITER = 10
+# 收敛判据放在"袖参数"上：单只袖的 μ/σ 变化都小于 0.4 个百分点就认为阶段一与交付组合同源。
+# （袖内选标是离散的：谁入选、谁触 10% 上限会跳变，SLSQP 也有末位噪声，判据过严会永远不收敛。）
+SLEEVE_TOL = 4e-3
+# 袖内选标是"离散"的（谁入选、谁触上限会跳变），朴素迭代容易来回震荡 →
+# 用阻尼（新参数 = 旧 + λ×(新−旧)）把步长压小。
+SLEEVE_DAMPING = 0.5
+
+
+def _sleeve_params_us(internal, internal_tickers):
+    """阶段二选出的美股袖 → (μ, σ)；σ 用袖内相关性矩阵算真实组合波动。"""
+    if internal is None or not internal_tickers:
+        return None
+    x = np.asarray(internal[0], dtype=float)
+    total = float(x.sum())
+    if total <= 1e-9:
+        return None
+    w = x / total
+    mus = np.array([US_INTERNAL[t]["mu"] for t in internal_tickers])
+    vols = np.array([US_INTERNAL[t]["vol"] for t in internal_tickers])
+    corr = project_psd(build_corr_matrix(len(internal_tickers), internal_tickers, US_INTERNAL_CORR))
+    cov = np.outer(vols, vols) * corr
+    return float(w @ mus), float(np.sqrt(w @ cov @ w))
+
+
+def _inject_sleeve_params(assets, sleeve):
+    """把当前袖参数写进大类资产（O_US_CORE 等），返回新列表，不改原表。"""
+    out = []
+    for a in assets:
+        item = dict(a)
+        p = sleeve.get(item["key"])
+        if p is not None:
+            item["mu"], item["vol"] = float(p[0]), float(p[1])
+        out.append(item)
+    return out
+
+
+def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
+                log=None, stage1_starts=160, stage2_starts=80, warn=None):
+    """一轮完整求解：阶段一（大类，max 夏普 s.t. 收益 ≥ 目标）→ 阶段二（袖内再优化）。"""
+    warnings = warn if warn is not None else []
+    keys = [a["key"] for a in assets]
+    mu = np.array([a["mu"] for a in assets])
+    vols = np.array([a["vol"] for a in assets])
+    cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], corr_pairs)
+    dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
+    ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
+
+    lower, upper = stage1_bounds(assets)
+    cap_map = _active_cap_map(assets)
+    apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings)
+
+    eff_target = float(target)
+    solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
+                              n_starts=stage1_starts, rf=rf)
+    if solved is None:
+        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target, rf=rf)
+    if solved is None:
+        max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
+        warnings.append(f"{eff_target:.0%} 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
+        eff_target = max_ret - 1e-6
+        solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
+                                  seed=23, n_starts=stage1_starts, rf=rf)
+    if solved is None:
+        return None
+    w1, ret1, vol1, sharpe1 = solved
+    for i, a in enumerate(assets):
+        cap = cap_map.get(a.get("key"))
+        if cap is not None and w1[i] >= cap - 1e-6:
+            _note_cap_hit(a["key"], w1[i], cap)
+    if log:
+        log("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}")
+
+    japan_selection = stage2_japan_optimize(w1, assets, total_assets, cap_map=cap_map, rf=rf)
+    gc_selection = stage2_gc_optimize(w1, assets, total_assets, cap_map=cap_map, rf=rf)
+    internal, stage2_error = stage2_optimize(
+        w1, extract, total_assets, assets, cov, keys, vols, cap_map=cap_map,
+        target=eff_target, rf=rf, n_starts=stage2_starts)
+
+    if internal is not None:
+        x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal
+        final = {"ret": ret2, "vol": vol2, "sharpe": sharpe2, "floor": ret2 - 1.96 * vol2}
+    else:
+        # stage2 不可行时汇总回退第一阶段统计，否则结果文件会全成 0（Bug D2）
+        final = {"ret": ret1, "vol": vol1, "sharpe": sharpe1, "floor": ret1 - 1.96 * vol1}
+        if stage2_error:
+            warnings.append(stage2_error)
+        warnings.append("美国权益内部优化不可行，组合统计已回退使用第一阶段结果。")
+
+    return {
+        "assets": assets, "keys": keys, "mu": mu, "vols": vols, "cov": cov,
+        "dom_idx": dom_idx, "ov_idx": ov_idx, "lower": lower, "upper": upper, "cap_map": cap_map,
+        "stage1_weights": w1, "stage1_ret": ret1, "stage1_vol": vol1, "stage1_sharpe": sharpe1,
+        "japan_selection": japan_selection, "gc_selection": gc_selection,
+        "internal": internal, "internal_tickers": (internal[5] if internal is not None else None),
+        "stage2_error": stage2_error, "final": final, "target": eff_target, "warnings": warnings,
+    }
+
+
+def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
+                    warnings=None, log=None, max_sleeve_iter=MAX_SLEEVE_ITER, sleeve_tol=SLEEVE_TOL,
+                    stage1_starts=160, stage2_starts=80, sleeve_start=None,
+                    damping=SLEEVE_DAMPING):
+    """完整求解（袖内参数固定点迭代）。
+
+    返回 None（不可行）或结果字典；袖参数、迭代轮数与是否收敛一并带出，便于审计与提示。
+    """
+    warnings = [] if warnings is None else warnings
+    sleeve = {}
+    for a in assets:
+        if a["key"] in SLEEVE_KEYS and a.get("mu") is not None:
+            start = (sleeve_start or {}).get(a["key"])
+            sleeve[a["key"]] = tuple(start) if start else (float(a["mu"]), float(a["vol"]))
+
+    iters = max(1, int(max_sleeve_iter))
+    history, converged, delta = [], False, 0.0
+    best = None          # (分数, 该轮结果, 该轮假设的袖参数)：未收敛时取误差最小的一轮
+    for it in range(iters):
+        assumed = dict(sleeve)
+        warn_local = []
+        solved = _solve_once(_inject_sleeve_params(assets, sleeve), corr_pairs,
+                             dom_w=dom_w, ov_w=ov_w, target=target, rf=rf, extract=extract,
+                             total_assets=total_assets, log=log,
+                             stage1_starts=stage1_starts, stage2_starts=stage2_starts,
+                             warn=warn_local)
+        if solved is None:
+            return None
+        for m in warn_local:
+            if m not in warnings:
+                warnings.append(m)
+
+        nxt = dict(sleeve)
+        us = _sleeve_params_us(solved["internal"], solved["internal_tickers"])
+        if us is not None:
+            nxt["O_US_CORE"] = us
+        for key, sel in (("O_JP_EQ", solved["japan_selection"]),
+                         ("D_GREATER_CN", solved["gc_selection"])):
+            if key in nxt and sel and sel.get("ret") is not None:
+                nxt[key] = (float(sel["ret"]), float(sel["vol"]))
+        delta = max((max(abs(nxt[k][0] - sleeve[k][0]), abs(nxt[k][1] - sleeve[k][1]))
+                     for k in nxt if k in sleeve), default=0.0)
+        history.append({"iter": it + 1, "delta": round(float(delta), 6),
+                        "sleeve": {k: [round(float(v[0]), 6), round(float(v[1]), 6)]
+                                   for k, v in sleeve.items()}})
+        if log:
+            tail = "（已收敛）" if delta <= sleeve_tol else ""
+            log("sleeve_fixpoint", f"袖内参数迭代 {it + 1}/{iters}：最大变化 {delta:.4f}{tail}")
+        # 排序键：先看"模型与交付组合差多少"（这才是我们要的一致性），再看是否收敛
+        model_gap = abs(solved["final"]["ret"] - solved["stage1_ret"]) + \
+            abs(solved["final"]["vol"] - solved["stage1_vol"])
+        score = (round(model_gap, 6), 0 if delta <= sleeve_tol else 1)
+        if best is None or score < best[0]:
+            best = (score, solved, assumed)
+        if delta <= sleeve_tol:
+            converged = True
+            break
+        # 阻尼推进：把"观测到的新参数"按 λ 混进当前值，避免离散选标引起的来回跳
+        blended = {}
+        for k, v in nxt.items():
+            old_v = sleeve[k]
+            blended[k] = (old_v[0] + damping * (v[0] - old_v[0]),
+                          old_v[1] + damping * (v[1] - old_v[1]))
+        sleeve = blended
+
+    if not converged:
+        # 袖内选标是离散的，映射可能不收敛 → 取"阶段一模型 vs 交付组合"误差最小的那一轮，
+        # 而不是硬性采用最后一轮（两者都可能不是固定点）。
+        _, solved, sleeve = best
+        warnings.append(
+            f"袖内参数迭代 {len(history)} 轮未完全收敛（最后一轮最大变化 {delta:.4f}）；"
+            f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {best[0][0]:.4f}）。")
+
+    solved["warnings"] = warnings       # 合并后的完整提示（_solve_once 只带自己那一轮的）
+    solved.update({
+        "sleeve_params": {k: [round(float(v[0]), 6), round(float(v[1]), 6)] for k, v in sleeve.items()},
+        "sleeve_iterations": len(history),
+        "sleeve_converged": converged,
+        "sleeve_history": history,
+    })
+    return solved
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("extract_json")
@@ -897,96 +1091,49 @@ def main():
             "以下标的取不到 μ/σ（校准文件里没有、也没有写死值），本次不参与优化: " + "、".join(unusable))
         assets = [a for a in assets if a.get("mu") is not None and a.get("vol") is not None]
 
-    keys = [a["key"] for a in assets]
-    mu = np.array([a["mu"] for a in assets])
-    vols = np.array([a["vol"] for a in assets])
-    cov = build_broad_cov(
-        [{"key": a["key"], "vol": a["vol"]} for a in assets],
+    # ---- 完整求解：阶段一（大类）+ 袖内固定点迭代（2026-10-14）----
+    # 袖内 μ/σ 迭代到"阶段一假设 == 阶段二交付"的固定点，因此下面报告的 final
+    # 就是阶段一那条约束（收益 ≥ 目标）真正作用到的组合。
+    total_assets = args.total_assets or float(extract["total_value"])
+    solved_all = solve_portfolio(
+        assets,
         {**BROAD_CORR, **(test_corr_pairs if args.test_tickers else {})},
+        dom_w=dom_w, ov_w=ov_w, target=TARGET_RETURN, rf=RF,
+        extract=extract, total_assets=total_assets, warnings=warnings,
+        log=lambda step, msg, level="info": log_step(step, msg, level=level, log_path=args.log_path),
     )
-    dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
-    ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
-
-    log_step("stage1_broad", "第一阶段：大类资产最大夏普优化（s.t. 收益 ≥ 目标）", log_path=args.log_path)
-    lower, upper = stage1_bounds(assets)
-    cap_map = _active_cap_map(assets)
-    apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings)
-    target = TARGET_RETURN
-    # 目标函数（2026-10-13 用户定稿）：两阶段统一为 max 夏普，收益目标只作为**下限**。
-    # 若目标高于切点收益，约束绷紧 → 解自然落到"有效前沿上收益=目标"的那点（与 min 方差等价），
-    # 所以下面保留 min 方差作为兜底，避免 SLSQP 在约束边界上失败时拿不到解。
-    solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
-    if solved is None:
-        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=RF)
-    if solved is None:
-        max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
-        warnings.append(f"{target:.0%} 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
-        target = max_ret - 1e-6
-        # Bug D1 修复: 回退后的靶值必须同步回全局 TARGET_RETURN,
-        # 否则 stage2 的收益约束仍按原始(不可行)目标求解, 导致 stage2 必然返回 None.
-        TARGET_RETURN = target
-        solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target,
-                                  seed=23, rf=RF)
-
-    if solved is None:
+    if solved_all is None:
         print(json.dumps({"error": "Optimization infeasible", "warnings": warnings}, ensure_ascii=False, indent=2))
         sys.exit(1)
 
-    w1, ret1, vol1, sharpe1 = solved
-    # 记录 stage-1 里被 active 上限压住的标的（稍后合并成一条报警）
-    for i, a in enumerate(assets):
-        cap = cap_map.get(a.get("key"))
-        if cap is not None and w1[i] >= cap - 1e-6:
-            _note_cap_hit(a["key"], w1[i], cap)
-    log_step("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}", log_path=args.log_path)
-    total_assets = args.total_assets or float(extract["total_value"])
+    assets = solved_all["assets"]
+    keys, mu, vols, cov = solved_all["keys"], solved_all["mu"], solved_all["vols"], solved_all["cov"]
+    w1 = solved_all["stage1_weights"]
+    ret1, vol1, sharpe1 = solved_all["stage1_ret"], solved_all["stage1_vol"], solved_all["stage1_sharpe"]
+    target = solved_all["target"]
+    TARGET_RETURN = target          # 回退后的靶值要留给后续（历史 Bug D1）
+    cap_map = solved_all["cap_map"]
+    internal = solved_all["internal"]
+    internal_tickers = solved_all["internal_tickers"]
+    stage2_error = solved_all["stage2_error"]
+    japan_selection = solved_all["japan_selection"]
+    gc_selection = solved_all["gc_selection"]
+    final = solved_all["final"]
+    log_step("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}",
+             log_path=args.log_path)
+    log_step("stage2_internal", "第二阶段：美国权益内部标的优化", log_path=args.log_path)
 
     domestic_selection = select_domestic_funds(w1, assets, hsbc_pool, total_assets)
     log_step("select_domestic", "境内基金选择完成", log_path=args.log_path)
-
-    japan_selection = stage2_japan_optimize(w1, assets, total_assets, cap_map=cap_map)
-    gc_selection = stage2_gc_optimize(w1, assets, total_assets, cap_map=cap_map)
-
-    log_step("stage2_internal", "第二阶段：美国权益内部标的优化", log_path=args.log_path)
-    internal, stage2_error = stage2_optimize(
-        w1,
-        extract,
-        total_assets,
-        assets,
-        cov,
-        keys,
-        vols,
-        cap_map=cap_map,
-    )
-    final = None
-    if internal is not None:
-        x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal
-        final = {
-            "ret": ret2,
-            "vol": vol2,
-            "sharpe": sharpe2,
-            "floor": ret2 - 1.96 * vol2,
-        }
-    else:
-        # Bug D2 修复: stage2 不可行时汇总回退第一阶段统计,
-        # 否则 final=None 会让结果文件的组合收益/波动/夏普全部变成 0.
-        final = {
-            "ret": ret1,
-            "vol": vol1,
-            "sharpe": sharpe1,
-            "floor": ret1 - 1.96 * vol1,
-        }
-        if stage2_error:
-            warnings.append(stage2_error)
-        warnings.append("美国权益内部优化不可行，组合统计已回退使用第一阶段结果。")
 
     target_gap = None
     if target is not None and final is not None:
         target_gap = float(final.get("ret", 0.0)) - float(target)
         if target_gap > 0.002:
             warnings.append(
-                f"目标收益 {target:.2%} 只是下限：目标是最大化夏普，实际取到 {final.get('ret', 0.0):.2%}"
-                f"（高出 {target_gap:.2%}）。想让目标说了算，把目标设到切点收益以上，或改回 min 方差口径。")
+                f"目标收益 {target:.2%} 是收益**下限**（不是锚）：求解目标是最大化夏普，"
+                f"实际交付 {final.get('ret', 0.0):.2%}（高出 {target_gap:.2%}）。"
+                f"目标低于切点收益时结果不随滑杆变化，把目标提到切点收益以上才会沿前沿上移。")
 
     stage1_detail = {
         "weights": {keys[i]: float(w1[i]) for i in range(len(keys)) if w1[i] > 1e-6},
@@ -1037,6 +1184,12 @@ def main():
             "funds": avail_funds,
         },
         "stage1": stage1_detail,
+        "sleeve": {
+            "params": solved_all["sleeve_params"],
+            "iterations": solved_all["sleeve_iterations"],
+            "converged": solved_all["sleeve_converged"],
+            "history": solved_all["sleeve_history"],
+        },
         "stage2": None,
         "domestic_selection": domestic_selection,
         "japan_selection": japan_selection,
