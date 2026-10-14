@@ -288,3 +288,48 @@ def filter_available_assets(assets, avail_funds, warnings, hsbc_status=None):
             continue
         kept.append(a)
     return kept
+
+
+def live_anchors_from_extract(extract):
+    """从提取文件 (extract_live.json) 的 domestic_holdings 提取用户实际持有的境内基金锚定。
+
+    用 classify_domestic_fund(name) 归类，覆盖 params.py 写死的 fund_code 作为各类锚定。
+    optimize_portfolio.main() 与 sensitivity_analysis.load_extract_assets() 过去各写了一份
+    完全相同的循环，这里合并 (2026-10-14 重构，行为不变)。
+    """
+    anchors = {}
+    for h in extract.get("domestic_holdings", []):
+        cat = classify_domestic_fund(h.get("name", ""))
+        anchors[cat] = h.get("code")
+    return anchors
+
+
+def build_investable_assets(hsbc_pool, pool_meta, avail_funds, hsbc_status,
+                            warnings, core_mu, core_vol,
+                            drop_note="已从第一阶段剔除"):
+    """按联网口径构建第一阶段可投大类资产列表（两个入口共用同一份循环）。
+
+    步骤：剔除「无在售候选 / 候选全部暂停申购」的境内大类 → 注入 O_US_CORE 的
+    live 聚合 μ/σ（us_core_params 的结果，由调用方算好传入）→ 按实时申赎状态过滤。
+    drop_note 保留两个入口原有的提示措辞（主流程「已从第一阶段剔除」、敏感性「已剔除」），
+    文案属于对外可见行为，重构不统一它。
+    """
+    assets = []
+    for a in BROAD_ASSETS:
+        # 境内大类剔除规则 (联网口径): 汇丰在售池无候选, 或全部候选被天天基金
+        # 判为暂停申购 → 买不到, 不进第一阶段 (如 QDII 商品可能无在售基金).
+        if a["pool"] == "domestic" and hsbc_pool and a["key"] not in hsbc_pool:
+            cat = pool_meta["categories"].get(a["key"])
+            if cat:
+                warnings.append(
+                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选当前均不可申购，"
+                    f"{drop_note}。")
+            else:
+                warnings.append(f"境内大类 {a['name']}（{a['key']}）没有在售候选基金，{drop_note}。")
+            continue
+        item = dict(a)
+        if item["key"] == "O_US_CORE":
+            item["mu"] = core_mu
+            item["vol"] = core_vol
+        assets.append(item)
+    return filter_available_assets(assets, avail_funds, warnings, hsbc_status)

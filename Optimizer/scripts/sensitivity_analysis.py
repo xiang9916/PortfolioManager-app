@@ -21,23 +21,18 @@ import math
 
 import numpy as np
 try:
-    from scipy.optimize import minimize
     from scipy import integrate, stats
 except ImportError:
     print("scipy required for sensitivity analysis.", file=sys.stderr)
     sys.exit(2)
 
 from params import (
-    BROAD_ASSETS, BROAD_CORR, RF, TARGET_RETURN,
-    build_broad_cov, classify_domestic_fund,
+    BROAD_CORR, RF,
+    build_broad_cov,
     build_open_pool_from_status,
     us_core_params,
 )
 from optimize_common import (
-    portfolio_stats,
-    feasible_start,
-    solve_min_var,
-    solve_max_sharpe,
     max_feasible_return,
     stage1_bounds,
 )
@@ -47,7 +42,8 @@ from optimize_portfolio import solve_portfolio
 from fund_pipeline import (
     ensure_pipeline,
     ensure_work_dir,
-    filter_available_assets,
+    build_investable_assets,
+    live_anchors_from_extract,
     load_pipeline,
 )
 
@@ -66,10 +62,7 @@ def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
     warnings = list(extract.get("warnings", []))
 
     # live_anchors: 用户实际持仓的境内基金锚定 (与 optimize_portfolio 同一逻辑)
-    live_anchors = {}
-    for h in extract.get("domestic_holdings", []):
-        cat = classify_domestic_fund(h.get("name", ""))
-        live_anchors[cat] = h.get("code")
+    live_anchors = live_anchors_from_extract(extract)
 
     work = ensure_work_dir(work_dir)
     cached = load_pipeline(work)
@@ -95,23 +88,11 @@ def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
     internal_weights = {h["ticker"]: h["weight"] for h in extract["us_equity"]["holdings"]}
     core_mu, core_vol = us_core_params(internal_weights)
 
-    assets = []
-    for a in BROAD_ASSETS:
-        if a["pool"] == "domestic" and hsbc_pool and a["key"] not in hsbc_pool:
-            cat = pool_meta["categories"].get(a["key"])
-            if cat:
-                warnings.append(
-                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选当前均不可申购，"
-                    f"已剔除。")
-            else:
-                warnings.append(f"境内大类 {a['name']}（{a['key']}）没有在售候选基金，已剔除。")
-            continue
-        item = dict(a)
-        if item["key"] == "O_US_CORE":
-            item["mu"] = core_mu
-            item["vol"] = core_vol
-        assets.append(item)
-    assets = filter_available_assets(assets, avail_funds, warnings, hsbc_status)
+    # 与 optimize_portfolio.main() 共用同一份资产构建循环；drop_note 保留本入口
+    # 原有的提示措辞（「已剔除」），文案属于对外可见行为，重构不统一它。
+    assets = build_investable_assets(
+        hsbc_pool, pool_meta, avail_funds, hsbc_status, warnings,
+        core_mu=core_mu, core_vol=core_vol, drop_note="已剔除")
 
     pipeline_info = {
         "work_dir": str(work),

@@ -30,38 +30,42 @@ from params import (
     GC_INTERNAL,
     GC_INTERNAL_CORR,
     build_broad_cov,
-    classify_domestic_fund,
     build_open_pool_from_status,
     us_core_params,
 )
 from optimize_common import (
     portfolio_stats,
-    feasible_start,
     solve_min_var,
     solve_max_sharpe,
     max_feasible_return,
     stage1_bounds,
     project_psd,
     build_corr_matrix,
+    upper_bounds_array as _upper_array,   # 名字保留 _upper_array：test_optimizer_caps 直接引用
+    _respects_bounds,
 )
 from fund_pipeline import (
     ensure_pipeline,
     ensure_work_dir,
-    filter_available_assets,
+    build_investable_assets,
+    live_anchors_from_extract,
 )
 from test_tickers import parse_test_tickers, resolve_test_assets
 import asset_classes as AC
 
 
 
-def _upper_array(bounds):
-    """把 scipy 的 bounds 列表转成上界数组（None = 无上界）。"""
-    return np.array([np.inf if b[1] is None else float(b[1]) for b in bounds])
-
-
 # 「个股/主动」类单标的组合权重上限（asset_classes.ACTIVE_CAP = 10%）触发记录，
 # 最后合并成一条报警，避免每次跑都刷屏。
 CAP_HITS = []
+
+# D_HSBC_SP500（标普500 QDII 大类）与美股内部各执行标的的相关性：手工标定。
+# 其余固定大类与内部标的之间没有直接的历史序列可算，用「该大类 vs O_US_CORE」的
+# 大类级相关性做代理（见 stage2_covariance）——这是近似，不是估计。
+SP500_INTERNAL_CORR = {
+    "SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60,
+}
+SP500_INTERNAL_CORR_DEFAULT = 0.75
 
 
 def _note_cap_hit(key, weight, cap):
@@ -133,7 +137,7 @@ def log_step(step, message, level="info", log_path=None):
 
 
 # 基金申赎管线 (实时抓汇丰 + 天天基金校验 + 开放池构建) 统一在 fund_pipeline.py;
-# filter_available_assets 也从那里导入 (与 sensitivity_analysis.py 共用同一口径).
+# 可投大类构建 (build_investable_assets) 也在那里, 与 sensitivity_analysis.py 共用同一口径.
 
 
 def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols):
@@ -175,7 +179,7 @@ def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, bro
         for j, ticker in enumerate(internal_tickers):
             idx = len(fixed_assets) + j
             if a["key"] == "D_HSBC_SP500":
-                base_ij = {"SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60}.get(ticker, 0.75)
+                base_ij = SP500_INTERNAL_CORR.get(ticker, SP500_INTERNAL_CORR_DEFAULT)
             else:
                 base_ij = base
             corr[i, idx] = corr[idx, i] = base_ij
@@ -280,7 +284,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         w = total_weights(x)
         if abs(x.sum() - core_total) > 1e-4:
             continue
-        if np.any(x < -1e-6) or np.any(x > _upper_array(bounds) + 1e-6):
+        if not _respects_bounds(x, _upper_array(bounds)):
             continue
         if mus @ w < target - 1e-4:
             continue
@@ -381,7 +385,7 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
         x = res.x
         if abs(x.sum() - 1.0) > 1e-4:
             continue
-        if np.any(x < -1e-6) or np.any(x > _upper_array(bounds) + 1e-6):
+        if not _respects_bounds(x, _upper_array(bounds)):
             continue
         ret = float(x @ mu)
         vol = float(np.sqrt(x @ cov @ x))
@@ -736,6 +740,27 @@ def _inject_sleeve_params(assets, sleeve):
     return out
 
 
+def _solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf,
+                  stage1_starts, warnings):
+    """阶段一求解与回退链：max 夏普 → min 方差（约束绷紧区间两者等价）→ 最大可行收益。
+
+    返回 (解, 生效目标)。三级都失败时返回 (None, target)，由调用方决定整体失败。
+    seed=23 的末级回退是历史行为，不要顺手改（会改变回退结果的可复现性）。
+    """
+    solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target,
+                              n_starts=stage1_starts, rf=rf)
+    if solved is None:
+        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf=rf)
+    if solved is not None:
+        return solved, target
+    max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
+    warnings.append(f"{target:.0%} 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
+    eff_target = max_ret - 1e-6
+    solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
+                              seed=23, n_starts=stage1_starts, rf=rf)
+    return solved, (eff_target if solved is not None else target)
+
+
 def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
                 log=None, stage1_starts=160, stage2_starts=80, warn=None):
     """一轮完整求解：阶段一（大类，max 夏普 s.t. 收益 ≥ 目标）→ 阶段二（袖内再优化）。"""
@@ -751,17 +776,8 @@ def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_a
     cap_map = _active_cap_map(assets)
     apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings)
 
-    eff_target = float(target)
-    solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
-                              n_starts=stage1_starts, rf=rf)
-    if solved is None:
-        solved = solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target, rf=rf)
-    if solved is None:
-        max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
-        warnings.append(f"{eff_target:.0%} 目标在当前约束下不可行，已回退到最大可行收益 {max_ret:.2%}。")
-        eff_target = max_ret - 1e-6
-        solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
-                                  seed=23, n_starts=stage1_starts, rf=rf)
+    solved, eff_target = _solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
+                                       float(target), rf, stage1_starts, warnings)
     if solved is None:
         return None
     w1, ret1, vol1, sharpe1 = solved
@@ -881,6 +897,58 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
     return solved
 
 
+def _inject_test_assets(args, assets, work_dir, warnings):
+    """新标的测试：临时标的作为新增资产注入第一阶段（在可投性过滤之后，不受其约束）。
+
+    返回 (assets', test_corr_pairs, test_skipped, test_estimates)。
+    全部标的不可用时打印错误 JSON 并以退出码 3 结束（与原 main 内联行为一致）。
+    """
+    test_estimates, test_skipped = [], []
+    if not args.test_tickers:
+        return assets, None, test_skipped, test_estimates
+    test_assets, test_corr_pairs, test_skipped, test_estimates = resolve_test_assets(
+        args.test_tickers,
+        work_dir,
+        existing_keys={a["key"] for a in assets},
+        internal_keys=set(US_INTERNAL.keys()),
+        # 相关性要覆盖全量大类 (不只是本次可投的那几个): 基准对比用
+        # D_HSBC_SP500 / D_GREATER_CN 算组合 Beta, 缺了这些行 Beta 会被低估。
+        corr_keys={a["key"] for a in BROAD_ASSETS},
+        test_class=args.test_class,
+        log=lambda msg, level="info": log_step(
+            "test_tickers", msg, level=level, log_path=args.log_path),
+    )
+    for t, reason in test_skipped:
+        warnings.append(f"测试标的 {t} 已跳过: {reason}")
+    # 测试标的没有登记先验：broad/strategy 会退化成纯历史，必须显式说明口径不同
+    for e in test_estimates:
+        if e.get("mu_note") == "history_only":
+            warnings.append(
+                f"测试标的 {e['ticker']} 标为「{AC.CLASS_RULES[e['test_class']]['label']}」，"
+                f"但该类的人工先验只对登记在册的标的有效；测试标的使用纯历史年化 "
+                f"μ={e['mu']:.2%}（组合内同类标的的口径是"
+                f"{AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 历史 + "
+                f"{1-AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 先验，两者不可直接横比）。")
+    if not test_assets:
+        detail = "; ".join(f"{t}: {r}" for t, r in test_skipped) or "无有效标的"
+        print(json.dumps(
+            {"error": "所有测试标的均不可用", "detail": detail, "warnings": warnings},
+            ensure_ascii=False))
+        sys.exit(3)
+    assets = assets + test_assets
+    for a in test_assets:
+        if a["pool"] == "domestic":
+            warnings.append(
+                f"测试标的 {a['name']} 按境内池约束参与优化 (what-if 口径, "
+                f"不经汇丰在售校验, 也不出现在境内基金执行清单)。")
+    log_step(
+        "test_tickers",
+        f"新增 {len(test_assets)} 个测试资产: "
+        + ", ".join(a["key"] for a in test_assets),
+        log_path=args.log_path)
+    return assets, test_corr_pairs, test_skipped, test_estimates
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("extract_json")
@@ -956,10 +1024,7 @@ def main():
     # live_anchors: 用户实际持有的境内基金代码 (从 extract_live.json domestic_holdings 提取),
     # 用 classify_domestic_fund(name) 归类, 覆盖 params.py 写死的 fund_code 作为各类锚定.
     # 效果: select_domestic_funds 优先保留用户已持有基金而非推荐换仓到同类最低费率基金.
-    live_anchors = {}
-    for h in extract.get("domestic_holdings", []):
-        cat = classify_domestic_fund(h.get("name", ""))
-        live_anchors[cat] = h.get("code")
+    live_anchors = live_anchors_from_extract(extract)
     if live_anchors:
         log_step("live_anchors", f"动态锚定 {len(live_anchors)} 个境内基金 (覆盖 params.py 静态锚定)", log_path=args.log_path)
 
@@ -1009,25 +1074,9 @@ def main():
     internal_weights = {h["ticker"]: h["weight"] for h in extract["us_equity"]["holdings"]}
     core_mu, core_vol = us_core_params(internal_weights)
 
-    assets = []
-    for a in BROAD_ASSETS:
-        # 境内大类剔除规则 (联网口径): 汇丰在售池无候选, 或全部候选被天天基金
-        # 判为暂停申购 → 买不到, 不进第一阶段 (如 QDII 商品可能无在售基金).
-        if a["pool"] == "domestic" and hsbc_pool and a["key"] not in hsbc_pool:
-            cat = pool_meta["categories"].get(a["key"])
-            if cat:
-                warnings.append(
-                    f"境内大类 {a['name']}（{a['key']}）的 {len(cat.get('tried', []))} 只候选当前均不可申购，"
-                    f"已从第一阶段剔除。")
-            else:
-                warnings.append(f"境内大类 {a['name']}（{a['key']}）没有在售候选基金，已从第一阶段剔除。")
-            continue
-        item = dict(a)
-        if a["key"] == "O_US_CORE":
-            item["mu"] = core_mu
-            item["vol"] = core_vol
-        assets.append(item)
-    assets = filter_available_assets(assets, avail_funds, warnings, hsbc_status)
+    assets = build_investable_assets(
+        hsbc_pool, pool_meta, avail_funds, hsbc_status, warnings,
+        core_mu=core_mu, core_vol=core_vol, drop_note="已从第一阶段剔除")
     log_step("build_assets", f"构建大类资产 {len(assets)} 项", log_path=args.log_path)
     if not any(a["pool"] == "domestic" for a in assets):
         print(
@@ -1039,49 +1088,8 @@ def main():
         sys.exit(1)
 
     # ---- 新标的测试: 临时标的作为新增资产注入第一阶段 (在可投性过滤之后, 不受其约束) ----
-    test_estimates, test_skipped = [], []
-    if args.test_tickers:
-        test_assets, test_corr_pairs, test_skipped, test_estimates = resolve_test_assets(
-            args.test_tickers,
-            work_dir,
-            existing_keys={a["key"] for a in assets},
-            internal_keys=set(US_INTERNAL.keys()),
-            # 相关性要覆盖全量大类 (不只是本次可投的那几个): 基准对比用
-            # D_HSBC_SP500 / D_GREATER_CN 算组合 Beta, 缺了这些行 Beta 会被低估。
-            corr_keys={a["key"] for a in BROAD_ASSETS},
-            test_class=args.test_class,
-            log=lambda msg, level="info": log_step(
-                "test_tickers", msg, level=level, log_path=args.log_path),
-        )
-        for t, reason in test_skipped:
-            warnings.append(f"测试标的 {t} 已跳过: {reason}")
-        # 测试标的没有登记先验：broad/strategy 会退化成纯历史，必须显式说明口径不同
-        for e in test_estimates:
-            if e.get("mu_note") == "history_only":
-                warnings.append(
-                    f"测试标的 {e['ticker']} 标为「{AC.CLASS_RULES[e['test_class']]['label']}」，"
-                    f"但该类的人工先验只对登记在册的标的有效；测试标的使用纯历史年化 "
-                    f"μ={e['mu']:.2%}（组合内同类标的的口径是"
-                    f"{AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 历史 + "
-                    f"{1-AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 先验，两者不可直接横比）。")
-        if test_assets:
-            assets = assets + test_assets
-            for a in test_assets:
-                if a["pool"] == "domestic":
-                    warnings.append(
-                        f"测试标的 {a['name']} 按境内池约束参与优化 (what-if 口径, "
-                        f"不经汇丰在售校验, 也不出现在境内基金执行清单)。")
-            log_step(
-                "test_tickers",
-                f"新增 {len(test_assets)} 个测试资产: "
-                + ", ".join(a["key"] for a in test_assets),
-                log_path=args.log_path)
-        else:
-            detail = "; ".join(f"{t}: {r}" for t, r in test_skipped) or "无有效标的"
-            print(json.dumps(
-                {"error": "所有测试标的均不可用", "detail": detail, "warnings": warnings},
-                ensure_ascii=False))
-            sys.exit(3)
+    assets, test_corr_pairs, test_skipped, test_estimates = _inject_test_assets(
+        args, assets, work_dir, warnings)
 
     # 缺 μ/σ 的标的（校准文件里没有它、也没有写死值可用）不能进优化：显式剔除并报警，
     # 不静默用 0 顶上（0 波动会直接霸占权重）。σ 已无人工下限，所以这类标的只能缺席。
