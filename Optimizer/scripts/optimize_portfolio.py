@@ -337,25 +337,20 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
     return selection
 
 
-def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
-                            seed=31, cap_map=None, rf=None):
-    """Generic second-level optimization inside a broad equity bucket."""
-    rf = RF if rf is None else rf
+def _optimize_within_pool(internal_pool, internal_corr, rf, seed, cap_norm=None, n_starts=60):
+    """在给定内部池内做「max 夏普 s.t. 袖内权重和 = 1」，返回 (x, ret, vol, sharpe) 或 None。
+
+    阶段二（_internal_pool_optimize）与固定点迭代里的"空袖重新播种"（_sleeve_reseed_params）
+    共用这一份实现：前者传归一化上限（组合上限 ÷ 袖权重），后者不设上限
+    —— 播种要回答的是"这只袖自己能达到什么"，不该被它当前的组合权重限制。
+    """
     tickers = list(internal_pool.keys())
     if not tickers:
         return None
-    if broad_key not in [a["key"] for a in assets]:
-        return None
-    idx = [i for i, a in enumerate(assets) if a["key"] == broad_key][0]
-    total_w = float(stage1_weights[idx])
-    if total_w <= 1e-6:
-        return None
-
     n = len(tickers)
     mu = np.array([internal_pool[t]["mu"] for t in tickers])
     vols = np.array([internal_pool[t]["vol"] for t in tickers])
-    corr = build_corr_matrix(n, tickers, internal_corr)
-    corr = project_psd(corr)
+    corr = project_psd(build_corr_matrix(n, tickers, internal_corr))
     cov = np.outer(vols, vols) * corr
 
     def obj(w):
@@ -365,19 +360,14 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
 
     cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
     bounds = [(0.0, 1.0)] * n
-    # 桶内权重是"归一化后 × 桶权重"，所以组合上限要折算：cap_norm = cap / total_w
-    cap_norm = {}
-    if cap_map and total_w > 1e-9:
-        for t in tickers:
-            cap = cap_map.get(t)
-            if cap is not None:
-                cap_norm[t] = min(1.0, cap / total_w)
-        for i, t in enumerate(tickers):
-            if t in cap_norm:
-                bounds[i] = (0.0, cap_norm[t])
+    for i, t in enumerate(tickers):
+        cap = (cap_norm or {}).get(t)
+        if cap is not None:
+            bounds[i] = (0.0, min(1.0, float(cap)))
+
     rng = np.random.default_rng(seed)
     best = None
-    for _ in range(60):
+    for _ in range(n_starts):
         start = rng.random(n)
         start /= start.sum()
         res = minimize(obj, start, method="SLSQP", bounds=bounds, constraints=cons,
@@ -395,8 +385,37 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     if best is None:
         return None
     sharpe, x, ret, vol = best
+    return x, ret, vol, sharpe
+
+
+def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
+                            seed=31, cap_map=None, rf=None):
+    """Generic second-level optimization inside a broad equity bucket."""
+    rf = RF if rf is None else rf
+    tickers = list(internal_pool.keys())
+    if not tickers:
+        return None
+    if broad_key not in [a["key"] for a in assets]:
+        return None
+    idx = [i for i, a in enumerate(assets) if a["key"] == broad_key][0]
+    total_w = float(stage1_weights[idx])
+    if total_w <= 1e-6:
+        return None
+
+    # 桶内权重是"归一化后 × 桶权重"，所以组合上限要折算：cap_norm = cap / total_w
+    cap_norm = {}
+    if cap_map and total_w > 1e-9:
+        for t in internal_pool:
+            cap = cap_map.get(t)
+            if cap is not None:
+                cap_norm[t] = min(1.0, cap / total_w)
+
+    got = _optimize_within_pool(internal_pool, internal_corr, rf, seed, cap_norm=cap_norm)
+    if got is None:
+        return None
+    x, ret, vol, sharpe = got
     if cap_norm:
-        for i, t in enumerate(tickers):
+        for i, t in enumerate(internal_pool):
             if t in cap_norm and x[i] >= cap_norm[t] - 1e-6:
                 _note_cap_hit(t, x[i] * total_w, cap_map[t])
     return {
@@ -710,6 +729,18 @@ SLEEVE_TOL = 4e-3
 # 袖内选标是"离散"的（谁入选、谁触上限会跳变），朴素迭代容易来回震荡 →
 # 用阻尼（新参数 = 旧 + λ×(新−旧)）把步长压小。
 SLEEVE_DAMPING = 0.5
+#
+# 2026-10-15 修正（用户实测发现）：**"袖全空"曾被误判成收敛**。
+# 目标设到高于"当前持仓篮子模型"能支撑的水平时，第一轮 `_solve_stage1` 就会判定目标不可行
+# 并回退到最大可行收益 —— 回退解是"各池全押最高收益标的"的角点组合，通常不给袖任何权重，
+# 于是阶段二整段跳过、袖参数"没有变化"（delta=0）→ 循环宣布已收敛，把这个角点当成交付组合
+# （收益低于用户设的目标、波动大幅抬升）。这个 bug 极其隐蔽：只要角点恰好残留一丝袖权重
+# （高于阶段二的 1e-6 早退阈值），阶段二就会跑、delta 就非 0、循环就能继续，几轮后袖的 μ
+# 被迭代上来、目标重新可行 —— 换句话说，**交付结果一度取决于那一丝权重是否恰好为零**
+# （用户"加一个新标的就塌"的实测，就是它把那一丝抹平了）。
+# 现在两道闸：① 回退轮不再参与收敛判定，且回退后按各袖自己的候选池重新播种（乐观初值）
+# 再迭代一轮；② 每轮回退都记进 history（fallback/reseeded），全程都不可行时显式报告
+# "目标在收敛模型下仍不可行、已按最大可行收益交付"。
 
 
 def _sleeve_params_us(internal, internal_tickers):
@@ -738,6 +769,89 @@ def _inject_sleeve_params(assets, sleeve):
             item["mu"], item["vol"] = float(p[0]), float(p[1])
         out.append(item)
     return out
+
+
+# 袖 → (内部候选池, 内部相关性, 随机种子)：与阶段二同一套池子，供"空袖重新播种"使用。
+# 种子沿用阶段二各自的取值（美股 19 / 日本 31 / 大中华 43），保证可复现。
+_SLEEVE_POOL_SPECS = {
+    "O_US_CORE": (US_INTERNAL, US_INTERNAL_CORR, 19),
+    "O_JP_EQ": (JP_INTERNAL, JP_INTERNAL_CORR, 31),
+    "D_GREATER_CN": (GC_INTERNAL, GC_INTERNAL_CORR, 43),
+}
+
+
+# 袖 → 该袖"是否被解出"要看的结果字段（阶段二没跑就是 None）。
+_SLEEVE_RESOLVED_FIELD = {
+    "O_US_CORE": "internal",
+    "O_JP_EQ": "japan_selection",
+    "D_GREATER_CN": "gc_selection",
+}
+
+
+def _resolved_sleeves(solved):
+    """本轮真正被解出的袖：阶段二跑了并给出了篮子。
+
+    袖得 0 权重时阶段二会在 `total_w <= 1e-6` 处早退（见 stage2_optimize /
+    _internal_pool_optimize），于是"袖参数没有变化"只代表**没被检验**，不代表自洽 ——
+    收敛判据必须区分这两者，否则回退角点会被当成固定点（见 SLEEVE_DAMPING 下方的说明）。
+    """
+    return {k for k, field in _SLEEVE_RESOLVED_FIELD.items() if solved.get(field) is not None}
+
+
+def _sleeve_reseed_params(key, rf):
+    """某只袖"自己能达到的最优篮子"参数（不设单标的上限、与阶段一给的权重无关）。
+
+    只用作固定点迭代的**播种值**：袖被阶段一判为 0 权重时阶段二不会运行，那一轮对这只袖
+    没有任何信息量；给一个乐观初值重播种，下一轮的模型才不会系统性低估它。
+    """
+    spec = _SLEEVE_POOL_SPECS.get(key)
+    if spec is None:
+        return None
+    pool, corr, seed = spec
+    got = _optimize_within_pool(pool, corr, rf, seed)
+    if got is None:
+        return None
+    _, ret, vol, _ = got
+    return (float(ret), float(vol))
+
+
+def _reseed_sleeves(sleeve, solved, rf, tol=1e-5):
+    """把本轮"没被解出"的袖按候选池重新播种，返回真正发生变化的 key 列表。
+
+    已在播种值上时不再重复播种（返回空列表 = 没有可改善的余地）。
+    """
+    resolved = _resolved_sleeves(solved)
+    changed = []
+    for key in list(sleeve):
+        if key in resolved:
+            continue
+        seed = _sleeve_reseed_params(key, rf)
+        if seed is None:
+            continue
+        old = sleeve[key]
+        if abs(seed[0] - old[0]) <= tol and abs(seed[1] - old[1]) <= tol:
+            continue
+        sleeve[key] = seed
+        changed.append(key)
+    return changed
+
+
+def _stage1_weight(solved, key):
+    """该轮阶段一给某只袖的权重（袖不在本轮资产里时返回 0）。"""
+    keys = solved.get("keys") or []
+    if key not in keys:
+        return 0.0
+    return abs(float(solved["stage1_weights"][keys.index(key)]))
+
+
+def _damp_sleeve_params(nxt, sleeve, damping):
+    """阻尼推进：新参数 = 旧 + λ×(新−旧)。
+
+    袖内选标是离散的（谁入选、谁触上限会跳变），朴素迭代容易来回震荡，所以把步长压小。
+    """
+    return {k: (sleeve[k][0] + damping * (v[0] - sleeve[k][0]),
+                sleeve[k][1] + damping * (v[1] - sleeve[k][1]))
+            for k, v in nxt.items()}
 
 
 def _solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf,
@@ -821,6 +935,15 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
     """完整求解（袖内参数固定点迭代）。
 
     返回 None（不可行）或结果字典；袖参数、迭代轮数与是否收敛一并带出，便于审计与提示。
+
+    收敛判据 = 每只袖的 μ/σ 变化 ≤ sleeve_tol，**但回退轮除外**：某一轮若发生"目标不可行 →
+    回退到最大可行收益"，该轮解的是另一个问题（目标被降低、袖多半为空），不参与收敛判定，
+    并按各袖候选池重新播种后继续迭代（2026-10-15 修，见 SLEEVE_DAMPING 下方的说明）。
+    重播种后那一轮会额外获得预算（每只袖最多补一轮），否则预算刚好用尽时会把已经算出的
+    重播种丢掉、还会把可达的目标误报成"不可行"。
+    同理，"阶段一给了某只袖权重、阶段二却没跑出结果"的轮次也不算收敛：它的 final 只是
+    阶段一的模型统计、不是交付组合（那种情况下 model_gap 恒为 0，会伪装成完美一致）。
+    若最终仍不可行，则交付最大可行收益解并在 warnings 里显式说明"收益低于目标"。
     """
     warnings = [] if warnings is None else warnings
     sleeve = {}
@@ -832,8 +955,22 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
     iters = max(1, int(max_sleeve_iter))
     history, converged, delta = [], False, 0.0
     best = None          # (分数, 该轮结果, 该轮假设的袖参数)：未收敛时取误差最小的一轮
-    for it in range(iters):
+    fallback_last = None  # 全程都判"目标不可行"时的兜底（收益低于目标，必须显式说明）
+    last_assumed = None   # 最后一轮实际使用的袖参数（审计字段不能输出从未被求解过的值）
+    pending_reseed = False
+    budget_exhausted = False   # 是否因迭代预算用尽而退出（此时"目标不可行"的结论受预算限制）
+    # 重播种本身不产生关于固定点的信息，所以"重播种后还欠一轮检验"时要多给预算：
+    # 否则 max_sleeve_iter 刚好用完时会把已经算出的重播种丢掉，还会把**可达**的目标
+    # 误报成"不可行、请下调目标"。上界固定为 iters + max(1, 袖数)，保证总轮数有界
+    # （正常情况下每只袖至多补一轮；阻尼把参数推离播种值后也可能再次补，故只保证上界）。
+    max_rounds = iters + max(1, len(sleeve))
+    for it in range(max_rounds):
+        if it >= iters and not pending_reseed:
+            budget_exhausted = True
+            break
+        pending_reseed = False
         assumed = dict(sleeve)
+        last_assumed = assumed
         warn_local = []
         solved = _solve_once(_inject_sleeve_params(assets, sleeve), corr_pairs,
                              dom_w=dom_w, ov_w=ov_w, target=target, rf=rf, extract=extract,
@@ -856,36 +993,90 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                 nxt[key] = (float(sel["ret"]), float(sel["vol"]))
         delta = max((max(abs(nxt[k][0] - sleeve[k][0]), abs(nxt[k][1] - sleeve[k][1]))
                      for k in nxt if k in sleeve), default=0.0)
-        history.append({"iter": it + 1, "delta": round(float(delta), 6),
-                        "sleeve": {k: [round(float(v[0]), 6), round(float(v[1]), 6)]
-                                   for k, v in sleeve.items()}})
-        if log:
-            tail = "（已收敛）" if delta <= sleeve_tol else ""
-            log("sleeve_fixpoint", f"袖内参数迭代 {it + 1}/{iters}：最大变化 {delta:.4f}{tail}")
-        # 排序键：先看"模型与交付组合差多少"（这才是我们要的一致性），再看是否收敛
-        model_gap = abs(solved["final"]["ret"] - solved["stage1_ret"]) + \
-            abs(solved["final"]["vol"] - solved["stage1_vol"])
-        score = (round(model_gap, 6), 0 if delta <= sleeve_tol else 1)
-        if best is None or score < best[0]:
-            best = (score, solved, assumed)
-        if delta <= sleeve_tol:
-            converged = True
-            break
+
+        # 本轮是否发生了"目标不可行 → 回退到最大可行收益"（见 _solve_stage1）。
+        # 回退轮解的是**另一个问题**（目标被悄悄降低），它的解与"袖参数有没有变化"都不能
+        # 当作本次目标下的结论：回退角点通常不给袖任何权重 → 阶段二整段跳过 → delta=0
+        # 会被误判成收敛（见 SLEEVE_DAMPING 下方的说明）。所以回退轮既不参与收敛判定，
+        # 也不参与"最优轮"的挑选。
+        fell_back = float(solved["target"]) < float(target) - 1e-9
+        entry = {"iter": it + 1, "delta": round(float(delta), 6),
+                 "sleeve": {k: [round(float(v[0]), 6), round(float(v[1]), 6)]
+                            for k, v in sleeve.items()},
+                 "fallback": fell_back}
+        if fell_back:
+            fallback_last = solved
+            entry["reseeded"] = _reseed_sleeves(sleeve, solved, rf)
+            history.append(entry)
+            if log:
+                log("sleeve_fixpoint",
+                    f"袖内参数迭代 {it + 1}/{max_rounds}：目标在本轮模型下不可行（已回退），"
+                    f"按候选池重新播种 {len(entry['reseeded'])} 只袖")
+            if entry["reseeded"]:
+                pending_reseed = True
+                continue                      # 空袖已换成乐观初值 → 下一轮重算（欠一轮检验）
+            if not (_resolved_sleeves(solved) & set(sleeve)):
+                break                         # 袖全空且已在播种值上：目标确实不可行
+            # 袖都被解出了（角点残留了权重）→ 这一轮的袖信息仍然有效，照常阻尼推进；
+            # 只是不参与收敛判定，避免把"被降低后的目标"当成答案。
+        else:
+            history.append(entry)
+            # 本轮"交付"是否真是交付：阶段一给了某只袖权重、阶段二却没跑出结果
+            # （袖内池为空 / 全部起点失败），此时 final 只是阶段一的**模型**统计
+            # （见 _solve_once 的 final 回退分支），model_gap 恒为 0，会被当成
+            # "模型与交付完全一致"而拿满分 —— 必须降权，且不能算收敛。
+            unresolved_weighted = [k for k in sleeve
+                                   if k not in _resolved_sleeves(solved)
+                                   and _stage1_weight(solved, k) > 1e-6]
+            if log:
+                tail = "（已收敛）" if delta <= sleeve_tol and not unresolved_weighted else ""
+                log("sleeve_fixpoint", f"袖内参数迭代 {it + 1}/{max_rounds}：最大变化 {delta:.4f}{tail}")
+            # 排序键：先排除"交付其实没发生"的轮次，再看"模型与交付组合差多少"
+            # （这才是我们要的一致性），最后看是否收敛。
+            model_gap = abs(solved["final"]["ret"] - solved["stage1_ret"]) + \
+                abs(solved["final"]["vol"] - solved["stage1_vol"])
+            score = (1 if unresolved_weighted else 0, round(model_gap, 6),
+                     0 if delta <= sleeve_tol else 1)
+            if best is None or score < best[0]:
+                best = (score, solved, assumed)
+            if delta <= sleeve_tol and not unresolved_weighted:
+                converged = True
+                break
+
         # 阻尼推进：把"观测到的新参数"按 λ 混进当前值，避免离散选标引起的来回跳
-        blended = {}
-        for k, v in nxt.items():
-            old_v = sleeve[k]
-            blended[k] = (old_v[0] + damping * (v[0] - old_v[0]),
-                          old_v[1] + damping * (v[1] - old_v[1]))
-        sleeve = blended
+        sleeve = _damp_sleeve_params(nxt, sleeve, damping)
 
     if not converged:
-        # 袖内选标是离散的，映射可能不收敛 → 取"阶段一模型 vs 交付组合"误差最小的那一轮，
-        # 而不是硬性采用最后一轮（两者都可能不是固定点）。
-        _, solved, sleeve = best
-        warnings.append(
-            f"袖内参数迭代 {len(history)} 轮未完全收敛（最后一轮最大变化 {delta:.4f}）；"
-            f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {best[0][0]:.4f}）。")
+        if best is not None:
+            # 袖内选标是离散的，映射可能不收敛 → 取"阶段一模型 vs 交付组合"误差最小的那一轮，
+            # 而不是硬性采用最后一轮（两者都可能不是固定点）。
+            # 注意 score 的构成是（交付是否真的发生, 模型与交付的差, 是否收敛），差值在 [1]。
+            _, solved, sleeve = best
+            stale_note = ("；注意该轮有袖没被阶段二解出，那些权重仍按大类的**模型**参数计价，"
+                          "收益/波动不完全来自交付组合"
+                          if best[0][0] else "")
+            warnings.append(
+                f"袖内参数迭代 {len(history)} 轮未完全收敛（最后一轮最大变化 {delta:.4f}）；"
+                f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {best[0][1]:.4f}）{stale_note}。")
+        else:
+            # 每一轮都判"目标不可行"（重新播种后仍然不可行）→ 交付的就是最大可行收益解，
+            # 它的收益**低于**目标。这里必须明说，不能让回退角点看起来像正常结果。
+            # 审计字段要用这一轮**真正用过**的袖参数（重播种后的值可能从未被求解过）。
+            solved = fallback_last
+            sleeve = last_assumed if last_assumed is not None else sleeve
+            delivered = float(solved["final"]["ret"])
+            if budget_exhausted:
+                # 预算用尽 ≠ 目标真的不可行：末轮可能是"回退 + 袖被解出"，只是阻尼推进还没来得及
+                # 被检验。此时不能断言"收敛后的模型下不可行"，更不能建议用户下调目标。
+                warnings.append(
+                    f"袖参数迭代预算用尽（{len(history)} 轮），末轮仍判目标 {float(target):.2%} 不可行："
+                    f"已按当前最大可行收益 {delivered:.2%} 交付（低于目标 {float(target):.2%}）。"
+                    f"该结论受迭代预算限制 —— 目标未必真的不可行，可提高迭代预算后重试，或下调目标。")
+            else:
+                warnings.append(
+                    f"目标 {float(target):.2%} 在收敛后的模型下仍不可行：已按最大可行收益 "
+                    f"{delivered:.2%} 交付（低于目标 {float(target):.2%}）。"
+                    f"请下调目标至该值以下，或检查相关标的的参数口径。")
 
     solved["warnings"] = warnings       # 合并后的完整提示（_solve_once 只带自己那一轮的）
     solved.update({
