@@ -6,8 +6,8 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「手工表格维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.5-alpha.4**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，18 个 pre-release + 19 个 tag 齐全。
+- 当前版本 **v0.5-alpha.5**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 线上仓库：`xiang9916/PortfolioManager-app`，19 个 pre-release + 20 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
