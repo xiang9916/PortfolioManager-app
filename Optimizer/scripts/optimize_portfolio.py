@@ -729,6 +729,8 @@ def build_result_summary(output, hsbc_pool=None):
         "target_return": output.get("target_return"),
         "target_gap": output.get("target_gap"),
         "objective": output.get("objective"),
+        "deliverable": bool(output.get("deliverable", True)),
+        "final_source": output.get("final_source", "delivered"),
         "warnings": summary_warnings,
         # 加法式告警明细（code + message）：Swift 只认 code，不再匹配文案。
         # 必须用**最终** summary_warnings 生成 —— 它包含本函数内追加的自检类告警，
@@ -1238,6 +1240,11 @@ def _warning_items(warnings):
     return [{"code": getattr(w, "code", "other"), "message": str(w)} for w in warnings]
 
 
+def _test_ticker_skip_warning(ticker, reason):
+    """「新标的测试」里某只标的被跳过时的告警（消息与旧文案逐字一致，只补 code）。"""
+    return _Warn(f"测试标的 {ticker} 已跳过: {reason}", "test.ticker_skipped")
+
+
 def _cap_hit_warning(cap_hits):
     """active 单标的上限命中提示（合并成一条，带稳定 code）。"""
     merged = {}
@@ -1579,13 +1586,11 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                              warn=warn_local, sleeve_floors=floors)
         if solved is None:
             return None
-        for m in warn_local:
-            # 逐轮回退提示的数字随袖参数阻尼推进而变，逐条累积最多 ~10 行（AGENTS.md §12 已知噪声）：
-            # 全部丢掉，收尾时合并成**一条**提示（三个信息点见下方 fallback 汇总）。
-            if _is_stage1_fallback_prompt(m):
-                continue
-            if m not in warnings:
-                warnings.append(m)
+        # 2026-10-17（task-42）：**中间轮的告警不进交付 warnings** —— 否则中间回退轮的结论
+        # （"美国权益内部优化不可行，组合统计已回退使用第一阶段结果"之类）会留在最终交付里，
+        # 与 deliverable / final_source 自相矛盾。逐轮告警保留在 history 审计字段；
+        # 交付侧只带**选中轮**的告警（见收尾处的合并）。逐轮回退提示仍然只合并成一条。
+        round_warns = [m for m in warn_local if not _is_stage1_fallback_prompt(m)]
 
         nxt = dict(sleeve)
         us = _sleeve_params_us(solved["internal"], solved["internal_tickers"])
@@ -1608,6 +1613,11 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                  "sleeve": {k: [round(float(v[0]), 6), round(float(v[1]), 6)]
                             for k, v in sleeve.items()},
                  "fallback": fell_back}
+        if round_warns:
+            # 加法式审计键：中间轮（含被丢弃的回退轮）的告警原样保留，便于事后定位；
+            # 仅在本轮确有告警时出现（低目标档不受影响）。
+            entry["warnings"] = [str(m) for m in round_warns]
+            entry["warning_items"] = _warning_items(round_warns)
         if solved.get("sleeve_floors"):
             # 加法式审计键：仅在本轮真的带了袖内下限时出现（未生效的档位与修复前逐字节一致）。
             entry["sleeve_floors"] = {k: round(float(v), 6)
@@ -1764,11 +1774,6 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
             "「组合刚好够到目标」的水平后按请求目标重解，阶段二照常带目标约束"
             "（交付不再降级为角点）。",
             "sleeve.levels_lifted"))
-        for m in warn_retry:
-            if _is_stage1_fallback_prompt(m):
-                continue
-            if m not in warnings:
-                warnings.append(m)
         note = _undeliverable_warning(solved, sleeve)
         if note:
             warnings.append(note)
@@ -1844,11 +1849,6 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                                 sleeve_exclude=stuck)
         if solved_ex is not None and not _unresolved_weighted_sleeves(solved_ex, sleeve):
             solved = solved_ex
-            for m in warn_ex:
-                if _is_stage1_fallback_prompt(m):
-                    continue
-                if m not in warnings:
-                    warnings.append(m)
             warnings.append(_Warn(
                 "袖 " + "、".join(sorted(stuck)) + " 在阶段二给不出篮子：已按 0 权重把它从组合里"
                 "剔除后重解，交付组合不再包含它（不把阶段一的模型统计当交付）。",
@@ -1880,7 +1880,16 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                  "不承诺无条件收敛（同输入同输出；振幅见 amplitude_mu）。"),
     }
 
-    solved["warnings"] = warnings       # 合并后的完整提示（_solve_once 只带自己那一轮的）
+    # 交付告警只反映**选中轮**（+ 调用方传入的 + 收尾汇总的）。
+    # 自洽性：final_source='delivered' 时不会出现"已回退到第一阶段统计"这类中间轮结论；
+    # 反过来真回退（选中轮本身就是回退轮）时该结论**必须**出现。
+    for m in (solved.get("warnings") or []):
+        if _is_stage1_fallback_prompt(m):
+            continue
+        if m not in warnings:
+            warnings.append(m)
+
+    solved["warnings"] = warnings       # 合并后的完整提示（= 调用方 + 收尾汇总 + 选中轮）
     solved.update({
         "sleeve_params": {k: [round(float(v[0]), 6), round(float(v[1]), 6)] for k, v in sleeve.items()},
         "sleeve_iterations": len(history),
@@ -1914,7 +1923,7 @@ def _inject_test_assets(args, assets, work_dir, warnings):
             "test_tickers", msg, level=level, log_path=args.log_path),
     )
     for t, reason in test_skipped:
-        warnings.append(f"测试标的 {t} 已跳过: {reason}")
+        warnings.append(_test_ticker_skip_warning(t, reason))
     # 测试标的没有登记先验：broad/strategy 会退化成纯历史，必须显式说明口径不同
     for e in test_estimates:
         if e.get("mu_note") == "history_only":
@@ -2074,9 +2083,11 @@ def main():
         core_mu=core_mu, core_vol=core_vol, drop_note="已从第一阶段剔除")
     log_step("build_assets", f"构建大类资产 {len(assets)} 项", log_path=args.log_path)
     if not any(a["pool"] == "domestic" for a in assets):
+        warnings.append(_Warn("没有可申购的境内基金", "fund.available_none"))
         print(
             json.dumps(
-                {"error": "没有可申购的境内基金", "warnings": warnings},
+                {"error": "没有可申购的境内基金", "warnings": warnings,
+                 "warning_items": _warning_items(warnings)},
                 ensure_ascii=False,
             )
         )
@@ -2201,6 +2212,9 @@ def main():
         "target_return": TARGET_RETURN,
         "target_gap": target_gap,
         "objective": "max_sharpe",
+        # 加法式：结果统计来源（delivered = 真交付；stage1_model = 不可交付的模型统计）
+        "deliverable": bool(solved_all.get("deliverable", True)),
+        "final_source": solved_all.get("final_source", "delivered"),
         "warnings": warnings,
     }
 

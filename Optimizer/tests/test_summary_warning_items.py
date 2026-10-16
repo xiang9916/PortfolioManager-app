@@ -101,7 +101,8 @@ def test_summary_is_additive_only():
     summary = OP.build_result_summary(out)
     legacy = {"generated_at", "portfolio", "assets", "benchmark", "test_assets",
               "target_return", "target_gap", "objective", "warnings", "source_detail"}
-    assert set(summary) == legacy | {"warning_items"}, sorted(summary)
+    # task-42：另加法式带上 deliverable / final_source（自洽性检查需要）
+    assert set(summary) == legacy | {"warning_items", "deliverable", "final_source"}, sorted(summary)
     # warnings 内容 = 输入告警 + 自检两条（顺序不变）
     assert str(summary["warnings"][0]) == str(warn), summary["warnings"]
     assert any("自检" in str(x) for x in summary["warnings"]), summary["warnings"]
