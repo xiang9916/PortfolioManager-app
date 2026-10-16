@@ -1271,6 +1271,77 @@ def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_a
     return out
 
 
+def _seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w):
+    """给"回退角点清零了权重、但前沿尚有余量"的袖求播种水平（2026-10-16 落库）。
+
+    背景：回退轮常把袖压到 0 权重；若只按该袖**切点**篮子重新播种，切点 μ 可能明显低于阶段二
+    实际能交付的篮子 → 阶段二因 0 权重早退、永不运行 → 目标被误判不可行（交付高波动角点）。
+
+    契约（attempt#1 已回退，见下）：
+      1) **逐袖**水平（不是全体统一 μ）→ 不被"可达上限最低"的袖卡死；
+      2) 水平 = 让"阶段一可达上限刚好够到目标"的最小值，**不是该袖上限** → 不过冲。
+         播种量必须由"组合需要多少"决定：按袖上限播种会让模型里的袖 μ 跳到上限、与阶段二交付
+         篮子来回摆，连本来正常的主场景也会塌成多轮回退角点（attempt#1 的教训）；
+      3) 只动"可达上限明显高于切点 μ"的袖；无余量的袖完全不碰（不扰动正常档位）。
+    返回 {key: level}；若把有余量的袖全部抬满仍够不到目标 → 返回 {}（真不可行，交给显式报告）。
+    """
+    keys = solved.get("keys") or []
+    if not keys or solved.get("mu") is None or solved.get("upper") is None:
+        return {}
+    idx = {k: i for i, k in enumerate(keys)}
+    ref = np.array(solved["mu"], dtype=float)
+    caps = {}
+    for k in SLEEVE_KEYS:
+        if k not in idx or tan_mu.get(k) is None:
+            continue
+        ref[idx[k]] = max(ref[idx[k]], float(tan_mu[k]))
+        spec = _SLEEVE_POOL_SPECS.get(k)
+        m = _pool_max_return(spec[0], spec[1], None) if spec else None
+        if m is not None and float(m) > float(tan_mu[k]) + SLEEVE_FLOOR_EPS:
+            caps[k] = float(m)
+
+    def ceiling(levels):
+        vec = ref.copy()
+        for k, lv in levels.items():
+            vec[idx[k]] = float(lv)
+        return _max_return_given_mu(vec, solved["upper"], solved["dom_idx"], solved["ov_idx"],
+                                    dom_w, ov_w)
+
+    if not caps:
+        return {}
+    base = ceiling({})
+    if base is not None and base >= float(target) - 1e-9:
+        return {}
+    levels = {}
+    for k in sorted(caps, key=lambda x: -(caps[x] - float(tan_mu[x]))):
+        c = ceiling(levels)
+        if c is not None and c >= float(target) - 1e-9:
+            break
+        lo = max(float(ref[idx[k]]), float(tan_mu[k]))
+        hi = caps[k]
+        if hi <= lo + 1e-12:
+            continue
+        top = ceiling(dict(levels, **{k: hi}))
+        if top is None or top < float(target) - 1e-9:
+            levels[k] = hi          # 抬满也不够 → 抬满后继续下一只
+            continue
+        for _ in range(60):        # 二分：该袖再抬多少刚好够到目标
+            mid = 0.5 * (lo + hi)
+            got = ceiling(dict(levels, **{k: mid}))
+            if got is not None and got >= float(target) - 1e-9:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo <= 1e-6:
+                break
+        levels[k] = hi
+        break
+    c = ceiling(levels)
+    if c is None or c < float(target) - 1e-9:
+        return {}
+    return levels
+
+
 def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
                     warnings=None, log=None, max_sleeve_iter=MAX_SLEEVE_ITER, sleeve_tol=SLEEVE_TOL,
                     stage1_starts=160, stage2_starts=80, sleeve_start=None,
@@ -1381,6 +1452,35 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                 # 目标超过袖内上限：不设下限（不硬凑），收尾显式报告并走既有回退/不可行路径。
                 for k, m in (floor_audit.get("uncapped_max") or {}).items():
                     floor_unreachable_notes[k] = (floor_audit.get("tangency_mu", {}).get(k), m)
+                # 回退角点清零袖后的播种（2026-10-16 落库，承接 AGENTS §12"袖全空"那条的残留）：
+                # 角点常把三只袖都压到 0 权重，而"只按该袖切点篮子重新播种"不够 —— 切点 μ 可能
+                # 明显低于阶段二实际能交付的篮子 → 阶段二因 0 权重早退、永不运行 → 误判不可行。
+                # 契约（仅在"目标高于切点前沿"且走到本分支时生效）：
+                #   ① 只对**前沿尚有余量**（可达上限明显高于切点 μ）的袖播种，无余量的袖完全不碰；
+                #   ② 水平取"**刚好够到目标**的最小值"，逐袖求解（不取该袖上限、也不被可达上限
+                #      最低的袖卡死）—— 播种量必须由"组合需要多少"决定；按袖上限播种会与阶段二
+                #      交付篮子来回摆，连正常的主场景也会塌成多轮回退角点（attempt#1 的教训）；
+                #   ③ 播种后强制多给一轮预算（pending_reseed），否则播种等于白播；
+                #   ④ 审计键 sleeve_seeded_levels 为加法式、仅触发时出现（setup(_seed_levels_for_target)）。
+                tan_all = {}
+                for k in SLEEVE_KEYS:
+                    got_tan = _sleeve_tangency(k, rf, tan_cache)
+                    if got_tan is not None:
+                        tan_all[k] = float(got_tan[0])
+                levels = _seed_levels_for_target(solved, tan_all, target, dom_w, ov_w)
+                resolved_now = _resolved_sleeves(solved)
+                boot = []
+                for key in sorted(levels):
+                    if key in resolved_now:
+                        continue
+                    seed = _floor_seed(key, levels[key], rf)
+                    if seed is not None:
+                        sleeve[key] = seed
+                        nxt[key] = seed
+                        boot.append(key)
+                if boot:
+                    entry["sleeve_seeded_levels"] = {k: round(float(levels[k]), 6) for k in boot}
+                    pending_reseed = True      # 播种必须换来一轮检验，否则等于白播
             history.append(entry)
             if log:
                 log("sleeve_fixpoint",
