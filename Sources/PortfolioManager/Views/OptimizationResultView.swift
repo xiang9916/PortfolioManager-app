@@ -94,6 +94,12 @@ public struct OptimizationResultView: View {
                         testTargetGapRow(assessment)
                     }
 
+                    // 测试标的结论：入选 / 本轮未分配权重 / 因数据不可用被跳过 —— 三态必须能区分。
+                    // 此前结果页只字未提，「没被选」与「被漏掉/丢了数据」用户分不出来。
+                    if isTestResult {
+                        testTickerConclusionSection
+                    }
+
                     // 目标收益率只是下限：优化目标是最大化夏普，实际收益可以高于目标。
                     // （主结果页：文案与阈值保持不变，本轮不动它）
                     if let target = result.targetReturn, !isTestResult {
@@ -278,6 +284,86 @@ public struct OptimizationResultView: View {
     /// 优化器改文案不会再让这里失配（Core 的 legacy 关键词清单只在兼容路径里用）。
     private var criticalWarnings: [OptimizationWarning] {
         result.classifiedWarnings.filter { $0.severity == .critical }
+    }
+
+    // MARK: 测试标的结论（仅测试结果页）
+
+    /// 交付权重里该测试标的的权重。权重 ≤1e-6 的标的根本不会出现在结果清单里 → 记 0
+    /// （清单成员与权重都来自优化器输出，不在 View 里推断）。
+    private func deliveredWeight(for e: TestAssetEstimate) -> Double {
+        result.assets.first { $0.key == e.key }?.weight ?? 0
+    }
+
+    /// `active_cap.hit` 告警 —— kind 由 PortfolioCore 按 code 判定，View 不做分类。
+    private var activeCapWarnings: [OptimizationWarning] {
+        result.classifiedWarnings.filter { $0.kind == .activeCapHit }
+    }
+
+    /// 上限文案（如 "10%"）：只从 Core 归好类的那条告警文案里取 —— 结果 JSON 没有逐标的的
+    /// 结构化上限字段，本任务也不允许新增契约；取不到就返回 nil，退化成不带上限数值的说法，
+    /// **绝不硬编码上限值**。
+    private var activeCapPercentText: String? {
+        for w in activeCapWarnings {
+            if let r = w.message.range(of: "上限[ ]*[0-9]+(\\.[0-9]+)?%", options: .regularExpression) {
+                return String(w.message[r])
+                    .replacingOccurrences(of: "上限", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    /// 该测试标的是否被压到 active 单标的上限：只认优化器自己点名的那条告警。
+    private func isCapHit(_ e: TestAssetEstimate) -> Bool {
+        activeCapWarnings.contains {
+            $0.message.contains("\(e.key) ") || $0.message.contains("\(e.ticker) ")
+        }
+    }
+
+    /// 因数据不可用被跳过的测试标的：只认 Core 分类出来的 `test.ticker_skipped`
+    /// （依赖优化器在结果里给出该 code），不靠文案猜。与「未入选」是两回事。
+    private var skippedTestWarnings: [OptimizationWarning] {
+        result.classifiedWarnings.filter { $0.kind == .testTickerSkipped }
+    }
+
+    private func testConclusionText(for e: TestAssetEstimate, weight: Double) -> String {
+        guard weight > 0 else {
+            return "\(e.ticker)：本轮未分配权重（这是本次目标下的求解结果，不代表数据缺失）。想让它在组合里出现，可下调目标收益率后复核，或换一个标的／类别再试。"
+        }
+        if isCapHit(e) {
+            if let cap = activeCapPercentText { return "\(e.ticker)：已入选 \(pct(weight))（触 \(cap) 上限）" }
+            return "\(e.ticker)：已入选 \(pct(weight))（触单标的上限）"
+        }
+        return "\(e.ticker)：已入选 \(pct(weight))"
+    }
+
+    /// 测试标的结论区：只陈述结果事实与可操作提示，不做归因（原因不明确就不写原因）。
+    @ViewBuilder
+    private var testTickerConclusionSection: some View {
+        let estimates = result.testAssets ?? []
+        if !estimates.isEmpty || !skippedTestWarnings.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("测试标的结论").font(.headline)
+                ForEach(estimates, id: \.key) { e in
+                    let w = deliveredWeight(for: e)
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: w > 0 ? "checkmark.circle.fill" : "circle.dashed")
+                            .foregroundStyle(w > 0 ? Color.green : Color.secondary)
+                        Text(testConclusionText(for: e, weight: w))
+                            .font(.caption)
+                            .foregroundStyle(w > 0 ? Color.secondary : Color.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                ForEach(Array(skippedTestWarnings.enumerated()), id: \.offset) { _, s in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "questionmark.circle").foregroundStyle(.orange)
+                        Text("因数据不可用被跳过：\(s.message)")
+                            .font(.caption).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
     }
 
     /// 「实际 − 目标」行（仅测试结果页）。判定与容差**全部来自 PortfolioCore 的
