@@ -6,8 +6,8 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「手工表格维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.5-beta.6**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，19 个 pre-release + 20 个 tag 齐全。
+- 当前版本 **v0.5-beta.7**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 线上仓库：`xiang9916/PortfolioManager-app`，21 个 pre-release + 22 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
@@ -383,5 +383,6 @@ pm-cli (headless CLI) 复用 PortfolioCore
 ## 14. 工作流习惯
 - 中文 commit message，前缀：`feat(scope):` / `fix(scope):` / `chore:`。
 - 改版前先跑全量测试；发布流程见 §5；**提交/发布前跑 `scripts/privacy_check.sh`**（装了钩子会自动跑）。
+- **版本同步纪律（2026-10-16 定稿）**：每次 bump 版本，必须同步更新本文件 §0 的「当前版本」与「pre-release / tag 计数」，以及 `tmp/agent-team/HANDOVER.md` 的基线锚点 —— 现状速览过期会直接误导后续所有成员。
 - `.gitignore` 已忽略：`.build/` `Optimizer/.venv/` `tmp/` `dist/` `__pycache__/` `*.pyc` `.DS_Store`。
   不要把 venv、构建产物、含个人数据的文件加进来；个人数据目录与表格文件就在工作区里，但**不是本仓库内容**，勿提交。
