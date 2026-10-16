@@ -88,10 +88,10 @@ public struct OptimizationResultView: View {
                     }
 
                     // 测试结果页此前**完全没有**这一行（只有主结果页有）：交付低于目标时用户
-                    // 只能看到"收益下降、波动上升"，没有任何异常信号。补齐「实际 − 目标」
-                    // （复用 result.targetReturn / targetGap，未改公开接口）。
-                    if isTestResult, let target = result.targetReturn {
-                        testTargetGapRow(target: target)
+                    // 只能看到"收益下降、波动上升"，没有任何异常信号。补齐「实际 − 目标」。
+                    // 判定与容差来自 PortfolioCore（OptimizationResult.targetAssessment）。
+                    if isTestResult, let assessment = result.targetAssessment {
+                        testTargetGapRow(assessment)
                     }
 
                     // 目标收益率只是下限：优化目标是最大化夏普，实际收益可以高于目标。
@@ -272,40 +272,34 @@ public struct OptimizationResultView: View {
     /// 带符号百分比（+2.31% / -1.05%），用于「实际 − 目标」的差额
     private func pctSigned(_ v: Double) -> String { String(format: "%+.2f%%", v * 100) }
 
-    /// 「实际 − 目标」的告警阈值，与 Python 侧容差**同量级**（1e-4 = 0.01pp）。
-    /// 优化器判定「交付收益 ≥ 目标」用 ret >= target - 1e-4（阶段一约束与收敛判据），
-    /// 袖内收益下限用 SLEEVE_FLOOR_EPS = 1e-4（Optimizer/scripts/optimize_portfolio.py 里
-    /// 唯一的容差常量）—— 两处都是 1e-4，所以这里必须同量级。
-    /// 早先这里写 0.002（0.2pp）：差额落在 0.02–0.2pp 时告警文案不触发，
-    /// 「略低于目标」会被显示成正常结果 —— 正是要堵的漏报。
-    private static let targetGapTolerance = 1e-4
-
-    /// warnings 里是否属于「目标未达成 / 交付受限」语义：回退、不可行、预算用尽、低于目标。
-    /// 优化器只把这些语义写在 warnings 的文本里（结果 JSON 无结构化字段），所以这里做关键词归类；
-    /// 不改公开接口、不改 Optimizer。判定口径与 Optimizer/scripts/optimize_portfolio.py 的
-    /// 回退/不可行提示词一致（该文件是唯一事实来源，措辞改了这里也要跟着改）。
-    private func isCriticalWarning(_ text: String) -> Bool {
-        let keys = ["不可行", "不可交付", "已回退", "回退到", "回退使用", "回退/不可行",
-                    "低于目标", "预算已用尽", "预算未用尽"]
-        return keys.contains { text.contains($0) }
+    /// 关键（critical）告警 —— 交付被降级 / 目标未达成的那一类（严重度分档由 Core 定义）。
+    /// 分类与严重度**全部来自 PortfolioCore**：新结果只认 warning_items 的 stable code，
+    /// 旧结果文件（无该键）自动走 OptimizationWarningClassifier 的文案兜底 —— 视图不再自带关键词表，
+    /// 优化器改文案不会再让这里失配（Core 的 legacy 关键词清单只在兼容路径里用）。
+    private var criticalWarnings: [OptimizationWarning] {
+        result.classifiedWarnings.filter { $0.severity == .critical }
     }
 
-    private var criticalWarnings: [String] {
-        (result.warnings ?? []).filter(isCriticalWarning)
-    }
-
-    /// 「实际 − 目标」行（仅测试结果页）。主结果页只有"已贴合/高出"两种说法，
-    /// 交付低于目标（回退角点）时会被读成"正常"，所以这里显式给出差额与未达目标结论。
-    private func testTargetGapRow(target: Double) -> some View {
-        let gap = result.targetGap ?? (result.portfolio.expectedReturn - target)
-        // 阈值 = 优化器容差量级（见 targetGapTolerance 的说明），不再是 0.2pp
-        let below = gap < -Self.targetGapTolerance
+    /// 「实际 − 目标」行（仅测试结果页）。判定与容差**全部来自 PortfolioCore 的
+    /// OptimizationTargetAssessment**（tolerance = 1e-4 的唯一事实来源，视图不再自带阈值）；
+    /// 主结果页只有"已贴合/高出"两种说法，交付低于目标（回退角点）时会被读成"正常"，
+    /// 所以这里显式给出差额、缺口与严重度分档。
+    private func testTargetGapRow(_ a: OptimizationTargetAssessment) -> some View {
+        let below = !a.met
+        let gapText = a.gap.isFinite ? pctSigned(a.gap) : "无法计算"
+        let head = "实际收益 \(pct(a.deliveredReturn)) − 目标下限 \(pct(a.targetReturn)) = \(gapText)"
+        let tail: String
+        if below {
+            // severity == .indeterminate（入参非有限数）时 shortfall 恒为 0，不能写成"低于下限 0.00%"
+            let shortfall = a.shortfall > 0 ? "低于下限 \(pct(a.shortfall))。" : "收益或目标不是有限数、缺口无法判定。"
+            tail = "：「未达目标」（\(a.severity.label)），\(shortfall)目标在当前约束下不可行 —— 上面交付的是最大可行收益，不是目标组合。"
+        } else {
+            tail = "。目标只是收益「下限」（不是锚）：目标低于切点收益时结果不随滑杆变化。"
+        }
         return HStack(spacing: 6) {
             Image(systemName: below ? "exclamationmark.triangle.fill" : "info.circle")
                 .foregroundStyle(below ? Color.red : Color.secondary)
-            Text(below
-                 ? "实际收益 \(pct(result.portfolio.expectedReturn)) − 目标下限 \(pct(target)) = \(pctSigned(gap))：「未达目标」，低于下限 \(pct(-gap))。目标在当前约束下不可行 —— 上面交付的是最大可行收益，不是目标组合。"
-                 : "实际收益 \(pct(result.portfolio.expectedReturn)) − 目标下限 \(pct(target)) = \(pctSigned(gap))。目标只是收益「下限」（不是锚）：目标低于切点收益时结果不随滑杆变化。")
+            Text(head + tail)
                 .font(.caption).foregroundStyle(below ? Color.red : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -321,7 +315,7 @@ public struct OptimizationResultView: View {
                 Text("目标未达成 / 交付受限（\(criticalWarnings.count) 条）")
                     .font(.caption).fontWeight(.semibold)
                 ForEach(Array(shown.enumerated()), id: \.offset) { _, w in
-                    Text(w).font(.caption2).foregroundStyle(.secondary)
+                    Text(w.message).font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if criticalWarnings.count > shown.count {
