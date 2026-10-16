@@ -260,6 +260,9 @@ public struct OptimizationResult: Codable {
     /// 目标收益率（优化目标是最大化夏普，它只是收益下限）与实际收益超出目标的幅度。
     public let targetReturn: Double?
     public let targetGap: Double?
+    /// 加法式结构化告警（每条带稳定 code，见 Optimizer/scripts/optimize_portfolio.py 的 WARNING_CODES）。
+    /// 旧结果文件没有这个键 → nil；分类走 OptimizationWarningClassifier 的文案兜底路径。
+    public let warningItems: [OptimizationWarningItem]?
     public let objective: String?
     public let sourceDetail: String?
 }
