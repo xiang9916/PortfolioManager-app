@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 50 个用例；联网用例需 PM_LIVE_TESTS=1
+swift test  --disable-sandbox          # 77 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -146,7 +146,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **50 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **77 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）
@@ -242,7 +242,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   于是**阶段一假设的袖 = 阶段二交付的袖**，目标约束对交付组合有效（实测模型/交付差 < 0.5pp）。
   ⚠️ 袖内选标是**离散**的（谁入选、谁触 10% 上限会跳变），某些参数区（目标远低于切点、live 篮子又很单一时）
   映射会形成"极限环"、没有真正的固定点 —— 这时实现取**模型 vs 交付误差最小**的那一轮，并在提示里写明
-  "未完全收敛"，不硬性采用最后一轮。审计字段见输出里的 `sleeve`（params / iterations / converged / history）。
+  "未完全收敛"，不硬性采用最后一轮。2026-10-17 起择优序改为「**交付是否达标 → 交付缺口 → 模型与交付的差 → 轮次号**」（旧序会把**没达标**的一轮顶上来当选），并新增加法式 `sleeve_cycle`（振幅）供事后定位；**仍不承诺无条件收敛**（袖内选标离散，结构上无法证明）。审计字段见输出里的 `sleeve`（params / iterations / converged / history）。
 - **🔴「袖全空」不得判定收敛（2026-10-15 修的关键 bug）**：目标高于"当前持仓篮子模型"能支撑的水平时，
   第一轮 `_solve_stage1` 会判定目标不可行并**回退到最大可行收益**，而回退解是"各池全押最高收益标的"的
   角点组合 —— 它通常不给袖任何权重，于是阶段二整段跳过（袖权重 ≤1e-6 即早退）、袖参数"没有变化"、
@@ -268,7 +268,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   在修复前的代码上 7/8 失败）。
   `history` 每轮新增 `fallback` / `reseeded` 字段供事后定位。
   **仍然存在（非本次引入）**：袖内池为空 / 全部起点失败时阶段二给不出篮子，`final` 会退化为阶段一的
-  **模型**统计（active 10% 上限口径下可能与真实可交付收益不一致）。2026-10-16 起：这种轮次会在交付结果里**显式标注该袖不可交付**（点名是哪只袖 + 原因：候选池为空 / 全部起点失败，并声明 `final` 只是阶段一的模型统计、请勿据此执行）。仍属「报警 + 不算收敛」、未根治 —— 不把模型统计伪装成交付，是本次的边界。
+  **模型**统计（active 10% 上限口径下可能与真实可交付收益不一致）。2026-10-16 起：这种轮次会在交付结果里**显式标注该袖不可交付**（点名是哪只袖 + 原因：候选池为空 / 全部起点失败，并声明 `final` 只是阶段一的模型统计、请勿据此执行）。那是 2026-10-16 的边界（报警 + 不算收敛）。**2026-10-17 起改为真正处理**：先在组合层**按 0 权重剔除该袖后重新求解**（真有解的路径，告警码 `sleeve.excluded_no_basket`，加法式键 `excluded_sleeves` / `weighted_no_basket`）；剔除后仍不成才返回 `deliverable=false` + `final_source=stage1_model` + 告警码 `sleeve.undeliverable`，**显式声明不可交付**，不再把模型统计当交付。⚠️ 语义澄清：`deliverable` 只表示「这条结果的**统计来源**」，不是「达标」—— 达标看交付收益与目标之差。回归测试：`Optimizer/tests/test_sleeve_robustness.py`（5 项；修复前祖先上 0/5，全是行为断言）。
 - **两处内部 API 崩溃点已改为可诊断 / 安全降级（2026-10-16）**：`stage2_optimize` 缺 `O_US_CORE` 不再抛裸
   `ValueError`（改为返回「不可用 + 实际大类」的可诊断原因并进 `warnings`）；`sleeve_start` 的 σ≤0/NaN
   在入口就抛含 key / 取值 / 来源的 `ValueError`（此前会一路走到 `project_psd` 抛 `LinAlgError`，负 σ 甚至静默通过）。
@@ -283,17 +283,18 @@ pm-cli (headless CLI) 复用 PortfolioCore
   **无上限**可达最大收益」二分得到（与袖权重无关，因此不随 `cap_norm` 抖动，也天然协调多只袖），
   袖内求解带 `x·μ ≥ t_s − ε`，**循环后再断言一次**；任一道不过就返回「不可行」并进具名 `warnings`
   （历史教训：袖内求解器只校验 `Σx=1` 与 bounds、**从不校验不等式可行性**，单标的池会返回既不满足下限、
-  也不报不可行的篮子 —— 静默违约就是这么来的）。目标超过袖内可达上限时**故意不建下限**、显式提示并走回退路径。
+  也不报不可行的篮子 —— 静默违约就是这么来的）。目标超过袖内可达上限时**故意不为该袖建下限**、显式提示 —— 2026-10-17 起这只是**袖级**事实，不再把整轮判成组合级不可行（见「目标可达性只在组合层判定」条）。
   「模型可达上限」= 本轮生效目标；新增的收敛判据与 `delivered_ok` **只在非回退轮**且本轮确有下限时启用
   （否则不可行路径永不收敛）。新增输出键（**加法式**，仅在下限生效时出现）：
   `sleeve_history[i].sleeve_floors` / `.floor_recomputed{required_mu,tangency_mu,uncapped_max}` / `.floor_seeded`、
   `japan_selection`·`gc_selection` 的 `.floor` / `.floor_met`（低目标档一个键都不变 → 正常路径逐字节一致）。
   回归测试：`Optimizer/tests/test_sleeve_target.py`（5 项）。**性质不变量**：`t_s` 低于袖内切点收益时
   输出与改动前逐字节相同（多档低目标以 `cmp` 守住）。未采用：跨层协方差（B，反馈更强、极限环概率更高）
-  与「λ 袖前沿联合求解」（C，需重构阶段一、把风险移进非凸求解器）。**已知残留**：`ε` 在三处叠加
+  与「λ 袖前沿联合求解」（C，需重构阶段一、把风险移进非凸求解器）。**已知残留（已于 2026-10-17 单源化，见本行末条）**：`ε` 曾在三处叠加
   （`t−ε` / `floor−ε` / `target−ε`）→ 实际保证约为「需求 − 3ε」（`SLEEVE_FLOOR_EPS`）；两道闸同谓词同 ε、
   后者结构上不可达；截断用无 cap 上界而交付用带 cap 上界（JP/GC 当前无 active 类标的）；
   `_floor_seed` 返回 None 时不播种且不告警。
+- **ε 单源化（2026-10-17）**：交付保证只用**一次** ε = `DELIVERY_EPS`（`SLEEVE_FLOOR_EPS` 保留为它的**无字面量别名**），袖内下限就是需求本身、袖内求解器只留 `_SOLVER_EPS=1e-7`（纯数值）→ 实际保证 =「交付收益 ≥ 目标 − ε」，**不再是「需求 − 3ε」**。语义不同的容差各自命名：余量筛选 `SLEEVE_ROOM_EPS`、数值自检 `CHECK_SUM_EPS`；**决策点不得出现裸字面量**（`grep -n '1e-4'` 应只剩常量定义）。回归测试：`test_sleeve_robustness.py`。
 - **回退角点清零袖后的播种水平（2026-10-16，修的是上一条的残留）**：目标高于"袖按切点口径"的可达上限时，
   回退角点常把**三只袖全部压到 0 权重**；旧逻辑只按"该袖自己的**切点**篮子"重新播种，而切点 μ 可能明显
   低于阶段二实际能交付的篮子 → 阶段二因 0 权重早退、**永不运行** → 模型永远够不到目标 → 直接宣告
@@ -310,6 +311,10 @@ pm-cli (headless CLI) 复用 PortfolioCore
   回归测试：`Optimizer/tests/test_sleeve_corner.py`（6 项；受控桩确定性复现"回退角点 + 三袖 0 权重"，
   在真·修复前的祖先上失败原因**全是行为断言**）。提示文案断言刻意不放在这个文件里（关注点分离：
   由 `test_fallback_prompt.py` 负责），于是祖先对照只反映行为差异。
+- **🔴 目标可达性只在组合层判定（2026-10-17 修的关键 bug）**：阶段一曾用「当前假设的袖 μ」判可达性，并把结果当成**组合级**结论 —— 只要某只袖的假设 μ 偏低（固定点尚未收敛）或该袖自身够不到目标，就整轮标成回退轮：目标被降低、阶段二失去目标约束、交付塌成角点，结果页并报「袖内收益下限无法建立……本轮走既有的回退/不可行路径」。真实数据上的表现：注入一个新标的（active 类、受 10% 上限约束）后它**从交付组合里消失**，而组合目标其实靠别的池就能达成 —— 用户看到的正是那句提示。修法：逐袖求「组合刚好够到目标」所需水平（`_sleeve_levels_for_feasibility`），袖至少按自己的切点篮子参与、没余量的袖按自身上限参与（**不被可达上限最低的袖卡死**），全抬满仍够不到才是真·组合级不可行；收尾只在**最终交付确实没到目标**时才按请求目标重解一次（阶段二照常带目标约束）。低目标档一个字节不变（`cmp` 守住）。回归测试：`Optimizer/tests/test_sleeve_no_room.py`（5 项，受控桩 + 虚构池；修复前祖先上 2/5，失败全是行为断言）。
+- **告警改成可机读 code，且 summary 必须接线（2026-10-17）**：`warnings`（字符串数组）保持**字节不变**，加法式新增 `warning_items: [{code, message}]`，code 表 `WARNING_CODES`（19 个，如 `target.infeasible` / `sleeve.undeliverable` / `active_cap.hit` / `summary.weight_sum_mismatch`）。**关键：summary 与 `--json` 两条路径都要带** —— App 读的是 `build_result_summary()` 的 summary，它原先没有这个键，于是生产上等于没接线（Swift 只能退回文案匹配）；生成必须以**最终** `summary_warnings` 为准（`CAP_HITS` 与 summary 自检类是在后面才 append 的）。Swift 侧 `PortfolioCore/Optimizer/OptimizationWarning.swift` 建 19 个 case + severity 映射（单一来源、有单测），新结果**只认 code**、旧结果文件（无该键）走文案兜底；View 不再自留关键词表。回归测试：`Optimizer/tests/test_summary_warning_items.py`（5 项）+ `Tests/PortfolioCoreTests/OptimizationWarningTests.swift`。
+- **「实际 − 目标」的判定与容差下沉 Core（2026-10-17）**：`OptimizationTargetAssessment`（`tolerance = 1e-4` 唯一来源）输出 `gap` / `met` / `shortfall` / `severity`，View 只消费、不再自带魔法阈值；`severity` 的绝对值分档（none/marginal/material/severe/indeterminate）是**展示口径**，不是业务口径。
+- **测「祖先上是否失败」必须走 `PM_OPT_SCRIPTS`（2026-10-17 教训）**：新用例若硬写 `../scripts`，把测试放进祖先树跑会**静默加载仓库当前脚本** → 得到「祖先全绿」的假结论（本轮真的发生过一次，被独立核验抓出）。正确做法：`PM_OPT_SCRIPTS=<祖先>/Optimizer/scripts` **且**把测试文件拷进祖先树；只改 `PYTHONPATH` 同样是假对照。
 - **敏感性分析 = 完整流水线逐点扫描**（2026-10-14 起）：每个目标点都跑 `solve_portfolio`（用上一点的袖参数
   热启动），于是图上每一点就是"把目标设成 T 时实际会交付的组合"，与结果页同源（实测 T=11% 处两边
   差 1~2bp）。曲线形状：目标低于切点收益时是一条平线（切点组合），高于切点后沿前沿移动、夏普缓慢下降。
@@ -383,6 +388,6 @@ pm-cli (headless CLI) 复用 PortfolioCore
 ## 14. 工作流习惯
 - 中文 commit message，前缀：`feat(scope):` / `fix(scope):` / `chore:`。
 - 改版前先跑全量测试；发布流程见 §5；**提交/发布前跑 `scripts/privacy_check.sh`**（装了钩子会自动跑）。
-- **版本同步纪律（2026-10-16 定稿）**：每次 bump 版本，必须同步更新本文件 §0 的「当前版本」与「pre-release / tag 计数」，以及 `tmp/agent-team/HANDOVER.md` 的基线锚点 —— 现状速览过期会直接误导后续所有成员。
+- **版本同步纪律（2026-10-16 定稿）**：每次 bump 版本，必须同步更新本文件 §0 的「当前版本」与「pre-release / tag 计数」，以及 `tmp/agent-team/HANDOVER.md` 的基线锚点；**改动测试用例数时同步 §4/§7 的用例数与 HANDOVER §6 的测试清单** —— 现状速览过期会直接误导后续所有成员。
 - `.gitignore` 已忽略：`.build/` `Optimizer/.venv/` `tmp/` `dist/` `__pycache__/` `*.pyc` `.DS_Store`。
   不要把 venv、构建产物、含个人数据的文件加进来；个人数据目录与表格文件就在工作区里，但**不是本仓库内容**，勿提交。
