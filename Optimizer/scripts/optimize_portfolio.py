@@ -118,9 +118,10 @@ def apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings):
                 add = need / len(relaxed)
                 for i in relaxed:
                     upper[i] = min(1.0, upper[i] + add)
-                warnings.append(
+                warnings.append(_Warn(
                     f"active 类单标的上限 {AC.ACTIVE_CAP:.0%} 会与境内池权重 {dom_w:.2%} 冲突"
-                    f"（境内可用标的的合计上界不足），已相应放宽 {len(relaxed)} 个境内标的的上限以保证可行。")
+                    f"（境内可用标的的合计上界不足），已相应放宽 {len(relaxed)} 个境内标的的上限以保证可行。",
+                    "active_cap.pool_conflict"))
 
 
 def log_step(step, message, level="info", log_path=None):
@@ -289,11 +290,11 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         # 不要求 res.success（未收敛但可行的点仍可用），但必须显式校验 bounds（2026-10-13 修）。
         x = res.x
         w = total_weights(x)
-        if abs(x.sum() - core_total) > 1e-4:
+        if abs(x.sum() - core_total) > CHECK_SUM_EPS:
             continue
         if not _respects_bounds(x, _upper_array(bounds)):
             continue
-        if mus @ w < target - 1e-4:
+        if mus @ w < target - DELIVERY_EPS:
             continue
         ret, vol, sharpe = portfolio_stats(w, mus, cov, rf=rf)
         if best is None or sharpe > best[3]:
@@ -345,7 +346,12 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
 
 
 # 袖内收益下限的绝对容差（P1）：SLSQP 末位噪声 + 离散选标。
-SLEEVE_FLOOR_EPS = 1e-4
+# ── 容差的唯一来源（2026-10-17 收口）────────────────────────────────────────────
+DELIVERY_EPS = 1e-4        # **交付保证的唯一语义 ε**：交付收益 ≥ 目标 − ε（4 个决策点引用）
+SLEEVE_ROOM_EPS = 1e-4     # 袖"尚未达到可达上限"的**余量筛选**阈值 —— 语义与交付保证无关
+CHECK_SUM_EPS = 1e-4       # 数值守恒/求和自检容差（权重合计、内部权重合计），也与交付保证无关
+SLEEVE_FLOOR_EPS = DELIVERY_EPS   # 兼容旧名（文档/既有测试引用）；语义等同 DELIVERY_EPS
+_SOLVER_EPS = 1e-7               # 纯数值松弛（SLSQP 末位噪声），不参与"需求 − ε"的保证链
 
 
 def _pool_cap_norm(internal_pool, cap_map, total_w):
@@ -431,30 +437,32 @@ def _optimize_within_pool(internal_pool, internal_corr, rf, seed, cap_norm=None,
         res = minimize(obj, start, method="SLSQP", bounds=bounds, constraints=cons,
                        options={"maxiter": 1500, "ftol": 1e-12})
         x = res.x
-        if abs(x.sum() - 1.0) > 1e-4:
+        if abs(x.sum() - 1.0) > CHECK_SUM_EPS:
             continue
         if not _respects_bounds(x, _upper_array(bounds)):
             continue
         ret = float(x @ mu)
         vol = float(np.sqrt(x @ cov @ x))
-        if floor is not None and ret < float(floor) - SLEEVE_FLOOR_EPS:
+        if floor is not None and ret < float(floor) - _SOLVER_EPS:
             continue                      # 闸①：下限违约点不得成为候选
         sharpe = (ret - rf) / vol if vol > 0 else 0.0
         if best is None or sharpe > best[0]:
             best = (sharpe, x, ret, vol)
     if best is None:
         if floor is not None and warnings is not None:
-            warnings.append(
+            warnings.append(_Warn(
                 f"袖内收益下限不可行：{label or '袖（未命名）'} 需要 μ ≥ {float(floor):.2%}，"
-                f"但该袖在自身候选池与单标的上限折算下没有满足下限的篮子；本轮按该袖未解出处理。")
+                f"但该袖在自身候选池与单标的上限折算下没有满足下限的篮子；本轮按该袖未解出处理。",
+                "sleeve.floor_infeasible"))
         return None
     sharpe, x, ret, vol = best
     # 闸②（F1 加固）：解后断言。理论上闸①已拦住，但绝不允许任何路径静默返回违约篮子。
-    if floor is not None and ret < float(floor) - SLEEVE_FLOOR_EPS:
+    if floor is not None and ret < float(floor) - _SOLVER_EPS:
         if warnings is not None:
-            warnings.append(
+            warnings.append(_Warn(
                 f"袖内收益下限解后校验失败：{label or '袖（未命名）'} 的解 μ={ret:.2%} 低于下限 "
-                f"{float(floor):.2%}；已按不可行处理，不交付该篮子。")
+                f"{float(floor):.2%}；已按不可行处理，不交付该篮子。",
+                "sleeve.floor_postcheck_failed"))
         return None
     return x, ret, vol, sharpe
 
@@ -501,7 +509,7 @@ def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr
     if floor is not None:
         # 加法式键：**仅在下限真正生效时**出现 → 未生效的档位（低目标）与修复前逐字节一致。
         out["floor"] = float(floor)
-        out["floor_met"] = bool(ret >= float(floor) - SLEEVE_FLOOR_EPS)
+        out["floor_met"] = bool(ret >= float(floor) - _SOLVER_EPS)
     return out
 
 
@@ -700,11 +708,13 @@ def build_result_summary(output, hsbc_pool=None):
     # 它们解释了"为什么这次的可投大类和上次不一样", 是解读结果的前提。
     summary_warnings = list(output.get("warnings", []))
     if missing:
-        summary_warnings.append(
-            "自检: 以下权重没有出现在结果清单里（映射漏项）: " + ", ".join(sorted(missing)))
-    if abs(total_w - 1.0) > 1e-4:
-        summary_warnings.append(
-            f"自检: 结果清单权重合计为 {total_w:.4f}，不等于 1 —— 请对照第一阶段权重核对映射是否漏项。")
+        summary_warnings.append(_Warn(
+            "自检: 以下权重没有出现在结果清单里（映射漏项）: " + ", ".join(sorted(missing)),
+            "summary.missing_weights"))
+    if abs(total_w - 1.0) > CHECK_SUM_EPS:
+        summary_warnings.append(_Warn(
+            f"自检: 结果清单权重合计为 {total_w:.4f}，不等于 1 —— 请对照第一阶段权重核对映射是否漏项。",
+            "summary.weight_sum_mismatch"))
     summary = {
         "generated_at": output.get("availability", {}).get("checked_at"),
         "portfolio": {
@@ -720,6 +730,10 @@ def build_result_summary(output, hsbc_pool=None):
         "target_gap": output.get("target_gap"),
         "objective": output.get("objective"),
         "warnings": summary_warnings,
+        # 加法式告警明细（code + message）：Swift 只认 code，不再匹配文案。
+        # 必须用**最终** summary_warnings 生成 —— 它包含本函数内追加的自检类告警，
+        # 以及调用前已并入 output["warnings"] 的 CAP_HITS 类告警。
+        "warning_items": _warning_items(summary_warnings),
         "source_detail": None,
     }
     return summary
@@ -978,11 +992,11 @@ def _undeliverable_warning(solved, sleeve):
     if not stuck:
         return None
     detail = "；".join(f"{k}（{_sleeve_failure_reason(k)}）" for k in stuck)
-    return ("本次交付统计不可交付：" + detail +
-            " 在阶段一有权重、阶段二却没给出篮子，这些权重是按大类**模型**参数计价的，"
-            "final 里的收益/波动是阶段一模型统计、不是可交付组合的统计（active 单标的 "
-            f"{AC.ACTIVE_CAP:.0%} 上限只在阶段二内部生效，模型口径可能高估收益）。"
-            "请勿据此执行，请检查该袖的候选池与参数后重跑。")
+    return _Warn("本次交付统计不可交付：" + detail +
+                 " 在阶段一有权重、阶段二却没给出篮子，这些权重是按大类**模型**参数计价的，"
+                 "final 里的收益/波动是阶段一模型统计、不是可交付组合的统计（active 单标的 "
+                 f"{AC.ACTIVE_CAP:.0%} 上限只在阶段二内部生效，模型口径可能高估收益）。"
+                 "请勿据此执行，请检查该袖的候选池与参数后重跑。", "sleeve.undeliverable")
 
 
 def _damp_sleeve_params(nxt, sleeve, damping):
@@ -1136,7 +1150,11 @@ def _compute_sleeve_floors(solved, assumed, target, rf, prev_floors, damping, do
     退化成 μ = μ + ℓ、只有 ℓ=0 是解，迭代必然来回摆。
 
     返回 (floors, audit)：floors 只含"下限真高于该袖当前假设 μ"的袖 —— 未绑定的档位与修复前
-    逐字节一致。为什么不用方案 C（袖前沿 λ 参数化 + 联合求解）：λ 落在两个前沿节点之间时，
+    逐字节一致。
+
+    ε 契约（2026-10-17 收口）：**只有一个语义 ε**（DELIVERY_EPS），且只用在交付断言
+    「交付收益 ≥ 目标 − ε」上；袖内下限、袖内求解器断言都只留 _SOLVER_EPS（纯数值松弛）。
+    因此实际保证是「交付收益 ≥ 目标 − ε」，不再出现"需求 − 3ε"的叠加。为什么不用方案 C（袖前沿 λ 参数化 + 联合求解）：λ 落在两个前沿节点之间时，
     插值出的 (μ,σ) 未必对应可执行篮子 → 老 gap 以"插值误差"回来，且阶段一要整体重构
     （U4；详见 tmp/agent-team/plan/P1-sleeve-objective.md §2/§6）。
     """
@@ -1157,16 +1175,16 @@ def _compute_sleeve_floors(solved, assumed, target, rf, prev_floors, damping, do
         return None, audit
     if prev_floors:
         # 下限也是反馈通道：按与袖参数同样的 λ 阻尼（避免整块跳变；U2 的稳定化手段之一）。
-        prev_t = min(float(v) for v in prev_floors.values()) + SLEEVE_FLOOR_EPS
+        prev_t = min(float(v) for v in prev_floors.values())
         t = prev_t + damping * (t - prev_t)
     floors = {}
     for k in FLOOR_SLEEVE_KEYS:
         if k not in tan_mu:
             continue
         cur = max(float(assumed[k][0]), tan_mu[k])
-        if t <= cur + SLEEVE_FLOOR_EPS:
+        if t <= cur + _SOLVER_EPS:
             continue          # 恒松弛：不设下限 → 该袖本轮与修复前逐字节一致
-        floors[k] = float(t) - SLEEVE_FLOOR_EPS
+        floors[k] = float(t)          # 单次 ε：下限即「需求」，ε 只在交付断言处扣
     if not floors:
         return None, audit
     return floors, audit
@@ -1175,6 +1193,62 @@ def _compute_sleeve_floors(solved, assumed, target, rf, prev_floors, damping, do
 # 阶段一"目标不可行 → 回退到最大可行收益"提示的公共标记：生产端（_solve_stage1）与过滤端
 # （solve_portfolio）共用同一段文案，避免两处漂移。这类提示的数字随袖参数阻尼推进逐轮变化，
 # 修复前会逐轮累积成 ~10 行（AGENTS.md §12 记为"已知噪声"）；solve_portfolio 现在合并成一条。
+# ── 稳定告警码（P0 2026-10-16）──────────────────────────────────────────────────
+# Swift 侧按 code 分类，不再匹配文案；文案可改，code 不变（新增只往表里加）。
+WARNING_CODES = {
+    "target.stage1_fallback": "阶段一按当前模型判定目标不可行 → 回退到最大可行收益（逐轮，已合并）",
+    "target.infeasible": "组合层目标不可行：已按最大可行收益交付、收益低于目标",
+    "target.budget_exhausted": "结论受迭代预算限制（目标未必真的不可行）",
+    "target.sleeve_unreachable": "袖内下限口径够不到目标，且组合层复核后仍不可达",
+    "sleeve.not_converged": "袖内固定点未完全收敛（已取误差最小的一轮）",
+    "sleeve.undeliverable": "本轮交付统计不可交付（阶段二没给篮子，final 只是阶段一模型统计）",
+    "sleeve.floor_infeasible": "袖内求解器给不出满足下限的篮子",
+    "sleeve.floor_postcheck_failed": "袖内下限解后校验失败（不交付该篮子）",
+    "sleeve.levels_lifted": "组合层复核抬升了袖内水平（该轮不是回退轮）",
+    "sleeve.excluded_no_basket": "袖在阶段二给不出篮子：已按 0 权重剔除后重解（不拿模型统计当交付）",
+    "sleeve.stage2_error": "袖内（美股核心）阶段二原因诊断",
+    "sleeve.us_unavailable": "美股核心袖阶段二不可用，统计回退到阶段一",
+    "active_cap.pool_conflict": "active 单标的上限与境内池权重冲突，已放宽",
+    "active_cap.hit": "active 单标的被压到 10% 上限（合并成一条）",
+    "summary.missing_weights": "自检：有权重没出现在结果清单里（映射漏项）",
+    "summary.weight_sum_mismatch": "自检：结果清单权重合计 ≠ 1",
+    "fund.available_none": "境内没有可申购基金候选",
+    "test.ticker_skipped": "测试标的被跳过 / 不可用",
+    "other": "未分类告警（新增文案时请补 code）",
+}
+
+
+class _Warn(str):
+    """告警字符串：str 子类，额外携带稳定 code。
+
+    JSON 序列化、字符串拼接与相等比较都与普通 str 完全一致 → **不改变任何既有输出字节**；
+    Swift 侧改用加法式的 warning_items[].code 分类（warnings 保持字符串数组不变）。
+    """
+
+    __slots__ = ("code",)
+
+    def __new__(cls, message, code="other"):
+        obj = super().__new__(cls, message)
+        obj.code = code
+        return obj
+
+
+def _warning_items(warnings):
+    """加法式告警明细：[{code, message}]；warnings 本身（字符串数组）逐字节不变。"""
+    return [{"code": getattr(w, "code", "other"), "message": str(w)} for w in warnings]
+
+
+def _cap_hit_warning(cap_hits):
+    """active 单标的上限命中提示（合并成一条，带稳定 code）。"""
+    merged = {}
+    for k, w, cap in cap_hits:
+        merged[k] = max(merged.get(k, 0.0), float(w))
+    return _Warn(
+        f"active（个股/主动）类单标的上限 {AC.ACTIVE_CAP:.0%} 生效，以下标的被压到上限: "
+        + "、".join(f"{k} {w:.2%}" for k, w in sorted(merged.items(), key=lambda kv: -kv[1])),
+        "active_cap.hit")
+
+
 _STAGE1_FALLBACK_MARK = "目标在当前约束下不可行，已回退到最大可行收益"
 
 
@@ -1197,7 +1271,8 @@ def _solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, r
     if solved is not None:
         return solved, target
     max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
-    warnings.append(f"{target:.0%} {_STAGE1_FALLBACK_MARK} {max_ret:.2%}。")
+    warnings.append(_Warn(f"{target:.0%} {_STAGE1_FALLBACK_MARK} {max_ret:.2%}。",
+                          "target.stage1_fallback"))
     eff_target = max_ret - 1e-6
     solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
                               seed=23, n_starts=stage1_starts, rf=rf)
@@ -1205,7 +1280,8 @@ def _solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, r
 
 
 def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
-                log=None, stage1_starts=160, stage2_starts=80, warn=None, sleeve_floors=None):
+                log=None, stage1_starts=160, stage2_starts=80, warn=None, sleeve_floors=None,
+                sleeve_exclude=None):
     """一轮完整求解：阶段一（大类，max 夏普 s.t. 收益 ≥ 目标）→ 阶段二（袖内再优化）。
 
     sleeve_floors（P1 方案 A）：本轮要传给 JP/GC 袖内求解器的收益下限。默认 None
@@ -1222,6 +1298,11 @@ def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_a
     lower, upper = stage1_bounds(assets)
     cap_map = _active_cap_map(assets)
     apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings)
+    # 加固①：某只袖的候选池给不出篮子时，按**0 权重**把它从组合里剔除后重解 ——
+    # 这样交付组合里不再有"按模型参数计价"的权重（不把阶段一模型统计当交付）。
+    excluded = [k for k in (sleeve_exclude or ()) if k in keys]
+    for k in excluded:
+        upper[keys.index(k)] = 0.0
 
     solved, eff_target = _solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
                                        float(target), rf, stage1_starts, warnings)
@@ -1254,9 +1335,23 @@ def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_a
         # stage2 不可行时汇总回退第一阶段统计，否则结果文件会全成 0（Bug D2）
         final = {"ret": ret1, "vol": vol1, "sharpe": sharpe1, "floor": ret1 - 1.96 * vol1}
         if stage2_error:
-            warnings.append(stage2_error)
-        warnings.append("美国权益内部优化不可行，组合统计已回退使用第一阶段结果。")
+            warnings.append(_Warn(stage2_error, "sleeve.stage2_error"))
+        warnings.append(_Warn("美国权益内部优化不可行，组合统计已回退使用第一阶段结果。",
+                              "sleeve.us_unavailable"))
 
+    # 加固①：final 的来源 —— 只有当"阶段一有权重、阶段二却没给出篮子"的袖为空时，
+    # final 才是真正的交付统计；否则它只是阶段一的**模型**统计（不可交付）。
+    w1_idx = {k: float(w1[keys.index(k)]) for k in SLEEVE_KEYS if k in keys}
+    weighted_no_basket = []
+    for k, wt in w1_idx.items():
+        if wt <= 1e-6:
+            continue
+        if k == "O_US_CORE" and internal is None:
+            weighted_no_basket.append(k)
+        elif k == "O_JP_EQ" and japan_selection is None:
+            weighted_no_basket.append(k)
+        elif k == "D_GREATER_CN" and gc_selection is None:
+            weighted_no_basket.append(k)
     out = {
         "assets": assets, "keys": keys, "mu": mu, "vols": vols, "cov": cov,
         "dom_idx": dom_idx, "ov_idx": ov_idx, "lower": lower, "upper": upper, "cap_map": cap_map,
@@ -1264,6 +1359,9 @@ def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_a
         "japan_selection": japan_selection, "gc_selection": gc_selection,
         "internal": internal, "internal_tickers": (internal[5] if internal is not None else None),
         "stage2_error": stage2_error, "final": final, "target": eff_target, "warnings": warnings,
+        "excluded_sleeves": sorted(excluded),
+        "weighted_no_basket": sorted(weighted_no_basket),
+        "final_source": "stage1_model" if weighted_no_basket else "delivered",
     }
     if floors_in:
         # 加法式内部键：本轮**实际生效**的袖内下限（未生效时不出现 → 低目标档逐字节一致）。
@@ -1297,7 +1395,7 @@ def _seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w):
         ref[idx[k]] = max(ref[idx[k]], float(tan_mu[k]))
         spec = _SLEEVE_POOL_SPECS.get(k)
         m = _pool_max_return(spec[0], spec[1], None) if spec else None
-        if m is not None and float(m) > float(tan_mu[k]) + SLEEVE_FLOOR_EPS:
+        if m is not None and float(m) > float(tan_mu[k]) + SLEEVE_ROOM_EPS:
             caps[k] = float(m)
 
     def ceiling(levels):
@@ -1326,6 +1424,90 @@ def _seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w):
             levels[k] = hi          # 抬满也不够 → 抬满后继续下一只
             continue
         for _ in range(60):        # 二分：该袖再抬多少刚好够到目标
+            mid = 0.5 * (lo + hi)
+            got = ceiling(dict(levels, **{k: mid}))
+            if got is not None and got >= float(target) - 1e-9:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo <= 1e-6:
+                break
+        levels[k] = hi
+        break
+    c = ceiling(levels)
+    if c is None or c < float(target) - 1e-9:
+        return {}
+    return levels
+
+
+def _sleeve_tangency_all(rf, cache):
+    """全部袖的"切点 μ"（带缓存）。门槛/复核口径统一用切点前沿，避免被某一轮偏弱的假设 μ 拉低。"""
+    out = {}
+    for k in SLEEVE_KEYS:
+        got = _sleeve_tangency(k, rf, cache)
+        if got is not None:
+            out[k] = float(got[0])
+    return out
+
+
+def _sleeve_levels_for_feasibility(solved, tan_mu, target, dom_w, ov_w):
+    """组合层可达性复核（P0 2026-10-16）：求一组"最小抬升"的袖内水平，使**组合**可达目标。
+
+    与 _seed_levels_for_target（回退轮里的乐观播种）的关键区别：这里**不筛"前沿是否还有余量"**。
+    单只袖够不到目标（没有余量）只意味着"该袖不承担目标"，不等于整条组合不可行 —— 它按自身可达
+    上限参与即可，目标由其它腿（其它袖 / 大类资产 / 新注入的标的）承担。只有当**每只袖都抬到自身
+    可达上限**、组合仍够不到目标时，才返回 {}（真·组合级不可行，交给既有回退/显式报告路径）。
+
+    返回 {key: level}（可能为空）—— 每只袖的水平都是"刚好够到目标"的最小值，逐袖求解，
+    因此不会被可达上限最低的那只袖卡死，也不会像"按袖上限播种"那样引入过冲。
+    """
+    keys = solved.get("keys") or []
+    if not keys or solved.get("mu") is None or solved.get("upper") is None:
+        return {}
+    idx = {k: i for i, k in enumerate(keys)}
+    ref = np.array(solved["mu"], dtype=float)
+    caps = {}
+    for k in SLEEVE_KEYS:
+        if k not in idx or tan_mu.get(k) is None:
+            continue
+        ref[idx[k]] = max(ref[idx[k]], float(tan_mu[k]))
+        spec = _SLEEVE_POOL_SPECS.get(k)
+        m = _pool_max_return(spec[0], spec[1], None) if spec else None
+        if m is not None:
+            caps[k] = float(m)          # 不筛余量：没余量的袖也按其自身上限参与
+    if not caps:
+        return {}
+
+    def ceiling(levels):
+        vec = ref.copy()
+        for k, lv in levels.items():
+            vec[idx[k]] = float(lv)
+        return _max_return_given_mu(vec, solved["upper"], solved["dom_idx"], solved["ov_idx"],
+                                    dom_w, ov_w)
+
+    # 基线水平：每只袖**至少**按"它自己切点篮子"的 μ 参与。偏低的是本轮**假设 μ**
+    # （初值篮子 / 上一轮交付 / 阻尼中间值），不是袖的真实能力 —— 这正是"假不可行"的来源。
+    assumed_mu = {k: float(solved["mu"][idx[k]]) for k in caps}
+    levels = {k: max(assumed_mu[k], float(tan_mu[k])) for k in caps
+              if max(assumed_mu[k], float(tan_mu[k])) > assumed_mu[k] + 1e-9}
+    base = ceiling(levels)
+    if base is not None and base >= float(target) - 1e-9:
+        # 袖按切点水平参与即可达标 → 只抬到切点，不做额外抬升（不会过冲）。
+        return levels
+    # 仍然不够 → 逐袖按"刚好够到目标"的最小水平继续抬（没余量的袖抬到自身上限）。
+    for k in sorted(caps, key=lambda x: -(caps[x] - float(tan_mu[x]))):
+        c = ceiling(levels)
+        if c is not None and c >= float(target) - 1e-9:
+            break
+        lo = max(float(levels.get(k, assumed_mu[k])), float(tan_mu[k]))
+        hi = caps[k]
+        if hi <= lo + 1e-12:
+            continue
+        top = ceiling(dict(levels, **{k: hi}))
+        if top is None or top < float(target) - 1e-9:
+            levels[k] = hi              # 抬到自身上限也不够 → 该袖按上限参与，再看下一只
+            continue
+        for _ in range(60):
             mid = 0.5 * (lo + hi)
             got = ceiling(dict(levels, **{k: mid}))
             if got is not None and got >= float(target) - 1e-9:
@@ -1512,9 +1694,13 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
             # 回退轮走的是另一个分支（本来就排除在收敛判定外）→ 不可行路径不会因此永不收敛（U3）。
             floor_active = bool(solved.get("sleeve_floors"))
             delivered_ok = (not floor_active
-                            or float(solved["final"]["ret"]) >= float(solved["target"]) - 1e-4)
-            score = (1 if unresolved_weighted else 0, round(model_gap, 6),
-                     0 if delta <= sleeve_tol else 1, 0 if delivered_ok else 1)
+                            or float(solved["final"]["ret"]) >= float(solved["target"]) - DELIVERY_EPS)
+            # 加固③（2026-10-16）：择优以**交付目标**为第一序 —— 先看这一轮交付有没有达标，
+            # 再看缺口大小，再看"模型 vs 交付"的差，最后用轮次号做确定性 tie-break。
+            # 旧序把"模型-交付差"放在达标之前，会把**没达标**的一轮顶上来当选（极限环区尤其明显）。
+            shortfall = max(0.0, float(target) - float(solved["final"]["ret"]))
+            score = (1 if unresolved_weighted else 0, round(shortfall, 6),
+                     round(model_gap, 6), it)
             if best is None or score < best[0]:
                 best = (score, solved, assumed)
             if delta <= sleeve_tol and not unresolved_weighted and delivered_ok:
@@ -1524,18 +1710,81 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
         # 阻尼推进：把"观测到的新参数"按 λ 混进当前值，避免离散选标引起的来回跳
         sleeve = _damp_sleeve_params(nxt, sleeve, damping)
 
-    if not converged:
+    # ── P0（2026-10-16）：目标可达性只在**组合层**判定 ────────────────────────────
+    # 走到这里说明袖内固定点没有收敛。**先看交付是否真的没到目标**，只有没到才做组合层复核：
+    # 阶段一用的是"当前假设的袖参数"，某只袖的假设 μ 可能低于它自己可交付的篮子（固定点尚未收敛），
+    # 或该袖自身没有余量 —— 这些都是**袖级**事实，不等于整条组合不可行。旧逻辑会把这种轮次整轮标成
+    # 回退轮（目标被降低、阶段二失去目标约束、交付塌成角点；用户实测：注入新标的后它缺席）。
+    # 复核：把袖抬到"组合刚好够到目标"的最小水平（逐袖求解；没余量的袖按自身上限参与，其余腿照常
+    # 承担）后按**请求目标**重解一次，成功就用它交付（阶段二照常带目标约束）。
+    # 本来已经达标的档位一个字节都不动 —— 低目标性质不变量由此守住。
+    retry_sleeve = None
+    solved_retry = None
+    levels = None
+    provisional = best[1] if best is not None else fallback_last
+    provisional_sleeve = (best[2] if best is not None
+                          else (last_assumed if last_assumed is not None else sleeve))
+    if provisional is not None and float(provisional["final"]["ret"]) < float(target) - DELIVERY_EPS:
+        levels = _sleeve_levels_for_feasibility(
+            provisional, _sleeve_tangency_all(rf, tan_cache), target, dom_w, ov_w)
+        if levels:
+            retry_sleeve = dict(provisional_sleeve)
+            for key in sorted(levels):
+                seed = _floor_seed(key, levels[key], rf)
+                if seed is not None:
+                    retry_sleeve[key] = seed
+        if retry_sleeve is not None and \
+                any(retry_sleeve[k] != provisional_sleeve.get(k) for k in retry_sleeve):
+            warn_retry = []
+            solved_retry = _solve_once(_inject_sleeve_params(assets, retry_sleeve), corr_pairs,
+                                       dom_w=dom_w, ov_w=ov_w, target=target, rf=rf,
+                                       extract=extract, total_assets=total_assets, log=log,
+                                       stage1_starts=stage1_starts, stage2_starts=stage2_starts,
+                                       warn=warn_retry, sleeve_floors=floors)
+            if solved_retry is None or \
+                    float(solved_retry["target"]) < float(target) - 1e-9:
+                solved_retry, retry_sleeve = None, None
+        else:
+            retry_sleeve = None
+
+    if solved_retry is not None:
+        # 交付改由"组合层复核后按请求目标重解"的那一轮承担（袖按各自可达水平参与）。
+        solved = solved_retry
+        sleeve = retry_sleeve
+        # 组合层复核既然证明目标可达，就不再报"袖内下限无法建立 → 走回退路径"（那句话已不成立）。
+        floor_unreachable_notes.clear()
+        history.append({
+            "iter": len(history) + 1, "delta": 0.0,
+            "sleeve": {k: [round(float(v[0]), 6), round(float(v[1]), 6)] for k, v in sleeve.items()},
+            "fallback": False,
+            "sleeve_levels": {k: round(float(v), 6) for k, v in (levels or {}).items()},
+        })
+        warnings.append(_Warn(
+            "目标在阶段一的当前假设下不可行，但组合层复核显示可达：已把袖抬到"
+            "「组合刚好够到目标」的水平后按请求目标重解，阶段二照常带目标约束"
+            "（交付不再降级为角点）。",
+            "sleeve.levels_lifted"))
+        for m in warn_retry:
+            if _is_stage1_fallback_prompt(m):
+                continue
+            if m not in warnings:
+                warnings.append(m)
+        note = _undeliverable_warning(solved, sleeve)
+        if note:
+            warnings.append(note)
+    elif not converged:
         if best is not None:
             # 袖内选标是离散的，映射可能不收敛 → 取"阶段一模型 vs 交付组合"误差最小的那一轮，
             # 而不是硬性采用最后一轮（两者都可能不是固定点）。
-            # 注意 score 的构成是（交付是否真的发生, 模型与交付的差, 是否收敛），差值在 [1]。
+            # score = (交付是否真的发生, 交付缺口, 模型与交付的差, 轮次号)；这里报告的是『模型与交付的差』（score[2]）。
             _, solved, sleeve = best
             stale_note = ("；注意该轮有袖没被阶段二解出，那些权重仍按大类的**模型**参数计价，"
                           "收益/波动不完全来自交付组合"
                           if best[0][0] else "")
-            warnings.append(
+            warnings.append(_Warn(
                 f"袖内参数迭代 {len(history)} 轮未完全收敛（最后一轮最大变化 {delta:.4f}）；"
-                f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {best[0][1]:.4f}）{stale_note}。")
+                f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {best[0][2]:.4f}）{stale_note}。",
+                "sleeve.not_converged"))
             note = _undeliverable_warning(solved, sleeve)
             if note:
                 warnings.append(note)
@@ -1557,20 +1806,79 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                 budget_note = (f"迭代预算未用尽（{len(history)} 轮，上限 {max_rounds} 轮）："
                                f"目标在收敛后的模型下仍不可行，请下调目标至该值以下，"
                                f"或检查相关标的的参数口径。")
-            warnings.append(
+            warnings.append(_Warn(
                 f"目标 {float(target):.2%} 不可行：已按最大可行收益 {delivered:.2%} 交付"
-                f"（低于目标 {float(target):.2%}）。{budget_note}")
+                f"（低于目标 {float(target):.2%}）。{budget_note}",
+                "target.budget_exhausted" if budget_exhausted else "target.infeasible"))
             note = _undeliverable_warning(solved, sleeve)
             if note:
                 warnings.append(note)
 
-    if floor_unreachable_notes:
+    # 这条提示解释的是"交付被降级"：只有**最终交付确实没到目标**时才报 ——
+    # 否则一句话会让人以为整轮降级了（实测用户就是照这条提示误判的）。
+    # 组合层复核成功时上面已 clear()。
+    if floor_unreachable_notes and float(solved["final"]["ret"]) < float(target) - DELIVERY_EPS:
         # 逐轮累积合并成一条（P3 的教训：逐轮提示会刷屏）。
         detail = "；".join(f"{k} 切点 {float(a):.2%} / 可达上限 {float(b):.2%}"
                            for k, (a, b) in sorted(floor_unreachable_notes.items()))
-        warnings.append(
+        warnings.append(_Warn(
             f"袖内收益下限无法建立：目标 {float(target):.2%} 高于 JP/GC 在阶段一上限口径下"
-            f"能提供的水平（{detail}）—— 袖内优化器已按可达上限尽力，本轮走既有的回退/不可行路径。")
+            f"能提供的水平（{detail}）—— 组合层复核（把袖抬到各自可达上限参与）后该目标仍不可达，"
+            f"本轮走既有的回退路径。",
+            "target.sleeve_unreachable"))
+
+    # ── 加固①（2026-10-16）：袖给不出篮子时，不得把阶段一**模型统计**当交付 ────────────
+    # 旧行为：那种轮次的 final 就是阶段一的模型统计（权重按大类模型参数计价）→ 只做了"显式标注"。
+    # 现在先走**真有解的路径**：把给不出篮子的袖按 0 权重从组合里剔除后重解一次；
+    # 剔除后仍不成功 → 结果显式标 deliverable=False + final_source=stage1_model + 可机读 code。
+    deliverable = True
+    stuck = _unresolved_weighted_sleeves(solved, sleeve)
+    if stuck:
+        warn_ex = []
+        retry_floors = {k: v for k, v in (floors or {}).items() if k not in stuck}
+        solved_ex = _solve_once(_inject_sleeve_params(assets, sleeve), corr_pairs,
+                                dom_w=dom_w, ov_w=ov_w, target=target, rf=rf, extract=extract,
+                                total_assets=total_assets, log=log,
+                                stage1_starts=stage1_starts, stage2_starts=stage2_starts,
+                                warn=warn_ex, sleeve_floors=retry_floors or None,
+                                sleeve_exclude=stuck)
+        if solved_ex is not None and not _unresolved_weighted_sleeves(solved_ex, sleeve):
+            solved = solved_ex
+            for m in warn_ex:
+                if _is_stage1_fallback_prompt(m):
+                    continue
+                if m not in warnings:
+                    warnings.append(m)
+            warnings.append(_Warn(
+                "袖 " + "、".join(sorted(stuck)) + " 在阶段二给不出篮子：已按 0 权重把它从组合里"
+                "剔除后重解，交付组合不再包含它（不把阶段一的模型统计当交付）。",
+                "sleeve.excluded_no_basket"))
+        else:
+            deliverable = False
+            solved["weighted_no_basket"] = sorted(stuck)
+            warnings.append(_Warn(
+                "本次结果不可交付：有袖在阶段一有权重、阶段二却给不出篮子，按 0 权重剔除后重解"
+                "仍未成功；final 只是阶段一**模型**统计，请勿据此执行。",
+                "sleeve.undeliverable"))
+    solved["deliverable"] = deliverable
+    solved["final_source"] = "delivered" if deliverable else "stage1_model"
+
+    # 加固③：极限环的可诊断振幅（袖 μ 在轮次间的摆幅）+ 边界说明（不承诺无条件收敛）
+    _amp = {}
+    for h in history:
+        for k, v in (h.get("sleeve") or {}).items():
+            _amp.setdefault(k, []).append(float(v[0]))
+    _amp = {k: round(max(v) - min(v), 6) for k, v in _amp.items() if len(v) > 1}
+    solved["sleeve_cycle"] = {
+        "rounds": len(history),
+        "amplitude_mu": _amp,
+        "max_amplitude": round(max(_amp.values()), 6) if _amp else 0.0,
+        "converged": converged,
+        "budget_exhausted": budget_exhausted,
+        "note": ("袖内选标是离散的：某些参数区存在极限环，实现按"
+                 "「交付是否达标 → 缺口 → 模型-交付差 → 轮次」确定性择优，"
+                 "不承诺无条件收敛（同输入同输出；振幅见 amplitude_mu）。"),
+    }
 
     solved["warnings"] = warnings       # 合并后的完整提示（_solve_once 只带自己那一轮的）
     solved.update({
@@ -1578,6 +1886,8 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
         "sleeve_iterations": len(history),
         "sleeve_converged": converged,
         "sleeve_history": history,
+        # 加法式：每条告警的稳定 code（Swift 分类用）。warnings 本身仍是字符串数组、逐字节不变。
+        "warning_items": _warning_items(warnings),
     })
     return solved
 
@@ -1895,12 +2205,7 @@ def main():
     }
 
     if CAP_HITS:
-        merged = {}
-        for k, w, cap in CAP_HITS:
-            merged[k] = max(merged.get(k, 0.0), w)
-        warnings.append(
-            f"active（个股/主动）类单标的上限 {AC.ACTIVE_CAP:.0%} 生效，以下标的被压到上限: "
-            + "、".join(f"{k} {w:.2%}" for k, w in sorted(merged.items(), key=lambda kv: -kv[1])))
+        warnings.append(_cap_hit_warning(CAP_HITS))
 
     if args.test_tickers:
         output["test"] = {
@@ -1931,6 +2236,10 @@ def main():
             output["warnings"].append(stage2_error)
 
     log_step("finalize", f"优化完成 共{len(assets)}大类 夏普={sharpe1:.3f}", log_path=args.log_path)
+    # 加法式告警明细必须在**所有** append 之后重算（CAP_HITS 等是后面才追加的），
+    # 否则 warnings 与 warning_items 条数会不一致。
+    output["warning_items"] = _warning_items(warnings)
+
     if args.out_path:
         with open(args.out_path, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)

@@ -81,7 +81,9 @@ class patched_pools:
         return False
 
 
-def run_solve(target, max_sleeve_iter=4):
+def run_solve(target, max_sleeve_iter=8):
+    # 2026-10-16（task-31 单次 ε）：floor 不再带 −ε，高目标档固定点需要更多轮才稳；
+    # 生产默认 MAX_SLEEVE_ITER=10，这里给足预算（断言不变）。
     with patched_pools():
         return OP.solve_portfolio([dict(a) for a in ASSETS], {}, dom_w=DOM_W, ov_w=OV_W,
                                   target=target, rf=RF, extract=EXTRACT, total_assets=TOTAL,

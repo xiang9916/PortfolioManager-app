@@ -311,8 +311,11 @@ def test_zero_weight_sleeve_is_seeded_at_the_portfolio_needed_level():
     """
     res = run_lift(_lift_stub)
     assert res is not None
-    seeded = [h["sleeve_seeded_levels"] for h in res["sleeve_history"]
-              if h.get("sleeve_seeded_levels")]
+    # 抬升的审计键有两种落点（同一契约）：组合层复核抬升 → sleeve_levels；
+    # 回退轮里的乐观播种 → sleeve_seeded_levels。
+    seeded = [h.get("sleeve_levels") or h.get("sleeve_seeded_levels")
+              for h in res["sleeve_history"]
+              if h.get("sleeve_levels") or h.get("sleeve_seeded_levels")]
     assert seeded, res["sleeve_history"]
     assert "O_US_CORE" in seeded[0], seeded[0]
     # 播种水平必须"刚好够到目标"（不是该袖的上限 0.30）
@@ -322,8 +325,8 @@ def test_zero_weight_sleeve_is_seeded_at_the_portfolio_needed_level():
     assert res["sleeve_converged"] is True, res["warnings"]
     plain = run(make_stub(_corner_weights()))        # 低目标档：不触发
     assert plain is not None
-    assert not any(h.get("sleeve_seeded_levels") for h in plain["sleeve_history"]), \
-        plain["sleeve_history"]
+    assert not any(h.get("sleeve_seeded_levels") or h.get("sleeve_levels")
+                   for h in plain["sleeve_history"]), plain["sleeve_history"]
 
 
 def main():

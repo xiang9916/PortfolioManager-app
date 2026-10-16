@@ -294,7 +294,8 @@ def test_feasible_target_is_honoured():
     res = solve(TARGET_OK)
     assert res is not None
     assert res["final"]["ret"] >= TARGET_OK - 1e-4, res["final"]
-    # 一旦有回退轮，就必须被记录（便于事后定位）
+    # 2026-10-16（P0）：目标可达但阶段一当前假设够不到时，会有回退轮；只要最终交付达标，
+    # 组合层兜底复核不介入（低目标/已达标档位与修复前逐字节一致）。回退轮必须被记录。
     assert any(h["fallback"] for h in res["sleeve_history"]), res["sleeve_history"]
 
 
