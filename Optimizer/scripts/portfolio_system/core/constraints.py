@@ -86,7 +86,14 @@ def _serialization():
 
 
 def bounds_arrays(problem: ProblemSpec):
-    """(lower, upper) ndarray（ProblemSpec → 既有 bounds 口径）。"""
+    """(lower, upper) ndarray（ProblemSpec → 既有 bounds 口径）。
+
+    ⚠️ 已知限制（P3-b3 显式声明，见 tmp/agent-team/refactor-p3/found_issues.md P3-F1）：
+    这里走 stage1_bounds → 恒为 [0, 1]，**忽略** AssetSpec.upper / 行里的 upper 字段；
+    阶段一上界实际只由 active 上限表（apply_active_caps）压低。旧引擎同口径，故行为一致；
+    将来若要让装配层的单标的上界生效，需在此处改用 problem.assets[i].upper 作初值
+    （cap 只会压低、不会抬高，叠加顺序不变）。
+    """
     return stage1_bounds(_serialization().legacy_asset_rows(problem))
 
 

@@ -120,6 +120,25 @@ class SleeveUniverse:
     internal_pool_keys: Tuple[str, ...] = ()
 
 
+#: 袖 → 阶段二的随机种子（美股 19 / 日本 31 / 大中华 43；P3-b3 从 optimize_portfolio 搬入）。
+#: 只放**种子**，池表仍由调用方显式传入（core 不 import params）。
+SLEEVE_SEEDS = {"O_US_CORE": 19, "O_JP_EQ": 31, "D_GREATER_CN": 43}
+
+
+def build_pool_specs(us_internal, us_internal_corr, jp_internal, jp_internal_corr,
+                     gc_internal, gc_internal_corr):
+    """袖 → (内部候选池, 内部相关性, 随机种子)：装配层的唯一构造方式。
+
+    与 SleeveUniverse.pool_specs 同构；optimize_portfolio._SLEEVE_POOL_SPECS 与
+    sensitivity_analysis._sleeve_universe() 都走这里，避免两处各写一份 19/31/43。
+    """
+    return {
+        "O_US_CORE": (us_internal, us_internal_corr, SLEEVE_SEEDS["O_US_CORE"]),
+        "O_JP_EQ": (jp_internal, jp_internal_corr, SLEEVE_SEEDS["O_JP_EQ"]),
+        "D_GREATER_CN": (gc_internal, gc_internal_corr, SLEEVE_SEEDS["D_GREATER_CN"]),
+    }
+
+
 @dataclass(frozen=True)
 class SleeveHooks:
     """固定点迭代里**由调用方提供**的策略函数（P3-b2）。

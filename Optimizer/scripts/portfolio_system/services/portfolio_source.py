@@ -1,10 +1,20 @@
-"""持仓/配置载荷适配：解析 extract JSON，**不直连数据库**（ADR §4.4）。"""
+"""持仓/配置载荷适配：解析 extract JSON，**不直连数据库**（ADR §4.4）。
+
+P3-b3 真实接线：optimize_portfolio / sensitivity_analysis 的 extract 读取改走 load_extract
+（唯一 JSON 读取入口；脚本层不再各自 json.load）。
+"""
 
 from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
 from typing import Any, Mapping
+
+
+def load_extract(extract_path: str) -> Mapping[str, Any]:
+    """读取 Swift 侧写出的 extract JSON（只读；不做任何数据库访问）。"""
+    with open(extract_path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 class PortfolioSource(ABC):
@@ -26,5 +36,4 @@ class JsonPayloadSource(PortfolioSource):
             return dict(self._payload)
         if not extract_path:
             raise ValueError("需要 extract_path 或构造时提供 payload")
-        with open(extract_path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+        return load_extract(extract_path)

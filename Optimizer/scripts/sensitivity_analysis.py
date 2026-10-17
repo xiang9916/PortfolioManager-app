@@ -32,6 +32,9 @@ except ImportError:
 
 from params import (
     BROAD_CORR, RF,
+    GC_INTERNAL, GC_INTERNAL_CORR,
+    JP_INTERNAL, JP_INTERNAL_CORR,
+    US_INTERNAL, US_INTERNAL_CORR,
     build_broad_cov,
     build_open_pool_from_status,
     us_core_params,
@@ -40,16 +43,39 @@ from optimize_common import (
     max_feasible_return,
     stage1_bounds,
 )
-# 完整求解（阶段一 + 袖内固定点 + 阶段二）：与 optimize_portfolio 主流程同源，
-# 否则敏感性扫描只扫了阶段一，与结果页对不上（2026-10-14 修）
-from optimize_portfolio import solve_portfolio
-from fund_pipeline import (
+# 完整求解（阶段一 + 袖内固定点 + 阶段二）：与结果页同源，否则敏感性只扫了阶段一。
+# P3-b3（步骤④）：改经 callers.SensitivityRunner 直连 core/engine —— 本脚本不再依赖
+# optimize_portfolio（模块级与调用期都不 import；P3 的正式门）。
+from portfolio_system.callers.sensitivity_runner import SensitivityRunner
+from portfolio_system.core.sleeve_params import SleeveUniverse, build_pool_specs
+from portfolio_system.core.stage2 import (  # SP500 内部相关性：pure data，唯一来源在 core
+    SP500_INTERNAL_CORR, SP500_INTERNAL_CORR_DEFAULT)
+# P3-b3：基金状态流水线改走 services（唯一子进程入口）；脚本层不再直接 import fund_pipeline。
+from portfolio_system.services.pipeline import (
+    build_investable_assets,
     ensure_pipeline,
     ensure_work_dir,
-    build_investable_assets,
     live_anchors_from_extract,
     load_pipeline,
 )
+from portfolio_system.services.portfolio_source import load_extract
+
+
+def _sleeve_universe():
+    """把 params 的内部池表装配成 core 的显式入参（core 不 import params）。
+
+    与 optimize_portfolio._universe() 同构；pool_specs 走 core 的唯一构造器
+    build_pool_specs（袖种子只此一份）。
+    """
+    return SleeveUniverse(
+        us_internal=US_INTERNAL, us_internal_corr=US_INTERNAL_CORR,
+        jp_internal=JP_INTERNAL, jp_internal_corr=JP_INTERNAL_CORR,
+        gc_internal=GC_INTERNAL, gc_internal_corr=GC_INTERNAL_CORR,
+        sp500_internal_corr=SP500_INTERNAL_CORR,
+        sp500_internal_corr_default=SP500_INTERNAL_CORR_DEFAULT,
+        pool_specs=build_pool_specs(US_INTERNAL, US_INTERNAL_CORR, JP_INTERNAL,
+                                    JP_INTERNAL_CORR, GC_INTERNAL, GC_INTERNAL_CORR),
+        internal_pool_keys=tuple(US_INTERNAL) + tuple(JP_INTERNAL) + tuple(GC_INTERNAL))
 
 
 def _stderr_log(step, message, level="info"):
@@ -234,6 +260,7 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
     # 「把目标设成 T 时实际会交付的那个组合」，与结果页同源。
     # 用上一点的袖参数热启动，避免每个点都从 live 篮子从头迭代。
     total_assets = float(extract["total_value"])
+    runner = SensitivityRunner(universe=_sleeve_universe())
     points = []
     sleeve_start = None
     last_mu, last_cov = mu, cov
@@ -242,7 +269,7 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         """求解一个目标点并追加到 points；返回是否可行。"""
         nonlocal sleeve_start, last_mu, last_cov
         point_warnings = []
-        solved = solve_portfolio(
+        solved = runner.solve_point(
             assets, BROAD_CORR, dom_w=dom_w, ov_w=ov_w, target=target, rf=RF,
             extract=extract, total_assets=total_assets, warnings=point_warnings,
             sleeve_start=sleeve_start,
@@ -323,8 +350,7 @@ def main():
     parser.add_argument("--out", dest="out_path", default=None, help="输出 JSON 路径")
     args = parser.parse_args()
 
-    with open(args.extract_json, encoding="utf-8") as f:
-        extract = json.load(f)
+    extract = load_extract(args.extract_json)
 
     result = run_sensitivity(
         extract,

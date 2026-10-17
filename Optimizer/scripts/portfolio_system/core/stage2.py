@@ -19,6 +19,16 @@ from .linalg import build_corr_matrix, portfolio_stats, project_psd
 from .warnings import CodedWarning as _Warn
 
 
+# ── 美股内部标的相关性标定（纯数据；P3-b3 从 optimize_portfolio 等价搬入）────────────
+# D_HSBC_SP500（标普500 QDII 大类）与美股内部各执行标的的相关性：手工标定。
+# 其余固定大类与内部标的之间没有直接的历史序列可算，用「该大类 vs O_US_CORE」的
+# 大类级相关性做代理（见 stage2_covariance）——这是近似，不是估计。
+SP500_INTERNAL_CORR = {
+    "SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60,
+}
+SP500_INTERNAL_CORR_DEFAULT = 0.75
+
+
 # ── 阶段二：美股内部重排 ──────────────────────────────────────────────────────
 def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols,
                       *, us_internal, us_internal_corr, sp500_internal_corr,

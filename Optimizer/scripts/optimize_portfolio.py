@@ -44,12 +44,14 @@ from optimize_common import (
     upper_bounds_array as _upper_array,   # 名字保留 _upper_array：test_optimizer_caps 直接引用
     _respects_bounds,
 )
-from fund_pipeline import (
+# P3-b3：基金状态流水线改走 services（唯一子进程入口）；脚本层不再直接 import fund_pipeline。
+from portfolio_system.services.pipeline import (
+    build_investable_assets,
     ensure_pipeline,
     ensure_work_dir,
-    build_investable_assets,
     live_anchors_from_extract,
 )
+from portfolio_system.services.portfolio_source import load_extract
 from test_tickers import parse_test_tickers, resolve_test_assets
 import asset_classes as AC
 
@@ -97,6 +99,7 @@ from portfolio_system.core.fixpoint import (
     validate_sleeve_params as _validate_sleeve_params,
 )
 from portfolio_system.core.sleeve_params import (  # noqa: F401
+    build_pool_specs,
     FLOOR_SLEEVE_KEYS as _FLOOR_SLEEVE_KEYS,
     MAX_SLEEVE_ITER as _MAX_SLEEVE_ITER,
     SLEEVE_DAMPING as _SLEEVE_DAMPING,
@@ -121,13 +124,9 @@ from portfolio_system.core.sleeve_params import (
 # 最后合并成一条报警，避免每次跑都刷屏。
 CAP_HITS = []
 
-# D_HSBC_SP500（标普500 QDII 大类）与美股内部各执行标的的相关性：手工标定。
-# 其余固定大类与内部标的之间没有直接的历史序列可算，用「该大类 vs O_US_CORE」的
-# 大类级相关性做代理（见 stage2_covariance）——这是近似，不是估计。
-SP500_INTERNAL_CORR = {
-    "SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60,
-}
-SP500_INTERNAL_CORR_DEFAULT = 0.75
+# P3-b3：SP500 内部相关性表是**纯数据**，唯一来源已搬进 core/stage2.py（这里只再导出）。
+from portfolio_system.core.stage2 import (  # noqa: E402
+    SP500_INTERNAL_CORR, SP500_INTERNAL_CORR_DEFAULT)
 
 
 def _note_cap_hit(key, weight, cap):
@@ -641,11 +640,8 @@ def _sleeve_params_us(internal, internal_tickers):
 
 # 袖 → (内部候选池, 内部相关性, 随机种子)：与阶段二同一套池子，供"空袖重新播种"使用。
 # 种子沿用阶段二各自的取值（美股 19 / 日本 31 / 大中华 43），保证可复现。
-_SLEEVE_POOL_SPECS = {
-    "O_US_CORE": (US_INTERNAL, US_INTERNAL_CORR, 19),
-    "O_JP_EQ": (JP_INTERNAL, JP_INTERNAL_CORR, 31),
-    "D_GREATER_CN": (GC_INTERNAL, GC_INTERNAL_CORR, 43),
-}
+_SLEEVE_POOL_SPECS = build_pool_specs(US_INTERNAL, US_INTERNAL_CORR, JP_INTERNAL,
+                                       JP_INTERNAL_CORR, GC_INTERNAL, GC_INTERNAL_CORR)
 
 
 # 袖 → 该袖"是否被解出"要看的结果字段（阶段二没跑就是 None）。
@@ -923,8 +919,7 @@ def main():
         TARGET_RETURN = float(args.target_return)
         log_step("target_return", f"目标收益率覆盖为 {TARGET_RETURN:.0%}", log_path=args.log_path)
 
-    with open(args.extract_json, encoding="utf-8") as f:
-        extract = json.load(f)
+    extract = load_extract(args.extract_json)
     log_step("load_extract", f"已加载提取结果 total={extract.get('total_value')}", log_path=args.log_path)
 
     # RF (无风险利率) 动态注入: App 侧按池比例加权中美10年国债收益率算出 rf,
