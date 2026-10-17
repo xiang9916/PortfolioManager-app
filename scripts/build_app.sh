@@ -78,6 +78,10 @@ cp -R "Optimizer/scripts" "${BUNDLE}/Contents/Resources/Optimizer/scripts"
 # (实测 strings 出 /Users/<user>/Documents/Github/.../portfolio_system/core/linalg.py) ——
 # 那就是 AGENTS §1 的构建机绝对路径红线, 会随 DMG/zip 一起发布出去。
 find "${BUNDLE}/Contents/Resources/Optimizer/scripts" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+# P4（2026-10-17）：Python 包已上提到 Optimizer/portfolio_system（scripts 的兄弟目录）——
+# bundle 内保持同构，脚本里 dirname(dirname(__file__)) 正好是包根。
+cp -R "Optimizer/portfolio_system" "${BUNDLE}/Contents/Resources/Optimizer/portfolio_system"
+find "${BUNDLE}/Contents/Resources/Optimizer/portfolio_system" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Optimizer static data (calibrated_params.json etc.) as bundle fallback for
 # params._resolve_data_file (env DSH_FINANCE_DIR -> dev Finance/tmp -> here).

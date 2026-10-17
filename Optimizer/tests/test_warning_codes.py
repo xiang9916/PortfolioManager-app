@@ -23,6 +23,10 @@ import sys
 _SCRIPTS = os.environ.get("PM_OPT_SCRIPTS") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, _SCRIPTS)
+# P4：包根 = scripts 的兄弟目录（由 PM_OPT_SCRIPTS 派生 → 祖先/旧布局树同样可用）。
+_PKG_ROOT = os.path.dirname(os.path.abspath(_SCRIPTS))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 import optimize_portfolio as OP  # noqa: E402
 
@@ -35,7 +39,8 @@ _SRC_PATH = os.path.join(_SCRIPTS, "optimize_portfolio.py")
 #:（P3-b2 再搬函数时不必回来改这里）。
 def _impl_paths():
     paths = [_SRC_PATH]
-    pkg = os.path.join(_SCRIPTS, "portfolio_system")
+    pkg = (os.path.join(os.path.dirname(os.path.abspath(_SCRIPTS)), "portfolio_system")
+    if os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(_SCRIPTS)), "portfolio_system")) else os.path.join(_SCRIPTS, "portfolio_system"))
     for dirpath, _dirs, names in os.walk(pkg):
         for name in sorted(names):
             if name.endswith(".py"):

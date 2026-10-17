@@ -2,6 +2,14 @@
 
 import datetime
 import json
+import os as _os
+import sys
+
+# P4（2026-10-17）：包已上提到 Optimizer/portfolio_system（scripts 的**兄弟目录**）——
+# 这里把包根（= scripts 的父目录）加进 sys.path。bundle 内目录同构，路径同样成立。
+_PKG_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 import numpy as np
 

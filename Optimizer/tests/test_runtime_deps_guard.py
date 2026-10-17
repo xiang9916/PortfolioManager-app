@@ -40,6 +40,12 @@ import tempfile
 _SCRIPTS = os.environ.get("PM_OPT_SCRIPTS") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 
+# P4：包根 = scripts 的兄弟目录（由 PM_OPT_SCRIPTS 派生；旧布局树回退到 scripts 内）。
+_PKG_ROOT = os.path.dirname(os.path.abspath(_SCRIPTS))
+pkg_dir = (os.path.join(_PKG_ROOT, 'portfolio_system')
+           if os.path.isdir(os.path.join(_PKG_ROOT, 'portfolio_system'))
+           else os.path.join(_SCRIPTS, 'portfolio_system'))
+
 #: 守卫断言：这些**根**模块不得在调用 core 之后新增
 FORBIDDEN_MODULES = ("urllib", "requests", "socket", "ssl", "subprocess", "sqlite3",
                      "fund_pipeline", "market_data", "test_tickers", "optimize_portfolio")
@@ -220,7 +226,8 @@ def _run_probe(scripts_dir, source=PROBE_SOURCE):
         with open(probe_path, "w", encoding="utf-8") as fh:
             fh.write(source)
         env = dict(os.environ)
-        env["PYTHONPATH"] = scripts_dir
+        # P4：包根是 scripts 的兄弟目录 → PYTHONPATH 同时给两处（旧布局树也兼容）。
+        env["PYTHONPATH"] = scripts_dir + os.pathsep + os.path.dirname(os.path.abspath(scripts_dir))
         env["PM_OPT_SCRIPTS"] = scripts_dir
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         proc = subprocess.run([sys.executable, "-B", probe_path],
@@ -287,15 +294,17 @@ def test_guard_is_falsifiable():
 def test_lazy_import_in_moved_core_module_is_caught():
     """守卫覆盖 P3-b1 新搬进 core 的模块：往 core/stage2.py 注入调用期延迟 import → 必须红。"""
     anchor = "    tickers = list(internal_pool.keys())"
-    src_path = os.path.join(_SCRIPTS, "portfolio_system", "core", "stage2.py")
+    src_path = os.path.join(pkg_dir, "core", "stage2.py")
     if not os.path.isfile(src_path):
         raise AssertionError("找不到 %s（守卫未能覆盖新搬入的 core 模块）" % src_path)
     source = open(src_path, encoding="utf-8").read()
     assert source.count(anchor) >= 1, "注入锚点未命中 core/stage2.py"
     with tempfile.TemporaryDirectory(prefix="pm-deps-guard-tree-") as tmp:
         tree = os.path.join(tmp, "scripts")
+        pkg_dst = os.path.join(tmp, "portfolio_system")
         shutil.copytree(_SCRIPTS, tree, ignore=shutil.ignore_patterns("__pycache__"))
-        mutated = os.path.join(tree, "portfolio_system", "core", "stage2.py")
+        shutil.copytree(pkg_dir, pkg_dst, ignore=shutil.ignore_patterns("__pycache__"))
+        mutated = os.path.join(pkg_dst, "core", "stage2.py")
         body = open(mutated, encoding="utf-8").read()
         # 只在 optimize_within_pool 里注入（该函数在探针里被真调用）
         idx = body.index("def optimize_within_pool(")
@@ -312,15 +321,17 @@ def test_lazy_import_in_moved_core_module_is_caught():
 
 def test_lazy_import_in_engine_is_caught():
     """守卫覆盖 P3-b2 新搬的 core/engine.py：注入调用期延迟 import → 必须红。"""
-    rel = os.path.join("portfolio_system", "core", "engine.py")
+    rel = os.path.join("core", "engine.py")   # pkg_dir 已指向包内
     anchor = "    pool_specs = dict(universe.pool_specs or {})"
-    src_path = os.path.join(_SCRIPTS, rel)
+    src_path = os.path.join(pkg_dir, rel)
     assert os.path.isfile(src_path), "找不到 %s" % src_path
     assert anchor in open(src_path, encoding="utf-8").read(), "注入锚点未命中 engine.py"
     with tempfile.TemporaryDirectory(prefix="pm-deps-guard-tree-") as tmp:
         tree = os.path.join(tmp, "scripts")
+        pkg_dst = os.path.join(tmp, "portfolio_system")
         shutil.copytree(_SCRIPTS, tree, ignore=shutil.ignore_patterns("__pycache__"))
-        mutated = os.path.join(tree, rel)
+        shutil.copytree(pkg_dir, pkg_dst, ignore=shutil.ignore_patterns("__pycache__"))
+        mutated = os.path.join(pkg_dst, rel)
         body = open(mutated, encoding="utf-8").read()
         body = body.replace(anchor, "    import urllib.request  # 证伪：调用期延迟 import" + chr(10) + anchor, 1)
         open(mutated, "w", encoding="utf-8").write(body)

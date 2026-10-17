@@ -19,16 +19,24 @@
 - 其余 → Yahoo 代码 (归境外池, 自由分配), 如 AAPL / 0700.HK / 7203.T / 600519.SS
 """
 
+import os as _os
 import re
+import sys
+# P4（2026-10-17）：包已上提到 Optimizer/portfolio_system（scripts 的**兄弟目录**）——
+# 这里把包根（= scripts 的父目录）加进 sys.path。bundle 内目录同构，路径同样成立。
+_PKG_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
+# P3-b3 步骤③：**联网取数**走 services（唯一网络入口）；纯数学函数仍直接来自 market_data
+# （它们不碰 I/O，将来可随 core 化一起搬走）。
 from market_data import (
     annualized_cagr,
     annualized_vol,
-    cached_series,
     daily_return_map,
     pairwise_corr,
-    series_for_broad_key,
 )
+from portfolio_system.services.data_fetcher import cached_series, series_for_broad_key
 import asset_classes as AC
 
 _CORR_MIN_PERIODS = 180

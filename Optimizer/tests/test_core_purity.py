@@ -18,7 +18,11 @@ import tempfile
 # 祖先对照的正确做法（AGENTS §12）：PM_OPT_SCRIPTS 优先；只改 PYTHONPATH 会跑成当前树。
 _SCRIPTS = os.environ.get("PM_OPT_SCRIPTS") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
-_PKG = os.path.join(_SCRIPTS, "portfolio_system")
+_PKG_ROOT = os.path.dirname(os.path.abspath(_SCRIPTS))   # P4：包根 = scripts 的兄弟目录
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
+_PKG = (os.path.join(os.path.dirname(os.path.abspath(_SCRIPTS)), "portfolio_system")
+    if os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(_SCRIPTS)), "portfolio_system")) else os.path.join(_SCRIPTS, "portfolio_system"))
 
 #: R1：core/models 不得 import 的模块（网络 / 磁盘 / 子进程 / 数据库）
 FORBIDDEN_MODULES = ("urllib", "requests", "socket", "ssl", "subprocess", "sqlite3",

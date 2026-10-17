@@ -27,6 +27,10 @@ import numpy as np
 _SCRIPTS = os.environ.get("PM_OPT_SCRIPTS") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, _SCRIPTS)
+# P4：包根 = scripts 的兄弟目录（由 PM_OPT_SCRIPTS 派生 → 祖先/旧布局树同样可用）。
+_PKG_ROOT = os.path.dirname(os.path.abspath(_SCRIPTS))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 import sensitivity_analysis as SENS  # noqa: E402
 from portfolio_system.core import engine as CORE_ENGINE  # noqa: E402

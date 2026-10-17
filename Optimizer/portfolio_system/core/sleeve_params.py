@@ -12,6 +12,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .constants import ZERO_EPS
+
 from .linalg import build_corr_matrix, project_psd
 from .stage2 import optimize_within_pool
 
@@ -22,7 +24,7 @@ def sleeve_params_us(internal, internal_tickers, us_internal, us_internal_corr):
         return None
     x = np.asarray(internal[0], dtype=float)
     total = float(x.sum())
-    if total <= 1e-9:
+    if total <= ZERO_EPS:
         return None
     w = x / total
     mus = np.array([us_internal[t]["mu"] for t in internal_tickers])

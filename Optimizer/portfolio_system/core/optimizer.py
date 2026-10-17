@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 from ..models import serialization
 from ..models.data_types import ProblemSpec, SolveResult, Warning
 from . import constraints, errors, linalg, sleeves, solver
+from .constants import SLACK_EPS
 
 
 def _to_warning(raw: Any) -> Warning:
@@ -49,7 +50,7 @@ class LocalConvexOptimizer(PortfolioOptimizer):
             if not math.isfinite(float(a.sigma)) or float(a.sigma) <= 0.0:
                 raise errors.InputError("sigma 必须为正的有限数", key=a.key, value=a.sigma,
                                         source="AssetSpec.sigma")
-            if float(a.lower) > float(a.upper) + 1e-12:
+            if float(a.lower) > float(a.upper) + SLACK_EPS:
                 raise errors.InputError("lower > upper", key=a.key,
                                         value=(a.lower, a.upper), source="AssetSpec bounds")
         if not math.isfinite(float(problem.goal.target_return)):

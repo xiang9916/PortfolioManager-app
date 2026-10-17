@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import numpy as np
 from scipy.optimize import minimize
 
-from .constants import CHECK_SUM_EPS, DELIVERY_EPS
+from .constants import (ALLOC_REMAINDER_EPS, CAP_HIT_EPS, CHECK_SUM_EPS, CONSERVATION_EPS,
+                        DELIVERY_EPS, PSD_JITTER_EPS, SLACK_EPS, WEIGHT_ZERO_EPS, ZERO_EPS)
 from .constants import SOLVER_EPS as _SOLVER_EPS
 from .constraints import _respects_bounds, upper_bounds_array as _upper_array
 from .linalg import build_corr_matrix, portfolio_stats, project_psd
@@ -88,7 +89,7 @@ def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, bro
     # PSD projection (shared helper).
     corr = project_psd(corr)
     cov = np.outer(vols, vols) * corr
-    cov += np.eye(n) * 1e-10
+    cov += np.eye(n) * PSD_JITTER_EPS
     return mus, cov, keys
 
 
@@ -118,7 +119,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
 
     core_idx = broad_keys.index("O_US_CORE")
     core_total = float(stage1_weights[core_idx])
-    if core_total <= 1e-6:
+    if core_total <= WEIGHT_ZERO_EPS:
         return None, "Stage 1 gave zero weight to US core equity."
 
     fixed_assets = [a for a in assets if a["key"] != "O_US_CORE"]
@@ -167,7 +168,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         start = np.zeros(n_internal)
         remaining = core_total
         guard = 0
-        while remaining > 1e-8 and guard < 200:
+        while remaining > ALLOC_REMAINDER_EPS and guard < 200:
             available = np.maximum(caps - start, 0.0)
             p = rng.random(n_internal) * available
             if p.sum() <= 0:
@@ -177,7 +178,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
             start = np.minimum(start, caps)
             remaining = core_total - start.sum()
             guard += 1
-        if abs(start.sum() - core_total) > 1e-6:
+        if abs(start.sum() - core_total) > CONSERVATION_EPS:
             continue
         res = minimize(objective, start, method="SLSQP", bounds=bounds, constraints=cons,
                        options={"maxiter": 2000, "ftol": 1e-12})
@@ -197,7 +198,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
     if best is not None and cap_map and cap_hits_out is not None:
         for j, t in enumerate(best[5]):
             cap = cap_map.get(t)
-            if cap is not None and best[0][j] >= cap - 1e-6:
+            if cap is not None and best[0][j] >= cap - CAP_HIT_EPS:
                 cap_hits_out.append((t, float(best[0][j]), float(cap)))
     return best, None
 
@@ -207,7 +208,7 @@ def pool_cap_norm(internal_pool, cap_map, total_w):
     internal_pool_optimize（实际交付）与 solve_portfolio（算袖内下限该截到哪个上界）
     必须用同一套折算，否则"截断后的下限"未必可交付（2026-10-16 P1）。
     """
-    if not cap_map or total_w <= 1e-9:
+    if not cap_map or total_w <= ZERO_EPS:
         return {}
     norm = {}
     for t in internal_pool:
@@ -227,12 +228,12 @@ def pool_max_return(internal_pool, internal_corr, cap_norm=None):
     if not tickers:
         return None
     caps = {t: min(1.0, float((cap_norm or {}).get(t, 1.0))) for t in tickers}
-    if sum(caps.values()) < 1.0 - 1e-9:
+    if sum(caps.values()) < 1.0 - ZERO_EPS:
         return None
     order = sorted(tickers, key=lambda t: (-float(internal_pool[t]["mu"]), t))
     rem, ret = 1.0, 0.0
     for t in order:
-        if rem <= 1e-12:
+        if rem <= SLACK_EPS:
             break
         take = min(rem, caps[t])
         ret += take * float(internal_pool[t]["mu"])
@@ -328,7 +329,7 @@ def internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr,
         return None
     idx = [i for i, a in enumerate(assets) if a["key"] == broad_key][0]
     total_w = float(stage1_weights[idx])
-    if total_w <= 1e-6:
+    if total_w <= WEIGHT_ZERO_EPS:
         return None
 
     # 桶内权重是"归一化后 × 桶权重"，所以组合上限要折算：cap_norm = cap / total_w
@@ -341,7 +342,7 @@ def internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr,
     x, ret, vol, sharpe = got
     if cap_norm and cap_hits_out is not None:
         for i, t in enumerate(internal_pool):
-            if t in cap_norm and x[i] >= cap_norm[t] - 1e-6:
+            if t in cap_norm and x[i] >= cap_norm[t] - CAP_HIT_EPS:
                 cap_hits_out.append((t, float(x[i] * total_w), float(cap_map[t])))
     out = {
         "broad_total_weight": total_w,

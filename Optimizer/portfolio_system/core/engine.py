@@ -11,7 +11,8 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
-from .constants import DELIVERY_EPS
+from .constants import (CAP_HIT_EPS, DELIVERY_EPS, FALLBACK_MARGIN_EPS, TARGET_REACH_EPS,
+                        WEIGHT_ZERO_EPS)
 from .constraints import apply_active_caps, active_cap_map, stage1_bounds
 from .fixpoint import (compute_sleeve_floors, floor_next_params, floor_seed,
                        required_sleeve_mu, reseed_sleeves, resolved_sleeves,
@@ -86,7 +87,7 @@ def solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf
     max_ret = max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
     warnings.append(_Warn(f"{target:.0%} {STAGE1_FALLBACK_MARK} {max_ret:.2%}。",
                           "target.stage1_fallback"))
-    eff_target = max_ret - 1e-6
+    eff_target = max_ret - FALLBACK_MARGIN_EPS
     solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, eff_target,
                               seed=23, n_starts=stage1_starts, rf=rf)
     return solved, (eff_target if solved is not None else target)
@@ -124,14 +125,14 @@ def solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_as
     w1, ret1, vol1, sharpe1 = solved
     for i, a in enumerate(assets):
         cap = cap_map.get(a.get("key"))
-        if cap is not None and w1[i] >= cap - 1e-6 and cap_hits_out is not None:
+        if cap is not None and w1[i] >= cap - CAP_HIT_EPS and cap_hits_out is not None:
             cap_hits_out.append((a["key"], float(w1[i]), float(cap)))
     if log:
         log("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}")
 
     floors_in = dict(sleeve_floors or {})
     for k in list(floors_in):                 # 0 权重的袖本轮不跑阶段二 → 传下去也不会生效
-        if k not in keys or float(w1[keys.index(k)]) <= 1e-6:
+        if k not in keys or float(w1[keys.index(k)]) <= WEIGHT_ZERO_EPS:
             del floors_in[k]
     japan_selection = stage2_japan_optimize(
         w1, assets, total_assets, universe.jp_internal, universe.jp_internal_corr, rf,
@@ -165,7 +166,7 @@ def solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_as
     w1_idx = {k: float(w1[keys.index(k)]) for k in SLEEVE_KEYS if k in keys}
     weighted_no_basket = []
     for k, wt in w1_idx.items():
-        if wt <= 1e-6:
+        if wt <= WEIGHT_ZERO_EPS:
             continue
         if k == "O_US_CORE" and internal is None:
             weighted_no_basket.append(k)
@@ -272,7 +273,7 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
         # 当作本次目标下的结论：回退角点通常不给袖任何权重 → 阶段二整段跳过 → delta=0
         # 会被误判成收敛（见 SLEEVE_DAMPING 下方的说明）。所以回退轮既不参与收敛判定，
         # 也不参与"最优轮"的挑选。
-        fell_back = float(solved["target"]) < float(target) - 1e-9
+        fell_back = float(solved["target"]) < float(target) - TARGET_REACH_EPS
         entry = {"iter": it + 1, "delta": round(float(delta), 6),
                  "sleeve": {k: [round(float(v[0]), 6), round(float(v[1]), 6)]
                             for k, v in sleeve.items()},
@@ -439,7 +440,7 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                                        stage1_starts=stage1_starts, stage2_starts=stage2_starts,
                                        warn=warn_retry, sleeve_floors=floors)
             if solved_retry is None or \
-                    float(solved_retry["target"]) < float(target) - 1e-9:
+                    float(solved_retry["target"]) < float(target) - TARGET_REACH_EPS:
                 solved_retry, retry_sleeve = None, None
         else:
             retry_sleeve = None

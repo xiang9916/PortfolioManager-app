@@ -3,7 +3,14 @@
 
 import argparse
 import json
+import os as _os
 import sys
+# P4（2026-10-17）：包已上提到 Optimizer/portfolio_system（scripts 的**兄弟目录**）——
+# 这里把包根（= scripts 的父目录）加进 sys.path。bundle 内目录同构，路径同样成立。
+_PKG_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
+
 from datetime import datetime, timezone
 
 import numpy as np
@@ -51,6 +58,10 @@ from portfolio_system.services.pipeline import (
     ensure_work_dir,
     live_anchors_from_extract,
 )
+from portfolio_system.callers.new_asset_runner import (  # P3-b3 步骤③
+    NewAssetRunner, TestAssetsUnavailable)
+# P3-b3 步骤②：结果装配（summary / benchmark）已搬进 callers.preset_runner。
+from portfolio_system.callers.preset_runner import SummaryTables, build_summary
 from portfolio_system.services.portfolio_source import load_extract
 from test_tickers import parse_test_tickers, resolve_test_assets
 import asset_classes as AC
@@ -242,7 +253,7 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
             continue
         key = a["key"]
         weight = float(stage1_weights[i])
-        if weight <= 1e-6:
+        if weight <= WEIGHT_ZERO_EPS:
             continue
         candidates = hsbc_pool.get(key, [])
         if not candidates:
@@ -270,8 +281,9 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
 # ── 容差的唯一来源（2026-10-17 收口）────────────────────────────────────────────
 # P2（2026-10-17）：容差常量的唯一来源已搬进 portfolio_system/core/constants.py，
 # 这里只做再导出，保持既有 import 路径与名字不变（不许再出现字面量）。
-from portfolio_system.core.constants import (  # noqa: E402
-    CHECK_SUM_EPS, DELIVERY_EPS, SLEEVE_FLOOR_EPS, SLEEVE_ROOM_EPS)
+from portfolio_system.core.constants import (  # noqa: E402  P3-b3：容差唯一来源在 core
+    CHECK_SUM_EPS, DELIVERY_EPS, RESEED_TOL, SLEEVE_FLOOR_EPS, SLEEVE_ROOM_EPS,
+    TINY_WEIGHT_EPS, WEIGHT_ZERO_EPS)
 from portfolio_system.core.constants import SOLVER_EPS as _SOLVER_EPS  # noqa: E402
 
 
@@ -317,283 +329,20 @@ def stage2_gc_optimize(stage1_weights, assets, total_assets, cap_map=None, rf=No
         cap_hits_out=CAP_HITS)
 
 
+def _summary_tables():
+    """结果 summary 要用的外部数据表（**调用时**读模块级变量 → 变量打桩仍兼容）。"""
+    return SummaryTables(
+        broad_assets=BROAD_ASSETS, broad_corr=BROAD_CORR, us_internal=US_INTERNAL,
+        jp_internal=JP_INTERNAL, gc_internal=GC_INTERNAL, build_cov=build_broad_cov)
+
+
 def build_result_summary(output, hsbc_pool=None):
-    """Build a clean Finance result file: per-asset weights/return/vol/sharpe + totals."""
-    # 境外/跨池大类的执行代码（标的名前加 [代码] 前缀，便于直接下单；
-    # 无单一成交代码的大类保持 None，不加前缀）
-    exec_code = {
-        "O_BTC": "BTC",
-        "O_HYLB": "HYLB",
-        "O_SG_EQ": "G3B.SI",
-        "O_US_TLT": "TLH",
-        "O_US_REIT": "REZ",
-        "O_US_ENERGY": "XOM",
-    }
-    # 大中华二级风格桶 → 境内基金池类别（风格桶本身无单一成交代码，
-    # 执行代表基金取自对应类别的去重/最低费率代表，与境内大类同一套哲学）
-    gc_bucket_pool = {
-        "CSI300": "D_HSBC_CSI300",
-        "DIVLOWVOL": "D_HSBC_DIVLOWVOL",
-        "DIVLOWVOL100": "D_CN_DIVLOWVOL100",
-        "STOCK": "D_CN_STOCK",
-        "MIXED": "D_CN_MIXED",
-        "INDEX": "D_CN_INDEX",
-        "HK_BROAD": "D_CN_HK",
-        "HK_DIV": "D_CN_HK",
-        "HK_TECH": "D_HSBC_HSTECH",
-    }
-    assets = []
-    # Domestic categories with selected representative funds
-    for key, sel in output.get("domestic_selection", {}).items():
-        a = next((x for x in BROAD_ASSETS if x["key"] == key), None)
-        if a is None:
-            continue
-        mu = a["mu"]
-        vol = a["vol"]
-        assets.append({
-            "key": key,
-            "name": f"[{sel['selected']['code']}] {a['name']} → {sel['selected']['name']}",
-            "weight": sel["category_weight"],
-            "expected_return": mu,
-            "volatility": vol,
-            "sharpe": (mu - RF) / vol if vol else 0.0,
-        })
-    # US core internal split
-    stage2 = output.get("stage2") or {}
-    for ticker, w in stage2.get("internal_weights_total", {}).items():
-        if w <= 1e-8:
-            continue
-        info = US_INTERNAL.get(ticker)
-        if info is None:
-            continue
-        mu = info["mu"]
-        vol = info["vol"]
-        assets.append({
-            "key": ticker,
-            "name": f"[{ticker}] {info['name']}",
-            "weight": w,
-            "expected_return": mu,
-            "volatility": vol,
-            "sharpe": (mu - RF) / vol if vol else 0.0,
-        })
-    # Japan equity internal factor split
-    jp = output.get("japan_selection")
-    if jp is not None:
-        for ticker, w in jp.get("internal_weights_total", {}).items():
-            if w <= 1e-8:
-                continue
-            info = JP_INTERNAL.get(ticker)
-            if info is None:
-                continue
-            mu = info["mu"]
-            vol = info["vol"]
-            assets.append({
-                "key": f"JP:{ticker}",
-                "name": f"[{ticker}] 日本·{info['name']}",
-                "weight": w,
-                "expected_return": mu,
-                "volatility": vol,
-                "sharpe": (mu - RF) / vol if vol else 0.0,
-            })
+    """结果 summary（P3-b3 步骤②薄壳）：实现已搬进 callers.preset_runner.build_summary。
 
-    # Greater China equity internal factor split
-    # 风格桶无单一成交代码：前缀用对应境内基金池的代表基金代码
-    gc = output.get("gc_selection")
-    if gc is not None:
-        gc_used = {}  # pool_key -> 已用 code 列表，同池多桶避免重复同一代表
-        for ticker, w in gc.get("internal_weights_total", {}).items():
-            if w <= 1e-8:
-                continue
-            info = GC_INTERNAL.get(ticker)
-            if info is None:
-                continue
-            mu = info["mu"]
-            vol = info["vol"]
-            rep = None
-            if hsbc_pool:
-                pool_key = gc_bucket_pool.get(ticker)
-                cands = hsbc_pool.get(pool_key) or []
-                used = gc_used.setdefault(pool_key, [])
-                rep = next((c for c in cands if c["code"] not in used), None)
-                if rep is not None:
-                    used.append(rep["code"])
-            name = (f"[{rep['code']}] 大中华·{info['name']} → {rep['name']}"
-                    if rep is not None else f"大中华·{info['name']}")
-            assets.append({
-                "key": f"GC:{ticker}",
-                "name": name,
-                "weight": w,
-                "expected_return": mu,
-                "volatility": vol,
-                "sharpe": (mu - RF) / vol if vol else 0.0,
-            })
+    RF 是模块级全局（App 从 extract 注入），薄壳在**调用时**取 → 既有打桩语义不变。
+    """
+    return build_summary(output, tables=_summary_tables(), rf=RF, hsbc_pool=hsbc_pool)
 
-    # Other overseas broad assets
-    for key, w in output.get("stage1", {}).get("weights", {}).items():
-        if key in [a["key"] for a in assets] or key in ("O_US_CORE", "O_JP_EQ", "O_HK_HSTECH", "D_GREATER_CN"):
-            continue
-        a = next((x for x in BROAD_ASSETS if x["key"] == key), None)
-        if a is None:
-            continue
-        mu = a["mu"]
-        vol = a["vol"]
-        code = a.get("fund_code") or exec_code.get(key)
-        name = f"[{code}] {a['name']}" if code else a["name"]
-        assets.append({
-            "key": key,
-            "name": name,
-            "weight": w,
-            "expected_return": mu,
-            "volatility": vol,
-            "sharpe": (mu - RF) / vol if vol else 0.0,
-        })
-    # 测试标的 (T_ 前缀): 它们是"新标的测试"临时注入的大类, 不在 BROAD_ASSETS 里,
-    # 但同样占用第一阶段权重。以前这里直接 continue 掉, 后果是:
-    # (a) 权重合计 < 1(看起来"没买满"), (b) 用户看到的清单里永远没有新标的,
-    # 于是"加入新标的值不值得"这个问题的答案被整段吞掉 (2026-10-13 修)。
-    test_meta = {t["key"]: t for t in (output.get("test") or {}).get("assets", [])}
-    listed = {a["key"] for a in assets}
-    for key, w in output.get("stage1", {}).get("weights", {}).items():
-        if key in listed:
-            continue
-        m = test_meta.get(key)
-        if m is None:
-            continue
-        mu = float(m["mu"])
-        vol = float(m["vol"])
-        src = "天天基金" if m.get("source") == "eastmoney" else "Yahoo"
-        pool = "境内池" if m.get("pool") == "domestic" else "境外池"
-        assets.append({
-            "key": key,
-            "name": f"[测试] {m['ticker']}（{src} · {pool} · what-if，不进执行清单）",
-            "weight": w,
-            "expected_return": mu,
-            "volatility": vol,
-            "sharpe": (mu - RF) / vol if vol else 0.0,
-            "is_test": True,
-        })
-    assets.sort(key=lambda x: -x["weight"])
-    for a in assets:
-        a["weight"] = round(float(a["weight"]), 6)
-        a["expected_return"] = round(float(a["expected_return"]), 6)
-        a["volatility"] = round(float(a["volatility"]), 6)
-        a["sharpe"] = round(float(a["sharpe"]), 6)
-    final = output.get("final") or {}
-    # 自检: 报告清单必须覆盖第一阶段所有权重。历史上测试标的(T_)被静默丢弃过一次,
-    # 于是"清单合计 82%、指标却按 100% 算"这种错能一路滑到界面上 —— 这里把它变成显式提示。
-    # 注意有些 key 是**故意**不出现在清单里的: 它们被拆成了第二阶段的子行
-    # (O_US_CORE→美股内部标的、O_JP_EQ/O_HK_HSTECH/D_GREATER_CN→各内部桶、境内大类→选中基金)。
-    expanded = set(output.get("domestic_selection", {}).keys())
-    for sel_key, broad_key in (("stage2", "O_US_CORE"), ("japan_selection", "O_JP_EQ"),
-                               ("gc_selection", "D_GREATER_CN")):
-        if output.get(sel_key) is not None:
-            expanded.add(broad_key)
-    emitted = {a["key"] for a in assets}
-    missing = [k for k, w in output.get("stage1", {}).get("weights", {}).items()
-               if w > 1e-6 and k not in emitted and k not in expanded]
-    total_w = sum(float(a["weight"]) for a in assets)
-    # 优化器自身的提示(候选被剔除、池口径、数据源计数…)必须原样带上:
-    # 它们解释了"为什么这次的可投大类和上次不一样", 是解读结果的前提。
-    summary_warnings = list(output.get("warnings", []))
-    if missing:
-        summary_warnings.append(_Warn(
-            "自检: 以下权重没有出现在结果清单里（映射漏项）: " + ", ".join(sorted(missing)),
-            "summary.missing_weights"))
-    if abs(total_w - 1.0) > CHECK_SUM_EPS:
-        summary_warnings.append(_Warn(
-            f"自检: 结果清单权重合计为 {total_w:.4f}，不等于 1 —— 请对照第一阶段权重核对映射是否漏项。",
-            "summary.weight_sum_mismatch"))
-    summary = {
-        "generated_at": output.get("availability", {}).get("checked_at"),
-        "portfolio": {
-            "expected_return": round(float(final.get("ret", 0.0)), 6),
-            "volatility": round(float(final.get("vol", 0.0)), 6),
-            "sharpe": round(float(final.get("sharpe", 0.0)), 6),
-            "worst_year_95": round(float(final.get("floor", 0.0)), 6),
-        },
-        "assets": assets,
-        "benchmark": _build_benchmark(output, final),
-        "test_assets": (output.get("test") or {}).get("assets"),
-        "target_return": output.get("target_return"),
-        "target_gap": output.get("target_gap"),
-        "objective": output.get("objective"),
-        "deliverable": bool(output.get("deliverable", True)),
-        "final_source": output.get("final_source", "delivered"),
-        "warnings": summary_warnings,
-        # 加法式告警明细（code + message）：Swift 只认 code，不再匹配文案。
-        # 必须用**最终** summary_warnings 生成 —— 它包含本函数内追加的自检类告警，
-        # 以及调用前已并入 output["warnings"] 的 CAP_HITS 类告警。
-        "warning_items": _warning_items(summary_warnings),
-        "source_detail": None,
-    }
-    return summary
-
-
-def _build_benchmark(output, final):
-    """Benchmark = 境内池 100% 沪深300ETF + 海外池 100% 标普500ETF."""
-    try:
-        pool = output.get("pool", {})
-        dw = float(pool.get("domestic_weight", 0.0))
-        ow = float(pool.get("overseas_weight", 0.0))
-        core = output.get("us_core_aggregate", {})
-        broad = []
-        for a in BROAD_ASSETS:
-            item = dict(a)
-            if a["key"] == "O_US_CORE":
-                item["mu"] = core.get("mu", a.get("mu"))
-                item["vol"] = core.get("vol", a.get("vol"))
-            broad.append(item)
-        # 测试标的也要进这张协方差表: 组合 Beta 用的是"组合权重 × 基准权重"的协方差,
-        # 漏掉测试标的等于把它们当空仓, Beta 被低估、Alpha 被高估 (2026-10-13 修)。
-        test_block = output.get("test") or {}
-        test_meta = {t["key"]: t for t in test_block.get("assets", [])}
-        for key, m in test_meta.items():
-            broad.append({"key": key, "name": key, "mu": m["mu"], "vol": m["vol"],
-                          "pool": m.get("pool")})
-        keys = [a["key"] for a in broad]
-        mu = np.array([a["mu"] if a["mu"] is not None else 0.0 for a in broad])
-        vols = np.array([a["vol"] if a["vol"] is not None else 0.0 for a in broad])
-        corr_pairs = dict(BROAD_CORR)
-        for i, j, v in test_block.get("corr", []) or []:
-            corr_pairs[(i, j)] = float(v)
-        cov = build_broad_cov([{"key": k, "vol": v} for k, v in zip(keys, vols)], corr_pairs)
-
-        w_bench = np.zeros(len(keys))
-        if "D_GREATER_CN" in keys:
-            w_bench[keys.index("D_GREATER_CN")] = dw
-        elif "D_HSBC_CSI300" in keys:
-            w_bench[keys.index("D_HSBC_CSI300")] = dw
-        if "D_HSBC_SP500" in keys:
-            w_bench[keys.index("D_HSBC_SP500")] = ow
-
-        bench_ret = float(w_bench @ mu)
-        bench_vol = float(np.sqrt(w_bench @ cov @ w_bench))
-
-        # Portfolio broad weights (stage1) for beta approximation.
-        stage1 = output.get("stage1", {}).get("weights", {})
-        w_p = np.zeros(len(keys))
-        for i, k in enumerate(keys):
-            w_p[i] = float(stage1.get(k, 0.0))
-        cov_pb = float(w_p @ cov @ w_bench)
-        var_b = float(w_bench @ cov @ w_bench)
-        beta = cov_pb / var_b if var_b > 0 else 0.0
-
-        ret_p = float(final.get("ret", 0.0))
-        alpha = ret_p - (RF + beta * (bench_ret - RF))
-
-        return {
-            "weights": {"domestic_CSI300": dw, "overseas_SP500": ow},
-            "expected_return": round(bench_ret, 6),
-            "volatility": round(bench_vol, 6),
-            "sharpe": round((bench_ret - RF) / bench_vol, 6) if bench_vol > 0 else 0.0,
-            "worst_year_95": round(bench_ret - 1.96 * bench_vol, 6),
-            "portfolio_alpha": round(alpha, 6),
-            "portfolio_beta": round(beta, 6),
-            "volatility_reduction": round(bench_vol - float(final.get("vol", 0.0)), 6),
-            "worst_year_improvement": round(float(final.get("floor", 0.0)) - (bench_ret - 1.96 * bench_vol), 6),
-        }
-    except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------- 完整求解（阶段一 + 袖内固定点）
@@ -655,7 +404,7 @@ def _sleeve_reseed_params(key, rf):
     return _core_sleeve_reseed_params(key, rf, _SLEEVE_POOL_SPECS)
 
 
-def _reseed_sleeves(sleeve, solved, rf, tol=1e-5):
+def _reseed_sleeves(sleeve, solved, rf, tol=RESEED_TOL):
     """把本轮没被解出的袖按候选池重新播种（P3-b2 薄壳：池表在调用时读取）。"""
     return _core_reseed_sleeves(sleeve, solved, rf, _SLEEVE_POOL_SPECS, tol=tol)
 
@@ -817,56 +566,37 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                           floor_seed=_floor_seed))
 
 
-def _inject_test_assets(args, assets, work_dir, warnings):
-    """新标的测试：临时标的作为新增资产注入第一阶段（在可投性过滤之后，不受其约束）。
+#: P3-b3 步骤③：新标的注入的实现已搬进 callers.NewAssetRunner（本模块只留薄壳）。
+_NEW_ASSET = NewAssetRunner(optimizer=None)
 
-    返回 (assets', test_corr_pairs, test_skipped, test_estimates)。
-    全部标的不可用时打印错误 JSON 并以退出码 3 结束（与原 main 内联行为一致）。
+
+def _inject_test_assets(args, assets, work_dir, warnings):
+    """新标的测试：临时标的作为新增资产注入第一阶段（P3-b3 薄壳）。
+
+    实现见 callers/new_asset_runner.NewAssetRunner.inject_test_assets；本薄壳只保留
+    **CLI 契约**：全部测试标的不可用 → 打印错误 JSON 并以退出码 3 结束。
+    解析器 / 口径表 / 告警工厂由这里（装配层）注入 —— 联网与 asset_classes 属上层。
     """
-    test_estimates, test_skipped = [], []
-    if not args.test_tickers:
-        return assets, None, test_skipped, test_estimates
-    test_assets, test_corr_pairs, test_skipped, test_estimates = resolve_test_assets(
-        args.test_tickers,
-        work_dir,
-        existing_keys={a["key"] for a in assets},
-        internal_keys=set(US_INTERNAL.keys()),
-        # 相关性要覆盖全量大类 (不只是本次可投的那几个): 基准对比用
-        # D_HSBC_SP500 / D_GREATER_CN 算组合 Beta, 缺了这些行 Beta 会被低估。
-        corr_keys={a["key"] for a in BROAD_ASSETS},
-        test_class=args.test_class,
-        log=lambda msg, level="info": log_step(
-            "test_tickers", msg, level=level, log_path=args.log_path),
-    )
-    for t, reason in test_skipped:
-        warnings.append(_test_ticker_skip_warning(t, reason))
-    # 测试标的没有登记先验：broad/strategy 会退化成纯历史，必须显式说明口径不同
-    for e in test_estimates:
-        if e.get("mu_note") == "history_only":
-            warnings.append(
-                f"测试标的 {e['ticker']} 标为「{AC.CLASS_RULES[e['test_class']]['label']}」，"
-                f"但该类的人工先验只对登记在册的标的有效；测试标的使用纯历史年化 "
-                f"μ={e['mu']:.2%}（组合内同类标的的口径是"
-                f"{AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 历史 + "
-                f"{1-AC.CLASS_RULES[e['test_class']]['mu_hist_weight']:.0%} 先验，两者不可直接横比）。")
-    if not test_assets:
-        detail = "; ".join(f"{t}: {r}" for t, r in test_skipped) or "无有效标的"
+    try:
+        return _NEW_ASSET.inject_test_assets(
+            assets,
+            raw_tickers=args.test_tickers,
+            test_class=args.test_class,
+            work_dir=work_dir,
+            resolve=resolve_test_assets,
+            internal_keys=US_INTERNAL,
+            corr_keys=[a["key"] for a in BROAD_ASSETS],
+            class_rules=AC.CLASS_RULES,
+            skip_warning=_test_ticker_skip_warning,
+            warnings=warnings,
+            log=lambda msg, level="info": log_step(
+                "test_tickers", msg, level=level, log_path=args.log_path),
+        )
+    except TestAssetsUnavailable as exc:
         print(json.dumps(
-            {"error": "所有测试标的均不可用", "detail": detail, "warnings": warnings},
+            {"error": "所有测试标的均不可用", "detail": exc.detail, "warnings": warnings},
             ensure_ascii=False))
         sys.exit(3)
-    assets = assets + test_assets
-    for a in test_assets:
-        if a["pool"] == "domestic":
-            warnings.append(
-                f"测试标的 {a['name']} 按境内池约束参与优化 (what-if 口径, "
-                f"不经汇丰在售校验, 也不出现在境内基金执行清单)。")
-    log_step(
-        "test_tickers",
-        f"新增 {len(test_assets)} 个测试资产: "
-        + ", ".join(a["key"] for a in test_assets),
-        log_path=args.log_path)
-    return assets, test_corr_pairs, test_skipped, test_estimates
 
 
 def main():
@@ -1065,7 +795,7 @@ def main():
                 f"目标低于切点收益时结果不随滑杆变化，把目标提到切点收益以上才会沿前沿上移。")
 
     stage1_detail = {
-        "weights": {keys[i]: float(w1[i]) for i in range(len(keys)) if w1[i] > 1e-6},
+        "weights": {keys[i]: float(w1[i]) for i in range(len(keys)) if w1[i] > WEIGHT_ZERO_EPS},
         "ret": ret1,
         "vol": vol1,
         "sharpe": sharpe1,

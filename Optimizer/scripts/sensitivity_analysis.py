@@ -16,6 +16,10 @@ from pathlib import Path
 
 # Add scripts dir to path so params can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# P4：包根 = scripts 的父目录（bundle 内目录同构）。
+_PKG_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 import math
 

@@ -13,7 +13,8 @@ import numpy as np
 
 import asset_classes as AC
 
-from .constants import SLEEVE_ROOM_EPS
+from .constants import (BISECT_EPS, BISECT_TOL, MU_REACH_EPS, RESEED_TOL,
+                        SLEEVE_ROOM_EPS, TARGET_REACH_EPS, WEIGHT_ZERO_EPS)
 from .constants import SOLVER_EPS as _SOLVER_EPS
 from .constraints import max_return_given_mu
 from .sleeve_params import (FLOOR_SLEEVE_KEYS, SLEEVE_KEYS, SLEEVE_RESOLVED_FIELD,
@@ -48,7 +49,8 @@ def unresolved_weighted_sleeves(solved, sleeve):
     统计，必须显式标注、不能让模型统计看起来像可交付结果（2026-10-15 P0）。
     """
     return [k for k in sleeve
-            if k not in resolved_sleeves(solved) and stage1_weight(solved, k) > 1e-6]
+            if k not in resolved_sleeves(solved)
+            and stage1_weight(solved, k) > WEIGHT_ZERO_EPS]
 
 
 def sleeve_failure_reason(key, pool_specs):
@@ -142,21 +144,21 @@ def required_sleeve_mu(solved, tan_mu, target, dom_w, ov_w, pool_specs):
     lo = max(float(tan_mu[k]) for k in use)
     hi = min(caps[k] for k in use)
     c_lo = ceiling(lo)
-    if c_lo is not None and c_lo >= float(target) - 1e-9:
+    if c_lo is not None and c_lo >= float(target) - TARGET_REACH_EPS:
         return None, {"skipped": "frontier already reaches target"}
     c_hi = ceiling(hi)
-    if hi <= lo + 1e-12 or c_hi is None or c_hi < float(target) - 1e-9:
+    if hi <= lo + BISECT_EPS or c_hi is None or c_hi < float(target) - TARGET_REACH_EPS:
         return None, {"skipped": "target unreachable at sleeve max",
                       "tangency_mu": {k: round(float(tan_mu[k]), 6) for k in use},
                       "uncapped_max": {k: round(caps[k], 6) for k in use}}
     for _ in range(60):
         mid = 0.5 * (lo + hi)
         c = ceiling(mid)
-        if c is not None and c >= float(target) - 1e-9:
+        if c is not None and c >= float(target) - TARGET_REACH_EPS:
             hi = mid
         else:
             lo = mid
-        if hi - lo <= 1e-6:
+        if hi - lo <= BISECT_TOL:
             break
     audit = {k: {"required_mu": round(float(hi), 6), "tangency_mu": round(float(tan_mu[k]), 6),
                  "uncapped_max": round(caps[k], 6)} for k in use}
@@ -283,34 +285,34 @@ def seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w, pool_specs):
     if not caps:
         return {}
     base = ceiling({})
-    if base is not None and base >= float(target) - 1e-9:
+    if base is not None and base >= float(target) - TARGET_REACH_EPS:
         return {}
     levels = {}
     for k in sorted(caps, key=lambda x: -(caps[x] - float(tan_mu[x]))):
         c = ceiling(levels)
-        if c is not None and c >= float(target) - 1e-9:
+        if c is not None and c >= float(target) - TARGET_REACH_EPS:
             break
         lo = max(float(ref[idx[k]]), float(tan_mu[k]))
         hi = caps[k]
-        if hi <= lo + 1e-12:
+        if hi <= lo + BISECT_EPS:
             continue
         top = ceiling(dict(levels, **{k: hi}))
-        if top is None or top < float(target) - 1e-9:
+        if top is None or top < float(target) - TARGET_REACH_EPS:
             levels[k] = hi          # 抬满也不够 → 抬满后继续下一只
             continue
         for _ in range(60):        # 二分：该袖再抬多少刚好够到目标
             mid = 0.5 * (lo + hi)
             got = ceiling(dict(levels, **{k: mid}))
-            if got is not None and got >= float(target) - 1e-9:
+            if got is not None and got >= float(target) - TARGET_REACH_EPS:
                 hi = mid
             else:
                 lo = mid
-            if hi - lo <= 1e-6:
+            if hi - lo <= BISECT_TOL:
                 break
         levels[k] = hi
         break
     c = ceiling(levels)
-    if c is None or c < float(target) - 1e-9:
+    if c is None or c < float(target) - TARGET_REACH_EPS:
         return {}
     return levels
 
@@ -364,42 +366,42 @@ def sleeve_levels_for_feasibility(solved, tan_mu, target, dom_w, ov_w, pool_spec
     # （初值篮子 / 上一轮交付 / 阻尼中间值），不是袖的真实能力 —— 这正是"假不可行"的来源。
     assumed_mu = {k: float(solved["mu"][idx[k]]) for k in caps}
     levels = {k: max(assumed_mu[k], float(tan_mu[k])) for k in caps
-              if max(assumed_mu[k], float(tan_mu[k])) > assumed_mu[k] + 1e-9}
+              if max(assumed_mu[k], float(tan_mu[k])) > assumed_mu[k] + MU_REACH_EPS}
     base = ceiling(levels)
-    if base is not None and base >= float(target) - 1e-9:
+    if base is not None and base >= float(target) - TARGET_REACH_EPS:
         # 袖按切点水平参与即可达标 → 只抬到切点，不做额外抬升（不会过冲）。
         return levels
     # 仍然不够 → 逐袖按"刚好够到目标"的最小水平继续抬（没余量的袖抬到自身上限）。
     for k in sorted(caps, key=lambda x: -(caps[x] - float(tan_mu[x]))):
         c = ceiling(levels)
-        if c is not None and c >= float(target) - 1e-9:
+        if c is not None and c >= float(target) - TARGET_REACH_EPS:
             break
         lo = max(float(levels.get(k, assumed_mu[k])), float(tan_mu[k]))
         hi = caps[k]
-        if hi <= lo + 1e-12:
+        if hi <= lo + BISECT_EPS:
             continue
         top = ceiling(dict(levels, **{k: hi}))
-        if top is None or top < float(target) - 1e-9:
+        if top is None or top < float(target) - TARGET_REACH_EPS:
             levels[k] = hi              # 抬到自身上限也不够 → 该袖按上限参与，再看下一只
             continue
         for _ in range(60):
             mid = 0.5 * (lo + hi)
             got = ceiling(dict(levels, **{k: mid}))
-            if got is not None and got >= float(target) - 1e-9:
+            if got is not None and got >= float(target) - TARGET_REACH_EPS:
                 hi = mid
             else:
                 lo = mid
-            if hi - lo <= 1e-6:
+            if hi - lo <= BISECT_TOL:
                 break
         levels[k] = hi
         break
     c = ceiling(levels)
-    if c is None or c < float(target) - 1e-9:
+    if c is None or c < float(target) - TARGET_REACH_EPS:
         return {}
     return levels
 
 
-def reseed_sleeves(sleeve, solved, rf, pool_specs, tol=1e-5):
+def reseed_sleeves(sleeve, solved, rf, pool_specs, tol=RESEED_TOL):
     """把本轮"没被解出"的袖按候选池重新播种，返回真正发生变化的 key 列表。
 
     已在播种值上时不再重复播种（返回空列表 = 没有可改善的余地）。

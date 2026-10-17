@@ -16,7 +16,8 @@ import numpy as np
 
 import asset_classes as AC
 
-from .constants import BOUNDS_TOL, FEASIBILITY_EPS, POOL_CONFLICT_EPS
+from .constants import (BOUNDS_TOL, FEASIBILITY_EPS, POOL_CONFLICT_EPS, SLACK_EPS,
+                        TARGET_REACH_EPS, ZERO_EPS)
 from .warnings import CodedWarning
 from ..models.data_types import ProblemSpec
 
@@ -192,16 +193,16 @@ def max_return_given_mu(mu, upper, dom_idx, ov_idx, dom_w, ov_w):
 
     def pool_max(idx, need):
         if not idx:
-            return None if need > 1e-9 else 0.0
+            return None if need > ZERO_EPS else 0.0
         pairs = sorted(((float(mu[i]), float(upper[i])) for i in idx), reverse=True)
         tot, ret = 0.0, 0.0
         for m, cap in pairs:
-            if tot >= need - 1e-12:
+            if tot >= need - SLACK_EPS:
                 break
             take = min(cap, need - tot)
             ret += take * m
             tot += take
-        return ret if tot >= need - 1e-9 else None
+        return ret if tot >= need - TARGET_REACH_EPS else None
 
     d = pool_max(dom_idx, dom_w)
     o = pool_max(ov_idx, ov_w)
