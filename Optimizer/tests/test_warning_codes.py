@@ -27,13 +27,23 @@ sys.path.insert(0, _SCRIPTS)
 import optimize_portfolio as OP  # noqa: E402
 
 _SRC_PATH = os.path.join(_SCRIPTS, "optimize_portfolio.py")
-#: D2 起部分 code 的发出点上移到 core（active_cap.pool_conflict → core/constraints）；
+#: D2/P3-b1 起部分 code 的发出点上移到 core（active_cap.pool_conflict → core/constraints；
+#: sleeve.floor_infeasible / sleeve.floor_postcheck_failed → core/stage2）。
 #: 「登记 ↔ 发出」是**跨模块**的性质，扫描范围必须覆盖实现所在模块，否则会把
-#: 已经发出的 code 误判成死 code（本文件在 D2 后确实红过一次，原因就是这个）。
-_IMPL_PATHS = (
-    _SRC_PATH,
-    os.path.join(_SCRIPTS, "portfolio_system", "core", "constraints.py"),
-)
+#: 已经发出的 code 误判成死 code（本文件在 D2 后与 P3-b1 后各红过一次，原因都是这个）。
+#: 因此不再硬编码单个文件，而是扫 optimize_portfolio.py + 包内**全部** .py
+#:（P3-b2 再搬函数时不必回来改这里）。
+def _impl_paths():
+    paths = [_SRC_PATH]
+    pkg = os.path.join(_SCRIPTS, "portfolio_system")
+    for dirpath, _dirs, names in os.walk(pkg):
+        for name in sorted(names):
+            if name.endswith(".py"):
+                paths.append(os.path.join(dirpath, name))
+    return tuple(paths)
+
+
+_IMPL_PATHS = _impl_paths()
 
 
 def _source():

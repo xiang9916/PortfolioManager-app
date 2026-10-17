@@ -2,12 +2,16 @@
 """纯度静态守卫（task-52 / ADR 0003 §3 R1、R2、R3）。
 
 守卫本身**可证伪**：喂一段含 import urllib 的合成源码必须抛错（见 test_guard_is_falsifiable）。
+P3-b1 追加一道闸：**未定义全局名**（搬迁时把函数搬走、却漏改同模块调用点的典型事故 ——
+包能 import、静态 import 检查也不报，直到跑测试才 `NameError`）。
 运行：Optimizer/.venv/bin/python3 Optimizer/tests/test_core_purity.py
 祖先对照：PM_OPT_SCRIPTS=<祖先树>/Optimizer/scripts（本文件不硬写 ../scripts）
 """
 
 import ast
+import builtins
 import os
+import symtable
 import sys
 import tempfile
 
@@ -129,6 +133,56 @@ def test_callers_do_not_import_each_other():
                 for alias in node.names:
                     assert alias.name.split(".")[-1] not in CALLER_NAMES, \
                         "%s 互相 import: %s" % (name, alias.name)
+
+
+# ── P3-b1 追加：未定义全局名（搬迁后的悬空引用）──────────────────────────────
+def _undefined_globals(source, filename="<synthetic>"):
+    """symtable 找出「引用了但既非本地/自由变量、也不在模块级、也不是内置」的名字。"""
+    top = symtable.symtable(source, filename, "exec")
+    module_names = set(top.get_identifiers())
+    problems = []
+
+    def walk(table):
+        for sym in table.get_symbols():
+            name = sym.get_name()
+            if not sym.is_global() or sym.is_assigned() or sym.is_imported():
+                continue
+            if name in module_names or hasattr(builtins, name) or name.startswith("__"):
+                continue
+            problems.append("%s: %s" % (table.get_name(), name))
+        for child in table.get_children():
+            walk(child)
+
+    walk(top)
+    return problems
+
+
+def test_core_and_models_have_no_undefined_global_names():
+    """core/** 与 models/** 不得有悬空引用（P3-b1 搬迁事故的机械闸）。"""
+    assert os.path.isdir(_PKG), "找不到包目录: %s" % _PKG
+    checked = 0
+    bad = []
+    for sub in ("core", "models"):
+        d = os.path.join(_PKG, sub)
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".py"):
+                continue
+            f = os.path.join(d, name)
+            with open(f, "r", encoding="utf-8") as fh:
+                probs = _undefined_globals(fh.read(), filename=os.path.relpath(f, _SCRIPTS))
+            if probs:
+                bad.extend(probs)
+            checked += 1
+    assert checked >= 8, checked
+    assert not bad, "core/models 存在未定义全局名：%s" % bad
+
+
+def test_undefined_global_checker_is_falsifiable():
+    """守卫自身可证伪：悬空引用必须被抓到，干净源码必须放行。"""
+    bad = _undefined_globals("def f():\n    return _pool_cap_norm(1)\n", filename="synthetic")
+    assert bad and "_pool_cap_norm" in bad[0], bad
+    assert not _undefined_globals("import numpy as np\n\ndef f(x):\n    return np.sqrt(x)\n",
+                                  filename="clean")
 
 
 def main():

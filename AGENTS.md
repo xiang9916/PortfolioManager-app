@@ -366,7 +366,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 20 文件 / 115 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 20 文件 / 118 用例）**。
   ⚠️ 包的位置**必须**在 `Optimizer/scripts/` 下：该目录是打包（`scripts/build_app.sh:75`）与 Swift 三处资源路径
   （`OptimizationService`/`AppStore`/`pm-cli`）的外部契约；上提到 `Optimizer/portfolio_system/` 是 P4，
   必须与 `build_app.sh` + 三处 Swift 路径同批改。
@@ -378,10 +378,13 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ⚠️ **P3-a 的教训（`test_core_purity.py` 的盲区）**：静态 AST 守卫**看不见函数体内的调用期延迟 import** ——
   `constraints` 曾用它把 `optimize_portfolio`/`fund_pipeline` 拉进 `sys.modules`。已新增 `Optimizer/tests/test_runtime_deps_guard.py`
   （子进程内**真的调用** core 入口后断言 `sys.modules` 干净，且**可证伪**）。**两层守卫缺一不可**，都写进了 ADR §3。
-  ⚠️ **P3-b（未做）**：`core/sleeves.py:43` 调用期委托 `optimize_portfolio`；`sensitivity_analysis.py:44` 仍是**模块级**
-  `from optimize_portfolio import solve_portfolio`（P3 的门未达成）；常量表外仍有 42 处 `1e-6/1e-9/1e-12`（core 内 3 处）。
-  P4 未做：编排搬进 callers、入口变薄壳、包上提 ——
-  详见 `docs/adr/0003-optimizer-modularization.md`。
+  **P3-b1 已落地（2026-10-17）**：袖内/阶段二纯数学搬到 `core/stage2.py`（8 个）+ `core/sleeve_params.py`（5 个）+ `core/constraints.py`（`max_return_given_mu`），
+  依赖全部改**显式入参**（内部池表/相关性/target/rf/pool_specs）、触顶经 `cap_hits_out` 回传；旧位置留 8 个薄壳 + 6 个同名再导出（既有 import 不破）。
+  验证：`VERIFY-P3b1: OK`（逐行等价、非假搬迁、core 无上层 import、守卫覆盖新入口且两种注入都能红）；用例 115→118（新增 symtable「未定义全局名」闸 2 项 + 守卫证伪 1 项）。
+  ⚠️ **兼容性注记（核验实测）**：薄壳**不等于**完整 monkeypatch 兼容 —— 模块级**变量**（`TARGET_RETURN`/`RF`/`CAP_HITS`/各 INTERNAL 表）仍在调用时解析（兼容），
+  但模块级**函数**交叉打桩（例如替换 `OP.stage2_covariance`）**不再生效**；仓内无任何测试/生产代码这样打桩，产品路径无影响。
+  ⚠️ **P3-b2 未做（`core` 最后一处上层依赖）**：`core/sleeves.py:43` 的 `solve_sleeves` 门面仍在调用期委托 `optimize_portfolio.solve_portfolio`；
+  以及 `sensitivity_analysis.py:44` 仍是模块级 `from optimize_portfolio import solve_portfolio`（P3 的门未达成）；常量表外仍有 ~40 处 `1e-6/1e-9/1e-12`；`select_domestic_funds`（选基业务规则）未搬。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。

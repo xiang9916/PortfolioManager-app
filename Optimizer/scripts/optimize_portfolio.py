@@ -61,6 +61,26 @@ from portfolio_system.core.constraints import (
 )
 from portfolio_system.core.warnings import CodedWarning as _Warn   # noqa: F401
 
+# P3-b1：袖内/阶段二纯数学已搬进 core；这里保留同名薄壳与再导出（公开名与私有名都保留）。
+from portfolio_system.core.constraints import max_return_given_mu as _max_return_given_mu
+from portfolio_system.core.stage2 import (
+    internal_pool_optimize as _core_internal_pool_optimize,
+    optimize_within_pool as _optimize_within_pool,
+    pool_cap_norm as _pool_cap_norm,
+    pool_max_return as _pool_max_return,
+    stage2_covariance as _core_stage2_covariance,
+    stage2_gc_optimize as _core_stage2_gc_optimize,
+    stage2_japan_optimize as _core_stage2_japan_optimize,
+    stage2_optimize as _core_stage2_optimize,
+)
+from portfolio_system.core.sleeve_params import (
+    damp_sleeve_params as _damp_sleeve_params,
+    inject_sleeve_params as _inject_sleeve_params,
+    sleeve_params_us as _core_sleeve_params_us,
+    sleeve_reseed_params as _core_sleeve_reseed_params,
+    sleeve_tangency as _core_sleeve_tangency,
+)
+
 
 
 # 「个股/主动」类单标的组合权重上限（asset_classes.ACTIVE_CAP = 10%）触发记录，
@@ -128,169 +148,33 @@ def log_step(step, message, level="info", log_path=None):
 
 
 def stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols):
-    """Build covariance for fixed assets + internal US holdings."""
-    keys = [a["key"] for a in fixed_assets] + internal_tickers
-    n = len(keys)
-    vols = np.zeros(n)
-    mus = np.zeros(n)
-    corr = np.eye(n)
+    """Build covariance for fixed assets + internal US holdings.
 
-    for i, a in enumerate(fixed_assets):
-        vols[i] = a["vol"]
-        mus[i] = a["mu"]
-
-    for j, ticker in enumerate(internal_tickers):
-        idx = len(fixed_assets) + j
-        vols[idx] = US_INTERNAL[ticker]["vol"]
-        mus[idx] = US_INTERNAL[ticker]["mu"]
-
-    broad_corr = broad_cov / np.outer(broad_vols, broad_vols)
-    for i, a in enumerate(fixed_assets):
-        if a["key"] == "O_US_CORE":
-            continue
-        ki = a["key"]
-        ii = broad_keys.index(ki)
-        for j, b in enumerate(fixed_assets):
-            if b["key"] == "O_US_CORE" or j <= i:
-                continue
-            kj = b["key"]
-            jj = broad_keys.index(kj)
-            corr[i, j] = corr[j, i] = broad_corr[ii, jj]
-
-    # Fixed vs internal.
-    core_col = broad_keys.index("O_US_CORE")
-    for i, a in enumerate(fixed_assets):
-        if a["key"] == "O_US_CORE":
-            continue
-        base = broad_corr[broad_keys.index(a["key"]), core_col]
-        for j, ticker in enumerate(internal_tickers):
-            idx = len(fixed_assets) + j
-            if a["key"] == "D_HSBC_SP500":
-                base_ij = SP500_INTERNAL_CORR.get(ticker, SP500_INTERNAL_CORR_DEFAULT)
-            else:
-                base_ij = base
-            corr[i, idx] = corr[idx, i] = base_ij
-
-    # Internal-internal.
-    for j1, t1 in enumerate(internal_tickers):
-        for j2, t2 in enumerate(internal_tickers):
-            if j1 == j2:
-                continue
-            i1 = len(fixed_assets) + j1
-            i2 = len(fixed_assets) + j2
-            corr[i1, i2] = corr[i2, i1] = US_INTERNAL_CORR.get((t1, t2), US_INTERNAL_CORR.get((t2, t1), 0.5))
-
-    # PSD projection (shared helper).
-    corr = project_psd(corr)
-    cov = np.outer(vols, vols) * corr
-    cov += np.eye(n) * 1e-10
-    return mus, cov, keys
+    P3-b1：实现已搬进 core/stage2.py；本函数是薄壳 —— 内部池表在**调用时**读取模块级变量
+    （测试会 monkeypatch OP.US_INTERNAL / OP.US_INTERNAL_CORR，不能在 import 期快照）。
+    """
+    return _core_stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols,
+                                   us_internal=US_INTERNAL, us_internal_corr=US_INTERNAL_CORR,
+                                   sp500_internal_corr=SP500_INTERNAL_CORR,
+                                   sp500_internal_corr_default=SP500_INTERNAL_CORR_DEFAULT)
 
 
 def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, broad_keys, broad_vols,
                     cap_map=None, target=None, rf=None, n_starts=80):
-    """Optimize internal US equity weights with total US core weight fixed and no per-ticker caps."""
-    target = TARGET_RETURN if target is None else target
-    rf = RF if rf is None else rf
-    # Always consider the full US internal candidate pool, even for tickers the
-    # extract file does not currently hold. Keeping file tickers first preserves
-    # current-holding priority in tie cases, but the optimizer may add back
-    # UNH/GOOG/VTV etc. if they improve the risk-adjusted result.
-    file_tickers = [h["ticker"] for h in extract["us_equity"]["holdings"] if h["ticker"] in US_INTERNAL]
-    internal_tickers = []
-    for ticker in file_tickers + list(US_INTERNAL.keys()):
-        if ticker not in internal_tickers:
-            internal_tickers.append(ticker)
-    if not internal_tickers:
-        return None, "No supported US internal holdings found."
-    if "O_US_CORE" not in broad_keys:
-        # 2026-10-15 P2：过去这里由 broad_keys.index 抛裸 ValueError（无上下文）→ 整次求解崩掉。
-        # 本轮大类资产里根本没有美股核心袖时阶段二无从下手：返回可诊断原因，由 _solve_once
-        # 记进 warnings，让上层显式看到"美国权益内部优化不可行"，而不是崩栈。
-        return None, ("阶段二无法运行：本轮大类资产里没有 O_US_CORE"
-                      f"（实际大类：{'、'.join(broad_keys)}）；"
-                      "美股袖没有可优化的内部篮子。")
+    """Optimize internal US equity weights with total US core weight fixed and no per-ticker caps.
 
-    core_idx = broad_keys.index("O_US_CORE")
-    core_total = float(stage1_weights[core_idx])
-    if core_total <= 1e-6:
-        return None, "Stage 1 gave zero weight to US core equity."
-
-    fixed_assets = [a for a in assets if a["key"] != "O_US_CORE"]
-    fixed_weights = [
-        float(stage1_weights[i])
-        for i, a in enumerate(assets)
-        if a["key"] != "O_US_CORE"
-    ]
-
-    mus, cov, keys = stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys, broad_vols)
-    n_internal = len(internal_tickers)
-    fixed_n = len(fixed_assets)
-    internal_slice = slice(fixed_n, fixed_n + n_internal)
-
-    def total_weights(internal_w):
-        w = np.zeros(fixed_n + n_internal)
-        w[:fixed_n] = fixed_weights
-        w[internal_slice] = internal_w
-        return w
-
-    def objective(internal_w):
-        w = total_weights(internal_w)
-        _, _, sharpe = portfolio_stats(w, mus, cov, rf=rf)
-        return -sharpe
-
-    bounds = [(0.0, None)] * n_internal
-    # active（个股/主动）类单标的组合权重上限；US 内部权重就是组合绝对权重，直接套用
-    if cap_map:
-        for j, t in enumerate(internal_tickers):
-            cap = cap_map.get(t)
-            if cap is not None:
-                bounds[j] = (0.0, cap)
-
-    cons = [
-        {"type": "eq", "fun": lambda x: x.sum() - core_total},
-        {"type": "ineq", "fun": lambda x: mus @ total_weights(x) - target},
-    ]
-    rng = np.random.default_rng(19)
-    best = None
-    for _ in range(n_starts):
-        caps = np.array([core_total] * n_internal)
-        start = np.zeros(n_internal)
-        remaining = core_total
-        guard = 0
-        while remaining > 1e-8 and guard < 200:
-            available = np.maximum(caps - start, 0.0)
-            p = rng.random(n_internal) * available
-            if p.sum() <= 0:
-                break
-            add = min(remaining, float(p.sum()))
-            start += add * p / p.sum()
-            start = np.minimum(start, caps)
-            remaining = core_total - start.sum()
-            guard += 1
-        if abs(start.sum() - core_total) > 1e-6:
-            continue
-        res = minimize(objective, start, method="SLSQP", bounds=bounds, constraints=cons,
-                       options={"maxiter": 2000, "ftol": 1e-12})
-        # SLSQP 未收敛时会返回"当前迭代点"，可能违反 bounds（实测超过单标的上限）——
-        # 不要求 res.success（未收敛但可行的点仍可用），但必须显式校验 bounds（2026-10-13 修）。
-        x = res.x
-        w = total_weights(x)
-        if abs(x.sum() - core_total) > CHECK_SUM_EPS:
-            continue
-        if not _respects_bounds(x, _upper_array(bounds)):
-            continue
-        if mus @ w < target - DELIVERY_EPS:
-            continue
-        ret, vol, sharpe = portfolio_stats(w, mus, cov, rf=rf)
-        if best is None or sharpe > best[3]:
-            best = (x, ret, vol, sharpe, w, internal_tickers)
-    if best is not None and cap_map:
-        for j, t in enumerate(best[5]):
-            cap = cap_map.get(t)
-            if cap is not None and best[0][j] >= cap - 1e-6:
-                _note_cap_hit(t, best[0][j], cap)
-    return best, None
+    P3-b1：实现已搬进 core/stage2.py；本函数是薄壳 —— 模块级 TARGET_RETURN / RF 与内部池表
+    在**调用时**解析（既有 monkeypatch 语义不变），触顶记录仍写回本模块的 CAP_HITS。
+    """
+    return _core_stage2_optimize(
+        stage1_weights, extract, total_assets, assets, broad_cov, broad_keys, broad_vols,
+        TARGET_RETURN if target is None else target,
+        RF if rf is None else rf,
+        cap_map=cap_map, n_starts=n_starts,
+        us_internal=US_INTERNAL, us_internal_corr=US_INTERNAL_CORR,
+        sp500_internal_corr=SP500_INTERNAL_CORR,
+        sp500_internal_corr_default=SP500_INTERNAL_CORR_DEFAULT,
+        cap_hits_out=CAP_HITS)
 
 
 def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
@@ -340,179 +224,46 @@ from portfolio_system.core.constants import (  # noqa: E402
 from portfolio_system.core.constants import SOLVER_EPS as _SOLVER_EPS  # noqa: E402
 
 
-def _pool_cap_norm(internal_pool, cap_map, total_w):
-    """把组合级单标的上限折算成袖内归一化上限：cap_norm = cap / total_w。
-
-    _internal_pool_optimize（实际交付）与 solve_portfolio（算袖内下限该截到哪个上界）
-    必须用同一套折算，否则"截断后的下限"未必可交付（2026-10-16 P1）。
-    """
-    if not cap_map or total_w <= 1e-9:
-        return {}
-    norm = {}
-    for t in internal_pool:
-        cap = cap_map.get(t)
-        if cap is not None:
-            norm[t] = min(1.0, cap / total_w)
-    return norm
 
 
-def _pool_max_return(internal_pool, internal_corr, cap_norm=None):
-    """袖内"受上限约束的最大可行收益"（Σx=1、各标的不超 cap_norm）。
-
-    线性目标 + 单纯形约束 → 按 μ 从高到低把权重填到各自上限即最优（贪心，确定性）。
-    上界之和不足 1（如单标的池 cap_norm<1）→ 返回 None = 该权重下没有可交付篮子。
-    """
-    tickers = list(internal_pool.keys())
-    if not tickers:
-        return None
-    caps = {t: min(1.0, float((cap_norm or {}).get(t, 1.0))) for t in tickers}
-    if sum(caps.values()) < 1.0 - 1e-9:
-        return None
-    order = sorted(tickers, key=lambda t: (-float(internal_pool[t]["mu"]), t))
-    rem, ret = 1.0, 0.0
-    for t in order:
-        if rem <= 1e-12:
-            break
-        take = min(rem, caps[t])
-        ret += take * float(internal_pool[t]["mu"])
-        rem -= take
-    return float(ret)
 
 
-def _optimize_within_pool(internal_pool, internal_corr, rf, seed, cap_norm=None, n_starts=60,
-                          floor=None, warnings=None, label=""):
-    """在给定内部池内做「max 夏普 s.t. 袖内权重和 = 1（+ 可选下限 x·μ ≥ floor）」，返回元组或 None。
-
-    阶段二（_internal_pool_optimize）与固定点迭代里的"空袖重新播种"（_sleeve_reseed_params）
-    共用这一份实现：前者传归一化上限（组合上限 ÷ 袖权重），后者不设上限
-    —— 播种要回答的是"这只袖自己能达到什么"，不该被它当前的组合权重限制。
-
-    floor（P1 方案 A）：组合级目标传导下来的袖内收益下限。SLSQP 只保证"迭代点"在约束上，
-    所以这里两道闸（verify F1 加固）：① 循环内先筛 x·μ ≥ floor−ε，违约点不进候选；
-    ② 循环后再断言一次。任何一道不通过都**不静默**：返回 None（该袖本轮没有可交付篮子）
-    并把可诊断原因写进 warnings，由上层走显式不可交付/降级，而不是交付一个违约点。
-    """
-    tickers = list(internal_pool.keys())
-    if not tickers:
-        return None
-    n = len(tickers)
-    mu = np.array([internal_pool[t]["mu"] for t in tickers])
-    vols = np.array([internal_pool[t]["vol"] for t in tickers])
-    corr = project_psd(build_corr_matrix(n, tickers, internal_corr))
-    cov = np.outer(vols, vols) * corr
-
-    def obj(w):
-        ret = float(w @ mu)
-        vol = float(np.sqrt(w @ cov @ w))
-        return -((ret - rf) / vol if vol > 0 else 0.0)
-
-    cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
-    if floor is not None:
-        cons.append({"type": "ineq", "fun": lambda w: float(w @ mu) - float(floor)})
-    bounds = [(0.0, 1.0)] * n
-    for i, t in enumerate(tickers):
-        cap = (cap_norm or {}).get(t)
-        if cap is not None:
-            bounds[i] = (0.0, min(1.0, float(cap)))
-
-    rng = np.random.default_rng(seed)
-    best = None
-    for _ in range(n_starts):
-        start = rng.random(n)
-        start /= start.sum()
-        res = minimize(obj, start, method="SLSQP", bounds=bounds, constraints=cons,
-                       options={"maxiter": 1500, "ftol": 1e-12})
-        x = res.x
-        if abs(x.sum() - 1.0) > CHECK_SUM_EPS:
-            continue
-        if not _respects_bounds(x, _upper_array(bounds)):
-            continue
-        ret = float(x @ mu)
-        vol = float(np.sqrt(x @ cov @ x))
-        if floor is not None and ret < float(floor) - _SOLVER_EPS:
-            continue                      # 闸①：下限违约点不得成为候选
-        sharpe = (ret - rf) / vol if vol > 0 else 0.0
-        if best is None or sharpe > best[0]:
-            best = (sharpe, x, ret, vol)
-    if best is None:
-        if floor is not None and warnings is not None:
-            warnings.append(_Warn(
-                f"袖内收益下限不可行：{label or '袖（未命名）'} 需要 μ ≥ {float(floor):.2%}，"
-                f"但该袖在自身候选池与单标的上限折算下没有满足下限的篮子；本轮按该袖未解出处理。",
-                "sleeve.floor_infeasible"))
-        return None
-    sharpe, x, ret, vol = best
-    # 闸②（F1 加固）：解后断言。理论上闸①已拦住，但绝不允许任何路径静默返回违约篮子。
-    if floor is not None and ret < float(floor) - _SOLVER_EPS:
-        if warnings is not None:
-            warnings.append(_Warn(
-                f"袖内收益下限解后校验失败：{label or '袖（未命名）'} 的解 μ={ret:.2%} 低于下限 "
-                f"{float(floor):.2%}；已按不可行处理，不交付该篮子。",
-                "sleeve.floor_postcheck_failed"))
-        return None
-    return x, ret, vol, sharpe
 
 
 def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
                             seed=31, cap_map=None, rf=None, floor=None, warnings=None):
     """Generic second-level optimization inside a broad equity bucket.
 
-    floor/warnings（P1 方案 A）：组合级目标传导下来的袖内收益下限与告警通道；
-    floor=None 时与修复前逐字节一致（低目标档/重新播种路径都走这条）。
+    P3-b1：实现已搬进 core/stage2.py；本函数是薄壳（RF 兜底与 CAP_HITS 回写在调用方）。
     """
-    rf = RF if rf is None else rf
-    tickers = list(internal_pool.keys())
-    if not tickers:
-        return None
-    if broad_key not in [a["key"] for a in assets]:
-        return None
-    idx = [i for i, a in enumerate(assets) if a["key"] == broad_key][0]
-    total_w = float(stage1_weights[idx])
-    if total_w <= 1e-6:
-        return None
-
-    # 桶内权重是"归一化后 × 桶权重"，所以组合上限要折算：cap_norm = cap / total_w
-    cap_norm = _pool_cap_norm(internal_pool, cap_map, total_w)
-
-    got = _optimize_within_pool(internal_pool, internal_corr, rf, seed, cap_norm=cap_norm,
-                                floor=floor, warnings=warnings, label=broad_key)
-    if got is None:
-        return None
-    x, ret, vol, sharpe = got
-    if cap_norm:
-        for i, t in enumerate(internal_pool):
-            if t in cap_norm and x[i] >= cap_norm[t] - 1e-6:
-                _note_cap_hit(t, x[i] * total_w, cap_map[t])
-    out = {
-        "broad_total_weight": total_w,
-        "internal_weights_total": {t: float(x[i]) * total_w for i, t in enumerate(tickers)},
-        "internal_weights_normalized": {t: float(x[i]) for i, t in enumerate(tickers)},
-        "amounts": {t: float(x[i]) * total_w * total_assets for i, t in enumerate(tickers)},
-        "ret": ret,
-        "vol": vol,
-        "sharpe": sharpe,
-    }
-    if floor is not None:
-        # 加法式键：**仅在下限真正生效时**出现 → 未生效的档位（低目标）与修复前逐字节一致。
-        out["floor"] = float(floor)
-        out["floor_met"] = bool(ret >= float(floor) - _SOLVER_EPS)
-    return out
+    return _core_internal_pool_optimize(
+        stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
+        RF if rf is None else rf, seed=seed, cap_map=cap_map, floor=floor, warnings=warnings,
+        cap_hits_out=CAP_HITS)
 
 
 def stage2_japan_optimize(stage1_weights, assets, total_assets, cap_map=None, rf=None,
                           floor=None, warnings=None):
-    """Optimize Japan equity internal factor weights.（floor：P1 袖内收益下限）"""
-    return _internal_pool_optimize(stage1_weights, assets, JP_INTERNAL, JP_INTERNAL_CORR, "O_JP_EQ",
-                                   total_assets, seed=31, cap_map=cap_map, rf=rf,
-                                   floor=floor, warnings=warnings)
+    """Optimize Japan equity internal factor weights.（floor：P1 袖内收益下限）
+
+    P3-b1：实现已搬进 core/stage2.py；日本内部池表在**调用时**读取（monkeypatch 语义不变）。
+    """
+    return _core_stage2_japan_optimize(
+        stage1_weights, assets, total_assets, JP_INTERNAL, JP_INTERNAL_CORR,
+        RF if rf is None else rf, cap_map=cap_map, floor=floor, warnings=warnings,
+        cap_hits_out=CAP_HITS)
 
 
 def stage2_gc_optimize(stage1_weights, assets, total_assets, cap_map=None, rf=None,
                        floor=None, warnings=None):
-    """Optimize Greater China equity internal (沪深300/红利低波/主动/混合/指数/港股宽基/高股息/科技)."""
-    return _internal_pool_optimize(stage1_weights, assets, GC_INTERNAL, GC_INTERNAL_CORR, "D_GREATER_CN",
-                                   total_assets, seed=43, cap_map=cap_map, rf=rf,
-                                   floor=floor, warnings=warnings)
+    """Optimize Greater China equity internal (沪深300/红利低波/主动/混合/指数/港股宽基/高股息/科技).
+
+    P3-b1：实现已搬进 core/stage2.py；大中华内部池表在**调用时**读取（monkeypatch 语义不变）。
+    """
+    return _core_stage2_gc_optimize(
+        stage1_weights, assets, total_assets, GC_INTERNAL, GC_INTERNAL_CORR,
+        RF if rf is None else rf, cap_map=cap_map, floor=floor, warnings=warnings,
+        cap_hits_out=CAP_HITS)
 
 
 def build_result_summary(output, hsbc_pool=None):
@@ -829,31 +580,11 @@ SLEEVE_DAMPING = 0.5
 
 
 def _sleeve_params_us(internal, internal_tickers):
-    """阶段二选出的美股袖 → (μ, σ)；σ 用袖内相关性矩阵算真实组合波动。"""
-    if internal is None or not internal_tickers:
-        return None
-    x = np.asarray(internal[0], dtype=float)
-    total = float(x.sum())
-    if total <= 1e-9:
-        return None
-    w = x / total
-    mus = np.array([US_INTERNAL[t]["mu"] for t in internal_tickers])
-    vols = np.array([US_INTERNAL[t]["vol"] for t in internal_tickers])
-    corr = project_psd(build_corr_matrix(len(internal_tickers), internal_tickers, US_INTERNAL_CORR))
-    cov = np.outer(vols, vols) * corr
-    return float(w @ mus), float(np.sqrt(w @ cov @ w))
+    """阶段二选出的美股袖 → (μ, σ)；σ 用袖内相关性矩阵算真实组合波动（P3-b1 薄壳）。"""
+    return _core_sleeve_params_us(internal, internal_tickers,
+                                  us_internal=US_INTERNAL, us_internal_corr=US_INTERNAL_CORR)
 
 
-def _inject_sleeve_params(assets, sleeve):
-    """把当前袖参数写进大类资产（O_US_CORE 等），返回新列表，不改原表。"""
-    out = []
-    for a in assets:
-        item = dict(a)
-        p = sleeve.get(item["key"])
-        if p is not None:
-            item["mu"], item["vol"] = float(p[0]), float(p[1])
-        out.append(item)
-    return out
 
 
 # 袖 → (内部候选池, 内部相关性, 随机种子)：与阶段二同一套池子，供"空袖重新播种"使用。
@@ -884,20 +615,8 @@ def _resolved_sleeves(solved):
 
 
 def _sleeve_reseed_params(key, rf):
-    """某只袖"自己能达到的最优篮子"参数（不设单标的上限、与阶段一给的权重无关）。
-
-    只用作固定点迭代的**播种值**：袖被阶段一判为 0 权重时阶段二不会运行，那一轮对这只袖
-    没有任何信息量；给一个乐观初值重播种，下一轮的模型才不会系统性低估它。
-    """
-    spec = _SLEEVE_POOL_SPECS.get(key)
-    if spec is None:
-        return None
-    pool, corr, seed = spec
-    got = _optimize_within_pool(pool, corr, rf, seed)
-    if got is None:
-        return None
-    _, ret, vol, _ = got
-    return (float(ret), float(vol))
+    """某只袖"自己能达到的最优篮子"参数（P3-b1 薄壳：池表在调用时读取）。"""
+    return _core_sleeve_reseed_params(key, rf, _SLEEVE_POOL_SPECS)
 
 
 def _reseed_sleeves(sleeve, solved, rf, tol=1e-5):
@@ -987,55 +706,13 @@ def _undeliverable_warning(solved, sleeve):
                  "请勿据此执行，请检查该袖的候选池与参数后重跑。", "sleeve.undeliverable")
 
 
-def _damp_sleeve_params(nxt, sleeve, damping):
-    """阻尼推进：新参数 = 旧 + λ×(新−旧)。
-
-    袖内选标是离散的（谁入选、谁触上限会跳变），朴素迭代容易来回震荡，所以把步长压小。
-    """
-    return {k: (sleeve[k][0] + damping * (v[0] - sleeve[k][0]),
-                sleeve[k][1] + damping * (v[1] - sleeve[k][1]))
-            for k, v in nxt.items()}
 
 
 def _sleeve_tangency(key, rf, cache=None):
-    """袖"不加下限"的参考参数 (μ,σ) = 它自己的最大夏普篮子（= 修复前的交付口径）。
-
-    同一轮可能被多次询问，用 cache 记住，避免重复跑 SLSQP。
-    """
-    if cache is not None and key in cache:
-        return cache[key]
-    got = _sleeve_reseed_params(key, rf)
-    if cache is not None:
-        cache[key] = got
-    return got
+    """袖"不加下限"的参考参数 (μ,σ) = 它自己的最大夏普篮子（P3-b1 薄壳：池表在调用时读取）。"""
+    return _core_sleeve_tangency(key, rf, _SLEEVE_POOL_SPECS, cache=cache)
 
 
-def _max_return_given_mu(mu, upper, dom_idx, ov_idx, dom_w, ov_w):
-    """给定 μ 向量时阶段一可达到的最大组合收益（纯贪心 LP：满仓 + 境内池等式 + 上界）。
-
-    每池内按 μ 从高到低填满该池权重（受各标的上界约束）。某池上界凑不够该池权重 → None。
-    比 max_feasible_return 便宜（无 SLSQP），可放进二分里反复调用。
-    """
-    mu = np.asarray(mu, dtype=float)
-
-    def pool_max(idx, need):
-        if not idx:
-            return None if need > 1e-9 else 0.0
-        pairs = sorted(((float(mu[i]), float(upper[i])) for i in idx), reverse=True)
-        tot, ret = 0.0, 0.0
-        for m, cap in pairs:
-            if tot >= need - 1e-12:
-                break
-            take = min(cap, need - tot)
-            ret += take * m
-            tot += take
-        return ret if tot >= need - 1e-9 else None
-
-    d = pool_max(dom_idx, dom_w)
-    o = pool_max(ov_idx, ov_w)
-    if d is None or o is None:
-        return None
-    return d + o
 def _required_sleeve_mu(solved, tan_mu, target, dom_w, ov_w):
     """二分求"让阶段一可达上限 ≥ 目标"所需的最小**统一**袖内 μ（P1 方案 A）。
 

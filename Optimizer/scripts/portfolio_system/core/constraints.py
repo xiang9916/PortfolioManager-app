@@ -171,3 +171,33 @@ def max_feasible_return_for(problem: ProblemSpec) -> float:
     return float(max_feasible_return(mu, lower, upper, dom, ov,
                                     float(problem.pools.domestic_weight),
                                     float(problem.pools.overseas_weight)))
+
+
+def max_return_given_mu(mu, upper, dom_idx, ov_idx, dom_w, ov_w):
+    """给定 μ 向量时阶段一可达到的最大组合收益（纯贪心 LP：满仓 + 境内池等式 + 上界）。
+
+    每池内按 μ 从高到低填满该池权重（受各标的上界约束）。某池上界凑不够该池权重 → None。
+    比 max_feasible_return 便宜（无 SLSQP），可放进二分里反复调用。
+
+    （P3-b1 从 optimize_portfolio._max_return_given_mu 等价搬入，逐字未改。）
+    """
+    mu = np.asarray(mu, dtype=float)
+
+    def pool_max(idx, need):
+        if not idx:
+            return None if need > 1e-9 else 0.0
+        pairs = sorted(((float(mu[i]), float(upper[i])) for i in idx), reverse=True)
+        tot, ret = 0.0, 0.0
+        for m, cap in pairs:
+            if tot >= need - 1e-12:
+                break
+            take = min(cap, need - tot)
+            ret += take * m
+            tot += take
+        return ret if tot >= need - 1e-9 else None
+
+    d = pool_max(dom_idx, dom_w)
+    o = pool_max(ov_idx, ov_w)
+    if d is None or o is None:
+        return None
+    return d + o
