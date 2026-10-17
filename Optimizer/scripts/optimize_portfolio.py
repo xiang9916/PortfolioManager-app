@@ -61,7 +61,11 @@ from portfolio_system.services.pipeline import (
 from portfolio_system.callers.new_asset_runner import (  # P3-b3 步骤③
     NewAssetRunner, TestAssetsUnavailable)
 # P3-b3 步骤②：结果装配（summary / benchmark）已搬进 callers.preset_runner。
-from portfolio_system.callers.preset_runner import SummaryTables, build_summary
+# P4 收尾：选基规则 / 结果载荷装配 / 完整编排也已搬进 callers（main 只剩 argparse→Runner→写文件）。
+from portfolio_system.callers.preset_runner import (  # noqa: F401
+    InfeasibleOptimization, NoDomesticAssets, PipelineUnavailable, PresetDeps, PresetRunner,
+    SummaryTables, build_summary, select_domestic_funds)
+from portfolio_system.callers.base_runner import RunRequest
 from portfolio_system.services.portfolio_source import load_extract
 from test_tickers import parse_test_tickers, resolve_test_assets
 import asset_classes as AC
@@ -237,44 +241,6 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         sp500_internal_corr=SP500_INTERNAL_CORR,
         sp500_internal_corr_default=SP500_INTERNAL_CORR_DEFAULT,
         cap_hits_out=CAP_HITS)
-
-
-def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
-    """For each allocated domestic broad category, pick the representative open fund.
-
-    This is a simple deterministic selection from the 基金搜索易 open-fund pool:
-    prefer the category's original anchor fund if it is in the pool, otherwise use
-    the first open fund in that category. All open funds remain available as
-    alternatives; a full per-fund internal optimizer can be added later.
-    """
-    selection = {}
-    for i, a in enumerate(assets):
-        if a["pool"] != "domestic":
-            continue
-        key = a["key"]
-        weight = float(stage1_weights[i])
-        if weight <= WEIGHT_ZERO_EPS:
-            continue
-        candidates = hsbc_pool.get(key, [])
-        if not candidates:
-            continue
-        anchor = a.get("fund_code")
-        chosen = None
-        if anchor:
-            for c in candidates:
-                if c["code"] == anchor:
-                    chosen = c
-                    break
-        if chosen is None:
-            chosen = candidates[0]
-        selection[key] = {
-            "category_weight": weight,
-            "amount": weight * total_assets,
-            "selected": chosen,
-            "candidate_count": len(candidates),
-            "candidates": candidates,
-        }
-    return selection
 
 
 # 袖内收益下限的绝对容差（P1）：SLSQP 末位噪声 + 离散选标。
@@ -599,7 +565,7 @@ def _inject_test_assets(args, assets, work_dir, warnings):
         sys.exit(3)
 
 
-def main():
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("extract_json")
     parser.add_argument("--total-assets", type=float, default=None)
@@ -639,266 +605,41 @@ def main():
     parser.add_argument("--json", dest="out_path", help="Write detailed JSON output to file")
     parser.add_argument("--result-json", dest="result_path", help="Write clean summary JSON to file")
     parser.add_argument("--log", dest="log_path", help="JSONL step log path")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
 
-    # App 侧滑块传入的目标收益率覆盖 params.py 的默认值.
-    # TARGET_RETURN 是模块级全局, 下方 stage1/stage2 的约束 lambda 在调用时
-    # 按全局名查找, 此处重绑后全部生效.
-    global TARGET_RETURN
-    if args.target_return is not None:
-        TARGET_RETURN = float(args.target_return)
-        log_step("target_return", f"目标收益率覆盖为 {TARGET_RETURN:.0%}", log_path=args.log_path)
 
-    extract = load_extract(args.extract_json)
-    log_step("load_extract", f"已加载提取结果 total={extract.get('total_value')}", log_path=args.log_path)
+def _preset_deps():
+    """装配层职责：把 params / asset_classes / services 的依赖**显式注入** callers。
 
-    # RF (无风险利率) 动态注入: App 侧按池比例加权中美10年国债收益率算出 rf,
-    # 通过 extract_live.json 的 "rf" 字段传入（params.py 里不写死利率）。
-    # RF 是模块级全局, 同 TARGET_RETURN 模式: global 重绑后约束 lambda 生效.
-    global RF
-    if extract.get("rf") is not None:
-        RF = float(extract["rf"])
-        log_step("rf", f"无风险利率覆盖为 {RF:.2%} (动态中美10年国债加权)", log_path=args.log_path)
-    else:
-        log_step("rf", "提取文件未带 rf，本次夏普按 rf=0 计算", log_path=args.log_path)
-
-    # 提取阶段的提示由 `pm-cli extract` 当场打印；**不再**从提取文件里转发到结果页 ——
-    # 提取文件是缓存，转发的旧提示会在改口径后长期滞留（2026-10-14 实测：去掉的两条
-    # 资金池口径提示仍从本地缓存的 extract_app.json 里冒出来）。
-    warnings = []
-    CAP_HITS.clear()
-    # 参数口径的提示（缺行情用人工兜底、σ 毛刺丢弃、相关性兜底…）一并带给结果页
-    warnings.extend(CALIBRATION_WARNINGS)
-
-    # live_anchors: 用户实际持有的境内基金代码 (从 extract_live.json domestic_holdings 提取),
-    # 用 classify_domestic_fund(name) 归类, 覆盖 params.py 写死的 fund_code 作为各类锚定.
-    # 效果: select_domestic_funds 优先保留用户已持有基金而非推荐换仓到同类最低费率基金.
-    live_anchors = live_anchors_from_extract(extract)
-    if live_anchors:
-        log_step("live_anchors", f"动态锚定 {len(live_anchors)} 个境内基金 (覆盖 params.py 静态锚定)", log_path=args.log_path)
-
-    # ---- 联网管线: 每次优化完整执行 (抓汇丰搜索易 → 天天基金实时校验 → 开放池构建) ----
-    # 产物写入 work_dir 临时文件 (hsbc_funds.json / availability.json / check_plan.json),
-    # 敏感性分析复用同一目录, 不重新联网; 优化器关闭时由 Swift 侧整体删除。
-    work_dir = ensure_work_dir(args.work_dir)
-    try:
-        hsbc_data, availability = ensure_pipeline(
-            work_dir,
-            live_anchors=live_anchors,
-            hsbc_request_timeout=args.hsbc_timeout,
-            request_timeout=args.request_timeout,
-            check_total_timeout=args.check_timeout,
-            log=lambda step, message, level="info": log_step(
-                step, message, level=level, log_path=args.log_path),
-        )
-    except RuntimeError as exc:
-        print(json.dumps(
-            {"error": "联网管线失败（基金在售/申赎状态数据源）", "detail": str(exc)},
-            ensure_ascii=False))
-        sys.exit(2)
-    avail_funds = availability["funds"]
-    hsbc_funds_live = hsbc_data.get("funds", [])
-    # 汇丰原始在售状态, 供口径冲突提示 (汇丰开放 vs 天天基金暂停)
-    hsbc_status = {str(f.get("code", "")).strip(): f for f in hsbc_funds_live}
-
-    # 直接取分组早停校验 selection 中每类选中的开放代表基金
-    # (组内顺序 = 锚定优先 → 费率升序 → A/C 备选垫后; 无数据的互认基金已按汇丰口径兜底)
-    hsbc_pool, pool_meta = build_open_pool_from_status(
-        hsbc_funds_live, availability, live_anchors=live_anchors)
-    # 基金数据源的抓取/校验计数只写进运行日志（结果页不再展示管线遥测，2026-10-14 用户定稿）
-    stats = availability.get("stats", {})
-    log_step("pipeline_counts",
-             f"在售 {hsbc_data.get('total_count', '?')} 只 / 开放申购 {hsbc_data.get('open_count', '?')} 只；"
-             f"实时校验请求 {stats.get('checked', '?')} 只 / 开放 {availability.get('open_count', '?')} 只 / "
-             f"兜底 {stats.get('hsbc_fallback', 0)} 只",
-             log_path=args.log_path)
-    log_step("build_open_pool",
-             f"开放基金池：{len(hsbc_pool)} 个类别、代表基金 {pool_meta['kept']} 只"
-             f"（{stats.get('checked', '?')} 只候选实时校验, 耗时 {availability.get('elapsed_seconds', '?')}s）",
-             log_path=args.log_path)
-
-    dom_w = float(extract["domestic_weight"])
-    ov_w = float(extract["overseas_weight"])
-
-    internal_weights = {h["ticker"]: h["weight"] for h in extract["us_equity"]["holdings"]}
-    core_mu, core_vol = us_core_params(internal_weights)
-
-    assets = build_investable_assets(
-        hsbc_pool, pool_meta, avail_funds, hsbc_status, warnings,
-        core_mu=core_mu, core_vol=core_vol, drop_note="已从第一阶段剔除")
-    log_step("build_assets", f"构建大类资产 {len(assets)} 项", log_path=args.log_path)
-    if not any(a["pool"] == "domestic" for a in assets):
-        warnings.append(_Warn("没有可申购的境内基金", "fund.available_none"))
-        print(
-            json.dumps(
-                {"error": "没有可申购的境内基金", "warnings": warnings,
-                 "warning_items": _warning_items(warnings)},
-                ensure_ascii=False,
-            )
-        )
-        sys.exit(1)
-
-    # ---- 新标的测试: 临时标的作为新增资产注入第一阶段 (在可投性过滤之后, 不受其约束) ----
-    assets, test_corr_pairs, test_skipped, test_estimates = _inject_test_assets(
-        args, assets, work_dir, warnings)
-
-    # 缺 μ/σ 的标的（校准文件里没有它、也没有写死值可用）不能进优化：显式剔除并报警，
-    # 不静默用 0 顶上（0 波动会直接霸占权重）。σ 已无人工下限，所以这类标的只能缺席。
-    unusable = [a["key"] for a in assets if a.get("mu") is None or a.get("vol") is None]
-    if unusable:
-        warnings.append(
-            "以下标的取不到 μ/σ（校准文件里没有、也没有写死值），本次不参与优化: " + "、".join(unusable))
-        assets = [a for a in assets if a.get("mu") is not None and a.get("vol") is not None]
-
-    # ---- 完整求解：阶段一（大类）+ 袖内固定点迭代（2026-10-14）----
-    # 袖内 μ/σ 迭代到"阶段一假设 == 阶段二交付"的固定点，因此下面报告的 final
-    # 就是阶段一那条约束（收益 ≥ 目标）真正作用到的组合。
-    total_assets = args.total_assets or float(extract["total_value"])
-    solved_all = solve_portfolio(
-        assets,
-        {**BROAD_CORR, **(test_corr_pairs if args.test_tickers else {})},
-        dom_w=dom_w, ov_w=ov_w, target=TARGET_RETURN, rf=RF,
-        extract=extract, total_assets=total_assets, warnings=warnings,
-        log=lambda step, msg, level="info": log_step(step, msg, level=level, log_path=args.log_path),
+    这里保留的模块级名字（CAP_HITS / 各内部池 / 薄壳函数）在**调用时**解析，
+    因此既有 monkeypatch 语义不变（测试直接替换 OP.* 即可）。
+    """
+    return PresetDeps(
+        calibration_warnings=CALIBRATION_WARNINGS,
+        us_core_params=us_core_params,
+        build_investable_assets=build_investable_assets,
+        build_open_pool=build_open_pool_from_status,
+        ensure_pipeline=ensure_pipeline,
+        ensure_work_dir=ensure_work_dir,
+        live_anchors_from_extract=live_anchors_from_extract,
+        inject_test_assets=_NEW_ASSET.inject_test_assets,
+        resolve_test_assets=resolve_test_assets,
+        internal_keys=tuple(US_INTERNAL),
+        corr_keys=[a["key"] for a in BROAD_ASSETS],
+        class_rules=AC.CLASS_RULES,
+        test_skip_warning=_test_ticker_skip_warning,
+        solve_portfolio=solve_portfolio,
+        broad_corr=BROAD_CORR,
+        parse_test_tickers=parse_test_tickers,
+        class_param_help=AC.CLASS_PARAM_HELP,
+        cap_hits=CAP_HITS,
+        cap_hit_warning=_cap_hit_warning,
+        warning_items_fn=_warning_items,
     )
-    if solved_all is None:
-        print(json.dumps({"error": "Optimization infeasible", "warnings": warnings}, ensure_ascii=False, indent=2))
-        sys.exit(1)
 
-    assets = solved_all["assets"]
-    keys, mu, vols, cov = solved_all["keys"], solved_all["mu"], solved_all["vols"], solved_all["cov"]
-    w1 = solved_all["stage1_weights"]
-    ret1, vol1, sharpe1 = solved_all["stage1_ret"], solved_all["stage1_vol"], solved_all["stage1_sharpe"]
-    target = solved_all["target"]
-    TARGET_RETURN = target          # 回退后的靶值要留给后续（历史 Bug D1）
-    cap_map = solved_all["cap_map"]
-    internal = solved_all["internal"]
-    internal_tickers = solved_all["internal_tickers"]
-    stage2_error = solved_all["stage2_error"]
-    japan_selection = solved_all["japan_selection"]
-    gc_selection = solved_all["gc_selection"]
-    final = solved_all["final"]
-    log_step("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}",
-             log_path=args.log_path)
-    log_step("stage2_internal", "第二阶段：美国权益内部标的优化", log_path=args.log_path)
 
-    domestic_selection = select_domestic_funds(w1, assets, hsbc_pool, total_assets)
-    log_step("select_domestic", "境内基金选择完成", log_path=args.log_path)
-
-    target_gap = None
-    if target is not None and final is not None:
-        target_gap = float(final.get("ret", 0.0)) - float(target)
-        if target_gap > 0.002:
-            warnings.append(
-                f"目标收益 {target:.2%} 是收益**下限**（不是锚）：求解目标是最大化夏普，"
-                f"实际交付 {final.get('ret', 0.0):.2%}（高出 {target_gap:.2%}）。"
-                f"目标低于切点收益时结果不随滑杆变化，把目标提到切点收益以上才会沿前沿上移。")
-
-    stage1_detail = {
-        "weights": {keys[i]: float(w1[i]) for i in range(len(keys)) if w1[i] > WEIGHT_ZERO_EPS},
-        "ret": ret1,
-        "vol": vol1,
-        "sharpe": sharpe1,
-        "floor": ret1 - 1.96 * vol1,
-    }
-
-    output = {
-        "pool": {
-            "mode": extract["pool_mode"],
-            "domestic_weight": dom_w,
-            "overseas_weight": ov_w,
-            "domestic_value": float(extract["domestic_value"]),
-            "overseas_value": float(extract["overseas_value"]),
-            "total_assets_used": total_assets,
-        },
-        "us_core_aggregate": {
-            "mu": core_mu,
-            "vol": core_vol,
-            "internal_from_file": internal_weights,
-        },
-        "pipeline": {
-            "work_dir": str(work_dir),
-            "hsbc": {
-                "fetched_at": hsbc_data.get("fetched_at"),
-                "total_count": hsbc_data.get("total_count"),
-                "open_count": hsbc_data.get("open_count"),
-            },
-            "availability": {
-                "checked_at": availability.get("checked_at"),
-                "checked_codes": len(avail_funds),
-                "open_count": availability.get("open_count"),
-                "hsbc_fallback": availability.get("stats", {}).get("hsbc_fallback"),
-                "elapsed_seconds": availability.get("elapsed_seconds"),
-            },
-            "open_pool": {
-                "categories": len(hsbc_pool),
-                "representatives": pool_meta["kept"],
-                "category_detail": pool_meta["categories"],
-            },
-        },
-        "availability": {
-            "source": availability.get("source"),
-            "base_url": availability.get("base_url"),
-            "checked_at": availability.get("checked_at"),
-            "funds": avail_funds,
-        },
-        "stage1": stage1_detail,
-        "sleeve": {
-            "params": solved_all["sleeve_params"],
-            "iterations": solved_all["sleeve_iterations"],
-            "converged": solved_all["sleeve_converged"],
-            "history": solved_all["sleeve_history"],
-        },
-        "stage2": None,
-        "domestic_selection": domestic_selection,
-        "japan_selection": japan_selection,
-        "gc_selection": gc_selection,
-        "final": final,
-        "target_return": TARGET_RETURN,
-        "target_gap": target_gap,
-        "objective": "max_sharpe",
-        # 加法式：结果统计来源（delivered = 真交付；stage1_model = 不可交付的模型统计）
-        "deliverable": bool(solved_all.get("deliverable", True)),
-        "final_source": solved_all.get("final_source", "delivered"),
-        "warnings": warnings,
-    }
-
-    if CAP_HITS:
-        warnings.append(_cap_hit_warning(CAP_HITS))
-
-    if args.test_tickers:
-        output["test"] = {
-            "tickers": parse_test_tickers(args.test_tickers),
-            "test_class": args.test_class,
-            "class_help": AC.CLASS_PARAM_HELP,
-            "assets": test_estimates,
-            "skipped": [{"ticker": t, "reason": r} for t, r in test_skipped],
-            # 测试标的与各大类的相关性: 基准对比要用它把测试标的并入协方差,
-            # 否则 Beta/Alpha 会因为权重质量不足 1 而失真 (2026-10-13 修)。
-            "corr": [[i, j, float(v)] for (i, j), v in test_corr_pairs.items()],
-        }
-
-    if internal is not None:
-        x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal
-        internal_total = float(x_internal.sum())
-        output["stage2"] = {
-            "internal_total_weight": internal_total,
-            "internal_weights_total": {t: float(x_internal[i]) for i, t in enumerate(internal_tickers)},
-            "internal_weights_normalized": {t: float(x_internal[i]) / internal_total for i, t in enumerate(internal_tickers)},
-            "amounts": {t: float(x_internal[i]) * total_assets for i, t in enumerate(internal_tickers)},
-            "ret": ret2,
-            "vol": vol2,
-            "sharpe": sharpe2,
-            "floor": ret2 - 1.96 * vol2,
-        }
-        if stage2_error:
-            output["warnings"].append(stage2_error)
-
-    log_step("finalize", f"优化完成 共{len(assets)}大类 夏普={sharpe1:.3f}", log_path=args.log_path)
-    # 加法式告警明细必须在**所有** append 之后重算（CAP_HITS 等是后面才追加的），
-    # 否则 warnings 与 warning_items 条数会不一致。
-    output["warning_items"] = _warning_items(warnings)
-
+def _write_outputs(output, args, hsbc_pool=None):
+    """写结果页 JSON / App 用的 summary JSON（唯一落盘处）。"""
     if args.out_path:
         with open(args.out_path, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
@@ -911,6 +652,84 @@ def main():
             summary["source_detail"] = args.out_path
         with open(args.result_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
+
+
+def main():
+    """CLI 入口（ADR 0003 §5）：argparse → RunRequest → PresetRunner → 写 JSON。
+
+    编排（管线 / 装配 / 求解 / 汇总）全部在 callers.preset_runner；本函数只保留
+    装配层职责：参数解析、全局口径注入（RF / TARGET_RETURN）、错误码映射、落盘。
+    """
+    args = _parse_args()
+
+    # App 侧滑块传入的目标收益率覆盖 params.py 的默认值.
+    # TARGET_RETURN 是模块级全局, 薄壳在**调用时**按全局名查找, 此处重绑后全部生效.
+    global TARGET_RETURN
+    if args.target_return is not None:
+        TARGET_RETURN = float(args.target_return)
+        log_step("target_return", f"目标收益率覆盖为 {TARGET_RETURN:.0%}", log_path=args.log_path)
+
+    extract = load_extract(args.extract_json)
+    log_step("load_extract", f"已加载提取结果 total={extract.get('total_value')}", log_path=args.log_path)
+
+    # RF (无风险利率) 动态注入: App 侧按池比例加权中美10年国债收益率算出 rf,
+    # 通过 extract_live.json 的 "rf" 字段传入（params.py 里不写死利率）。
+    global RF
+    if extract.get("rf") is not None:
+        RF = float(extract["rf"])
+        log_step("rf", f"无风险利率覆盖为 {RF:.2%} (动态中美10年国债加权)", log_path=args.log_path)
+    else:
+        log_step("rf", "提取文件未带 rf，本次夏普按 rf=0 计算", log_path=args.log_path)
+
+    warnings = []
+    CAP_HITS.clear()
+
+    request = RunRequest(
+        assets=(),
+        target_return=TARGET_RETURN,
+        rf=RF,
+        domestic_weight=float(extract["domestic_weight"]),
+        overseas_weight=float(extract["overseas_weight"]),
+        total_assets=args.total_assets or float(extract["total_value"]),
+        extract=extract,
+        deps=_preset_deps(),
+        test_tickers=args.test_tickers,
+        test_class=args.test_class,
+        work_dir=args.work_dir,
+        hsbc_timeout=args.hsbc_timeout,
+        request_timeout=args.request_timeout,
+        check_timeout=args.check_timeout,
+        log=lambda step, message, level="info": log_step(
+            step, message, level=level, log_path=args.log_path),
+        warnings_out=warnings,
+    )
+    try:
+        outcome = PresetRunner(optimizer=None).run(request)
+    except PipelineUnavailable as exc:
+        print(json.dumps(
+            {"error": "联网管线失败（基金在售/申赎状态数据源）", "detail": str(exc)},
+            ensure_ascii=False))
+        sys.exit(2)
+    except NoDomesticAssets:
+        print(json.dumps(
+            {"error": "没有可申购的境内基金", "warnings": warnings,
+             "warning_items": _warning_items(warnings)},
+            ensure_ascii=False,
+        ))
+        sys.exit(1)
+    except TestAssetsUnavailable as exc:
+        print(json.dumps(
+            {"error": "所有测试标的均不可用", "detail": exc.detail, "warnings": warnings},
+            ensure_ascii=False))
+        sys.exit(3)
+    except InfeasibleOptimization:
+        print(json.dumps({"error": "Optimization infeasible", "warnings": warnings},
+                         ensure_ascii=False, indent=2))
+        sys.exit(1)
+
+    output = outcome.payload
+    TARGET_RETURN = output["target_return"]   # 回退后的靶值要留给后续（历史 Bug D1）
+    _write_outputs(output, args, hsbc_pool=outcome.context.get("hsbc_pool"))
 
 
 if __name__ == "__main__":

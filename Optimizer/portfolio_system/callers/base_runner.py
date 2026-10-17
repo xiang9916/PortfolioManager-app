@@ -39,18 +39,38 @@ class RunRequest:
     #: 装配职责在本层（core 不 import params）；缺省 None → 不写进 extract，
     #: core 侧 solve_sleeves 会显式报错而不是静默跑空。
     sleeve_universe: Any = None
+    #: P4 收尾（ADR 0003 §5）编排模式：给出 deps 时由 PresetRunner 负责
+    #: 「取数 → 装配 → 求解 → 结果汇总」，main() 只做 argparse / 写文件。
+    #: 依赖一律由装配层注入（callers 不得 import params / asset_classes / 脚本）。
+    deps: Any = None
+    #: 编排模式的运行时输入（仅在 deps 非空时使用）。
+    test_tickers: Optional[str] = None
+    test_class: str = "active"
+    work_dir: Optional[str] = None
+    hsbc_timeout: float = 60.0
+    request_timeout: float = 12.0
+    check_timeout: float = 300.0
+    #: log(step, message, level="info")；编排模式的步骤日志回调。
+    log: Any = None
+    #: 调用方的 warnings 列表（**同一对象**）：错误路径据此打印已累积的告警。
+    warnings_out: Any = None
 
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """一次运行的结果（DTO + 既有键名载荷）。"""
+    """一次运行的结果（DTO + 既有键名载荷）。
 
-    result: SolveResult
-    payload: Mapping[str, Any]
+    编排模式（PresetRunner._run_pipeline）下 result 为 None、payload 是结果页 JSON；
+    context 带出调用方写作时需要的少量装配产物（如 hsbc_pool → build_summary）。
+    """
+
+    result: Optional[SolveResult] = None
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    context: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def warnings(self):
-        return self.result.warnings
+        return getattr(self.result, "warnings", ())
 
 
 def assemble_problem(request: RunRequest, target_return: Optional[float] = None) -> ProblemSpec:

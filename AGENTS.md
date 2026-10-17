@@ -366,7 +366,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 23 文件 / 130 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 25 文件 / 139 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
@@ -387,8 +387,16 @@ pm-cli (headless CLI) 复用 PortfolioCore
   **`core/sleeves.py` 的调用期委托已删 —— core 里再无任何上层依赖**（`VERIFY-P3b2: OK`：干净子进程真调用 `solve_sleeves` 后 sys.modules 新增禁用模块为空）。
   设计要点：内部池表经 `ProblemSpec.extract["sleeve_universe"]` 显式传入，**缺了抛 `InputError`**（不静默跑空）；薄壳每次调用现取模块级名字构造 hooks，于是**变量与函数两类打桩都继续生效**。用例 118→119。
   ⚠️ **P3-b3（部分落地，2026-10-17）**：① `services/` 按真实函数名接线；④ **P3 正式门已达成** —— `sensitivity_analysis.py` 的模块级 import 已删，改经 `callers/sensitivity_runner.SensitivityRunner.solve_point` 直连 core（新增 `test_sensitivity_offline.py` 4 项，修复前 2/4 双红）。依赖搬移而非复制（SP500 表 → `core/stage2.py`；袖种子 → `core/sleeve_params.SLEEVE_SEEDS` + `build_pool_specs()`）。`VERIFY-P3b3: OK`。
-  ✅ **③ 已落地**：`NewAssetRunner.inject_test_assets` 接管注入（保留 exit 3 契约）；**常量收口已完成**（`core/constants.py` 增 14 个语义常量，替换 core 41 处 + 入口脚本 7 处，值不变）；`PresetRunner` 已接管 `build_result_summary`/`_build_benchmark`（入口 1187 → 910 行）。
-  ⚠️ **仅剩**：② 的**后半**（`main()` 里仍有约 290 行载荷组装 + `solve_portfolio` 调用 + 管线编排，尚未收敛到「argparse → RunRequest → Runner → 写 JSON」）；`select_domestic_funds` 未搬；`data_fetcher` 运行时无生产调用点（行情在校准阶段取）；`models/POOL_SUM_EPS` 有意留在 models。
+  ✅ **③ 已落地**：`NewAssetRunner.inject_test_assets` 接管注入（保留 exit 3 契约）；**常量收口已完成**（`core/constants.py` 增 14 个语义常量，替换 core 41 处 + 入口脚本 7 处，值不变）；`PresetRunner` 已接管 `build_result_summary`/`_build_benchmark`（入口 1187 → 910 行；再经下面 ② 的后半收敛到 736 行）。
+  ✅ **② 的**后半已落地（2026-10-17）**：`main()` 从约 315 行收敛到 80 行（文件 917 → 736 行），只剩「argparse → RunRequest → `PresetRunner.run` → 写 JSON」
+  ＋装配层职责（`RF`/`TARGET_RETURN` 全局注入、4 类错误→退出码映射、落盘）；编排（联网管线 → 资产装配 → 新标的注入 → 求解 → 结果汇总）搬进
+  `callers/preset_runner.py`（`PresetRunner._run_pipeline` + `PresetDeps`，上层依赖全部**显式注入**）、`build_output_payload`（结果页 JSON 唯一装配点）、
+  `select_domestic_funds`（选基规则）；无 `deps` 时 `PresetRunner.run` 仍走原求解路径（等价门用的那条，未动）。
+  验收：`tmp/slim/equivalence.py` 逐字节等价门 5/5（high/low/inject/nodom/notest，含退出码、stdout、summary；canned 管线桩），
+  核验席位造红 4 类注入全红；真实联网 CLI 的决策载荷与改造前**逐字段相同**；新增跟踪守卫 `test_main_slim.py`（4 项，旧 `main()` 上 1/4）
+  + `test_preset_pipeline_offline.py`（5 项，受控桩；祖先树 ImportError = 红）。`VERIFY-MAINSLIM: OK`（证据 `tmp/agent-team/verify-mainslim/`）。
+  ⚠️ 仍留（有意）：`data_fetcher` 运行时无生产调用点（行情在校准阶段取）；`models/POOL_SUM_EPS` 有意留在 models；入口的 `_inject_test_assets` 薄壳
+  仅为既有测试/兼容保留（生产走 callers）；`OP.select_domestic_funds` 的 monkeypatch 兼容性已失效（仓内无调用方）。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。

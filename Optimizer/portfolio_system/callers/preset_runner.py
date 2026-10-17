@@ -29,9 +29,168 @@ class PresetRunner(Runner):
         self.fetcher = fetcher
 
     def run(self, request: RunRequest) -> RunOutcome:
+        # 编排模式（ADR 0003 §5，P4 收尾）：request.deps 由装配层注入 → 本调用器负责
+        # 「取数 → 装配 → 求解 → 结果汇总」，main() 只做 argparse / 写文件。
+        if getattr(request, "deps", None) is not None:
+            return self._run_pipeline(request)
         problem = assemble_problem(request)
         result: SolveResult = self.optimizer.optimize(problem)
         return self._outcome(result)
+
+    # ── 编排模式（P4 收尾）：取数 → 装配 → 求解 → 结果汇总 ──────────────────────
+    def _inject_test_assets(self, request, assets, work_dir, warnings):
+        """新标的注入（实现仍在 NewAssetRunner；经 deps 注入，避免调用器互相 import）。"""
+        deps = request.deps
+        log = request.log
+        return deps.inject_test_assets(
+            assets,
+            raw_tickers=request.test_tickers,
+            test_class=request.test_class,
+            work_dir=work_dir,
+            resolve=deps.resolve_test_assets,
+            internal_keys=deps.internal_keys,
+            corr_keys=deps.corr_keys,
+            class_rules=deps.class_rules,
+            skip_warning=deps.test_skip_warning,
+            warnings=warnings,
+            log=(lambda message, level="info": log("test_tickers", message, level=level))
+            if log is not None else None,
+        )
+
+    def _run_pipeline(self, request: RunRequest) -> RunOutcome:
+        """完整流水线（原 optimize_portfolio.main() 的编排段，逐句等价搬迁）。"""
+        deps = request.deps
+        extract = dict(request.extract)
+        warnings = request.warnings_out if request.warnings_out is not None else []
+        deps.cap_hits.clear()
+        warnings.extend(deps.calibration_warnings)
+        log = request.log or (lambda *args, **kwargs: None)
+
+        live_anchors = deps.live_anchors_from_extract(extract)
+        if live_anchors:
+            log("live_anchors", f"动态锚定 {len(live_anchors)} 个境内基金 (覆盖 params.py 静态锚定)")
+
+        # ---- 联网管线: 每次优化完整执行 (抓汇丰搜索易 → 天天基金实时校验 → 开放池构建) ----
+        work_dir = deps.ensure_work_dir(request.work_dir)
+        try:
+            hsbc_data, availability = deps.ensure_pipeline(
+                work_dir,
+                live_anchors=live_anchors,
+                hsbc_request_timeout=request.hsbc_timeout,
+                request_timeout=request.request_timeout,
+                check_total_timeout=request.check_timeout,
+                log=log,
+            )
+        except RuntimeError as exc:
+            raise PipelineUnavailable(str(exc), warnings=warnings) from exc
+        avail_funds = availability["funds"]
+        hsbc_funds_live = hsbc_data.get("funds", [])
+        # 汇丰原始在售状态, 供口径冲突提示 (汇丰开放 vs 天天基金暂停)
+        hsbc_status = {str(f.get("code", "")).strip(): f for f in hsbc_funds_live}
+
+        # 直接取分组早停校验 selection 中每类选中的开放代表基金
+        hsbc_pool, pool_meta = deps.build_open_pool(
+            hsbc_funds_live, availability, live_anchors=live_anchors)
+        stats = availability.get("stats", {})
+        log("pipeline_counts",
+            f"在售 {hsbc_data.get('total_count', '?')} 只 / 开放申购 {hsbc_data.get('open_count', '?')} 只；"
+            f"实时校验请求 {stats.get('checked', '?')} 只 / 开放 {availability.get('open_count', '?')} 只 / "
+            f"兜底 {stats.get('hsbc_fallback', 0)} 只")
+        log("build_open_pool",
+            f"开放基金池：{len(hsbc_pool)} 个类别、代表基金 {pool_meta['kept']} 只"
+            f"（{stats.get('checked', '?')} 只候选实时校验, 耗时 {availability.get('elapsed_seconds', '?')}s）")
+
+        dom_w = float(extract["domestic_weight"])
+        ov_w = float(extract["overseas_weight"])
+
+        internal_weights = {h["ticker"]: h["weight"] for h in extract["us_equity"]["holdings"]}
+        core_mu, core_vol = deps.us_core_params(internal_weights)
+
+        assets = deps.build_investable_assets(
+            hsbc_pool, pool_meta, avail_funds, hsbc_status, warnings,
+            core_mu=core_mu, core_vol=core_vol, drop_note="已从第一阶段剔除")
+        log("build_assets", f"构建大类资产 {len(assets)} 项")
+        if not any(a["pool"] == "domestic" for a in assets):
+            warnings.append(CodedWarning("没有可申购的境内基金", "fund.available_none"))
+            raise NoDomesticAssets(warnings)
+
+        # ---- 新标的测试: 临时标的作为新增资产注入第一阶段 (在可投性过滤之后, 不受其约束) ----
+        assets, test_corr_pairs, test_skipped, test_estimates = self._inject_test_assets(
+            request, assets, work_dir, warnings)
+
+        # 缺 μ/σ 的标的（校准文件里没有它、也没有写死值可用）不能进优化：显式剔除并报警，
+        # 不静默用 0 顶上（0 波动会直接霸占权重）。σ 已无人工下限，所以这类标的只能缺席。
+        unusable = [a["key"] for a in assets if a.get("mu") is None or a.get("vol") is None]
+        if unusable:
+            warnings.append(
+                "以下标的取不到 μ/σ（校准文件里没有、也没有写死值），本次不参与优化: "
+                + "、".join(unusable))
+            assets = [a for a in assets if a.get("mu") is not None and a.get("vol") is not None]
+
+        # ---- 完整求解：阶段一（大类）+ 袖内固定点迭代（2026-10-14）----
+        total_assets = request.total_assets or float(extract["total_value"])
+        solved = deps.solve_portfolio(
+            assets,
+            {**deps.broad_corr, **(test_corr_pairs if request.test_tickers else {})},
+            dom_w=dom_w, ov_w=ov_w, target=request.target_return, rf=request.rf,
+            extract=extract, total_assets=total_assets, warnings=warnings, log=log)
+        if solved is None:
+            raise InfeasibleOptimization(warnings)
+
+        assets = solved["assets"]
+        keys, w1 = solved["keys"], solved["stage1_weights"]
+        ret1, vol1, sharpe1 = (solved["stage1_ret"], solved["stage1_vol"],
+                               solved["stage1_sharpe"])
+        target = solved["target"]
+        internal = solved["internal"]
+        internal_tickers = solved["internal_tickers"]
+        stage2_error = solved["stage2_error"]
+        japan_selection = solved["japan_selection"]
+        gc_selection = solved["gc_selection"]
+        final = solved["final"]
+        log("stage1_result", f"第一阶段完成 收益={ret1:.2%} 波动={vol1:.2%} 夏普={sharpe1:.3f}")
+        log("stage2_internal", "第二阶段：美国权益内部标的优化")
+
+        domestic_selection = select_domestic_funds(w1, assets, hsbc_pool, total_assets)
+        log("select_domestic", "境内基金选择完成")
+
+        target_gap = None
+        if target is not None and final is not None:
+            target_gap = float(final.get("ret", 0.0)) - float(target)
+            if target_gap > 0.002:
+                warnings.append(
+                    f"目标收益 {target:.2%} 是收益**下限**（不是锚）：求解目标是最大化夏普，"
+                    f"实际交付 {final.get('ret', 0.0):.2%}（高出 {target_gap:.2%}）。"
+                    f"目标低于切点收益时结果不随滑杆变化，把目标提到切点收益以上才会沿前沿上移。")
+
+        test_block = None
+        if request.test_tickers:
+            test_block = {
+                "tickers": deps.parse_test_tickers(request.test_tickers),
+                "test_class": request.test_class,
+                "class_help": deps.class_param_help,
+                "assets": test_estimates,
+                "skipped": [{"ticker": t, "reason": r} for t, r in test_skipped],
+                # 测试标的与各大类的相关性: 基准对比要用它把测试标的并入协方差,
+                # 否则 Beta/Alpha 会因为权重质量不足 1 而失真 (2026-10-13 修)。
+                "corr": [[i, j, float(v)] for (i, j), v in test_corr_pairs.items()],
+            }
+
+        payload = build_output_payload(
+            solved=solved, keys=keys, stage1_weights=w1,
+            stage1_stats=(ret1, vol1, sharpe1),
+            extract=extract, dom_w=dom_w, ov_w=ov_w, total_assets=total_assets,
+            core_mu=core_mu, core_vol=core_vol, internal_weights=internal_weights,
+            work_dir=work_dir, hsbc_data=hsbc_data, availability=availability,
+            avail_funds=avail_funds, hsbc_pool=hsbc_pool, pool_meta=pool_meta,
+            domestic_selection=domestic_selection, internal=internal,
+            internal_tickers=internal_tickers, stage2_error=stage2_error,
+            japan_selection=japan_selection, gc_selection=gc_selection, final=final,
+            target=target, target_gap=target_gap, warnings=warnings,
+            test_block=test_block, cap_hits=deps.cap_hits,
+            cap_hit_warning=deps.cap_hit_warning,
+            warning_items_fn=deps.warning_items_fn, log=log)
+        return RunOutcome(result=None, payload=payload, context={"hsbc_pool": hsbc_pool})
 
 
 @dataclass(frozen=True)
@@ -322,3 +481,218 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
         "source_detail": None,
     }
     return summary
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P4 收尾：main() 瘦身（ADR 0003 §5「结果汇总（键名契约唯一来源）」）
+#
+# 以下三类从 Optimizer/scripts/optimize_portfolio.py **逐句等价搬迁**：
+#   ① select_domestic_funds   —— 选基业务规则（纯函数）
+#   ② build_output_payload    —— 结果页 JSON 的唯一装配点
+#   ③ PresetDeps + PresetRunner._run_pipeline —— 编排依赖与流水线（见类内）
+# callers 不得 import params / asset_classes / 脚本 → 全部口径与数据表由装配层注入。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class PipelineUnavailable(RuntimeError):
+    """联网管线失败（CLI 层据此打印错误 JSON 并以退出码 2 结束）。"""
+
+    def __init__(self, detail, warnings=()):
+        super().__init__(str(detail))
+        self.detail = str(detail)
+        self.warnings = list(warnings)
+
+
+class NoDomesticAssets(RuntimeError):
+    """没有可申购的境内基金（CLI 层：错误 JSON + 退出码 1）。"""
+
+    def __init__(self, warnings=()):
+        super().__init__("没有可申购的境内基金")
+        self.warnings = list(warnings)
+
+
+class InfeasibleOptimization(RuntimeError):
+    """求解不可行（CLI 层：错误 JSON + 退出码 1）。"""
+
+    def __init__(self, warnings=()):
+        super().__init__("Optimization infeasible")
+        self.warnings = list(warnings)
+
+
+def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
+    """For each allocated domestic broad category, pick the representative open fund.
+
+    This is a simple deterministic selection from the 基金搜索易 open-fund pool:
+    prefer the category's original anchor fund if it is in the pool, otherwise use
+    the first open fund in that category. All open funds remain available as
+    alternatives; a full per-fund internal optimizer can be added later.
+    """
+    selection = {}
+    for i, a in enumerate(assets):
+        if a["pool"] != "domestic":
+            continue
+        key = a["key"]
+        weight = float(stage1_weights[i])
+        if weight <= WEIGHT_ZERO_EPS:
+            continue
+        candidates = hsbc_pool.get(key, [])
+        if not candidates:
+            continue
+        anchor = a.get("fund_code")
+        chosen = None
+        if anchor:
+            for c in candidates:
+                if c["code"] == anchor:
+                    chosen = c
+                    break
+        if chosen is None:
+            chosen = candidates[0]
+        selection[key] = {
+            "category_weight": weight,
+            "amount": weight * total_assets,
+            "selected": chosen,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+        }
+    return selection
+
+
+@dataclass(frozen=True)
+class PresetDeps:
+    """PresetRunner 编排模式需要的外部依赖（全部由装配层/脚本注入）。
+
+    callers 不得 import params / asset_classes / 脚本；参数口径与数据表一律显式传入
+    （与 SummaryTables 同一哲学）。
+    """
+
+    calibration_warnings: Sequence[Any]
+    us_core_params: Callable[..., Any]
+    build_investable_assets: Callable[..., Any]
+    build_open_pool: Callable[..., Any]
+    ensure_pipeline: Callable[..., Any]
+    ensure_work_dir: Callable[..., Any]
+    live_anchors_from_extract: Callable[..., Any]
+    inject_test_assets: Callable[..., Any]
+    resolve_test_assets: Callable[..., Any]
+    internal_keys: Sequence[str]
+    corr_keys: Sequence[str]
+    class_rules: Mapping[str, Any]
+    test_skip_warning: Callable[[str, str], Any]
+    solve_portfolio: Callable[..., Any]
+    broad_corr: Mapping[Any, float]
+    parse_test_tickers: Callable[..., Any]
+    class_param_help: str
+    cap_hits: list
+    cap_hit_warning: Callable[..., Any]
+    warning_items_fn: Callable[..., Any]
+
+
+def build_output_payload(*, solved, keys, stage1_weights, stage1_stats, extract, dom_w, ov_w,
+                         total_assets, core_mu, core_vol, internal_weights, work_dir,
+                         hsbc_data, availability, avail_funds, hsbc_pool, pool_meta,
+                         domestic_selection, internal, internal_tickers, stage2_error,
+                         japan_selection, gc_selection, final, target, target_gap,
+                         warnings, test_block, cap_hits, cap_hit_warning,
+                         warning_items_fn, log=None):
+    """结果页 JSON 的**唯一装配点**（原 main() 的 output 字典逐句搬迁，键序/键名不变）。"""
+    ret1, vol1, sharpe1 = stage1_stats
+    stage1_detail = {
+        "weights": {keys[i]: float(stage1_weights[i]) for i in range(len(keys))
+                    if stage1_weights[i] > WEIGHT_ZERO_EPS},
+        "ret": ret1,
+        "vol": vol1,
+        "sharpe": sharpe1,
+        "floor": ret1 - 1.96 * vol1,
+    }
+    output = {
+        "pool": {
+            "mode": extract["pool_mode"],
+            "domestic_weight": dom_w,
+            "overseas_weight": ov_w,
+            "domestic_value": float(extract["domestic_value"]),
+            "overseas_value": float(extract["overseas_value"]),
+            "total_assets_used": total_assets,
+        },
+        "us_core_aggregate": {
+            "mu": core_mu,
+            "vol": core_vol,
+            "internal_from_file": internal_weights,
+        },
+        "pipeline": {
+            "work_dir": str(work_dir),
+            "hsbc": {
+                "fetched_at": hsbc_data.get("fetched_at"),
+                "total_count": hsbc_data.get("total_count"),
+                "open_count": hsbc_data.get("open_count"),
+            },
+            "availability": {
+                "checked_at": availability.get("checked_at"),
+                "checked_codes": len(avail_funds),
+                "open_count": availability.get("open_count"),
+                "hsbc_fallback": availability.get("stats", {}).get("hsbc_fallback"),
+                "elapsed_seconds": availability.get("elapsed_seconds"),
+            },
+            "open_pool": {
+                "categories": len(hsbc_pool),
+                "representatives": pool_meta["kept"],
+                "category_detail": pool_meta["categories"],
+            },
+        },
+        "availability": {
+            "source": availability.get("source"),
+            "base_url": availability.get("base_url"),
+            "checked_at": availability.get("checked_at"),
+            "funds": avail_funds,
+        },
+        "stage1": stage1_detail,
+        "sleeve": {
+            "params": solved["sleeve_params"],
+            "iterations": solved["sleeve_iterations"],
+            "converged": solved["sleeve_converged"],
+            "history": solved["sleeve_history"],
+        },
+        "stage2": None,
+        "domestic_selection": domestic_selection,
+        "japan_selection": japan_selection,
+        "gc_selection": gc_selection,
+        "final": final,
+        "target_return": target,
+        "target_gap": target_gap,
+        "objective": "max_sharpe",
+        # 加法式：结果统计来源（delivered = 真交付；stage1_model = 不可交付的模型统计）
+        "deliverable": bool(solved.get("deliverable", True)),
+        "final_source": solved.get("final_source", "delivered"),
+        "warnings": warnings,
+    }
+
+    if cap_hits:
+        warnings.append(cap_hit_warning(cap_hits))
+
+    if test_block is not None:
+        output["test"] = test_block
+
+    if internal is not None:
+        x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal
+        internal_total = float(x_internal.sum())
+        output["stage2"] = {
+            "internal_total_weight": internal_total,
+            "internal_weights_total": {t: float(x_internal[i])
+                                       for i, t in enumerate(internal_tickers)},
+            "internal_weights_normalized": {t: float(x_internal[i]) / internal_total
+                                            for i, t in enumerate(internal_tickers)},
+            "amounts": {t: float(x_internal[i]) * total_assets
+                        for i, t in enumerate(internal_tickers)},
+            "ret": ret2,
+            "vol": vol2,
+            "sharpe": sharpe2,
+            "floor": ret2 - 1.96 * vol2,
+        }
+        if stage2_error:
+            warnings.append(stage2_error)
+
+    if log is not None:
+        log("finalize", f"优化完成 共{len(solved['assets'])}大类 夏普={sharpe1:.3f}")
+    # 加法式告警明细必须在**所有** append 之后重算（CAP_HITS 等是后面才追加的），
+    # 否则 warnings 与 warning_items 条数会不一致。
+    output["warning_items"] = warning_items_fn(warnings)
+    return output
