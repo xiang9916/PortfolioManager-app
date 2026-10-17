@@ -6,8 +6,8 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「手工表格维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.5-rc.8**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，22 个 pre-release + 23 个 tag 齐全。
+- 当前版本 **v0.6-alpha.1**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 线上仓库：`xiang9916/PortfolioManager-app`，23 个 pre-release + 24 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
@@ -366,10 +366,10 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 22 文件 / 127 用例）**。
-  ⚠️ 包的位置**必须**在 `Optimizer/scripts/` 下：该目录是打包（`scripts/build_app.sh:75`）与 Swift 三处资源路径
-  （`OptimizationService`/`AppStore`/`pm-cli`）的外部契约；上提到 `Optimizer/portfolio_system/` 是 P4，
-  必须与 `build_app.sh` + 三处 Swift 路径同批改。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 23 文件 / 130 用例）**。
+  **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
+  路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
+  `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
   **P2 已落地（2026-10-17）**：`optimize_common.py` 的纯函数与 `params.higham_psd` 已搬进 `core/`（`linalg`/`solver`/`constraints`），
   容差常量搬进 `core/constants.py` 并由旧位置**再导出**（旧名继续可用、无第二处字面量）；`core`/`callers` 已无模块级全局读取。
   **P3-a 已落地（2026-10-17）**：core 的两处延迟转发已消 —— `build_broad_cov` 搬进 `core/linalg`；active 上限表改**显式入参**
@@ -387,8 +387,8 @@ pm-cli (headless CLI) 复用 PortfolioCore
   **`core/sleeves.py` 的调用期委托已删 —— core 里再无任何上层依赖**（`VERIFY-P3b2: OK`：干净子进程真调用 `solve_sleeves` 后 sys.modules 新增禁用模块为空）。
   设计要点：内部池表经 `ProblemSpec.extract["sleeve_universe"]` 显式传入，**缺了抛 `InputError`**（不静默跑空）；薄壳每次调用现取模块级名字构造 hooks，于是**变量与函数两类打桩都继续生效**。用例 118→119。
   ⚠️ **P3-b3（部分落地，2026-10-17）**：① `services/` 按真实函数名接线；④ **P3 正式门已达成** —— `sensitivity_analysis.py` 的模块级 import 已删，改经 `callers/sensitivity_runner.SensitivityRunner.solve_point` 直连 core（新增 `test_sensitivity_offline.py` 4 项，修复前 2/4 双红）。依赖搬移而非复制（SP500 表 → `core/stage2.py`；袖种子 → `core/sleeve_params.SLEEVE_SEEDS` + `build_pool_specs()`）。`VERIFY-P3b3: OK`。
-  ⚠️ **仍待办**：② `PresetRunner` 接管 `main()`、③ `NewAssetRunner` 接管 `_inject_test_assets`/`test_tickers`（未做、也未半做）；常量收口（core ~28 处 + `optimize_portfolio.py` ~40 处裸字面量）；`select_domestic_funds` 未搬；
-  `data_fetcher` **运行时无生产调用点**（行情在校准阶段取，已在 docstring 声明）；④ `models/POOL_SUM_EPS` 有意留在 models（避免反向依赖）；P4（包上提 + 打包/Swift 路径）未做。
+  ✅ **③ 已落地**：`NewAssetRunner.inject_test_assets` 接管注入（保留 exit 3 契约）；**常量收口已完成**（`core/constants.py` 增 14 个语义常量，替换 core 41 处 + 入口脚本 7 处，值不变）；`PresetRunner` 已接管 `build_result_summary`/`_build_benchmark`（入口 1187 → 910 行）。
+  ⚠️ **仅剩**：② 的**后半**（`main()` 里仍有约 290 行载荷组装 + `solve_portfolio` 调用 + 管线编排，尚未收敛到「argparse → RunRequest → Runner → 写 JSON」）；`select_domestic_funds` 未搬；`data_fetcher` 运行时无生产调用点（行情在校准阶段取）；`models/POOL_SUM_EPS` 有意留在 models。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。
