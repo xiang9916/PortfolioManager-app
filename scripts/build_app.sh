@@ -73,7 +73,11 @@ PY
 # Optimizer scripts (small, pure python) always bundled.
 mkdir -p "${BUNDLE}/Contents/Resources/Optimizer"
 cp -R "Optimizer/scripts" "${BUNDLE}/Contents/Resources/Optimizer/scripts"
-rm -rf "${BUNDLE}/Contents/Resources/Optimizer/scripts/__pycache__"
+# 必须**递归**清 __pycache__: ADR 0003 起 Optimizer/scripts 下有了子包 (portfolio_system/),
+# 只删顶层那一层会漏掉嵌套缓存, 而 .pyc 头部会原样写入源码**绝对路径**
+# (实测 strings 出 /Users/<user>/Documents/Github/.../portfolio_system/core/linalg.py) ——
+# 那就是 AGENTS §1 的构建机绝对路径红线, 会随 DMG/zip 一起发布出去。
+find "${BUNDLE}/Contents/Resources/Optimizer/scripts" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Optimizer static data (calibrated_params.json etc.) as bundle fallback for
 # params._resolve_data_file (env DSH_FINANCE_DIR -> dev Finance/tmp -> here).
@@ -121,6 +125,36 @@ if [ "${WITH_VENV}" = "1" ]; then
   rm -f "${SCRUB_LIST}"
   echo "    remaining /Users references: $(grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" 2>/dev/null | wc -l | tr -d ' ')"
 fi
+
+# 隐私硬门（放在 codesign 之前, 任何一条不过就让打包失败 —— 别只靠人眼）:
+#   ① 包内不得残留 __pycache__/*.pyc: .pyc 头部会写入源码绝对路径;
+#   ② bundle 内不得出现**本机 HOME 前缀**: 这是发布红线 (二进制里的 HOME 已在上面等长替换);
+#   ③ 第三方 wheel 的 .so 里可能带**上游 builder** 的 /Users/<name>/ (实测 2 个 cargo registry
+#      路径, 不含本人任何信息) —— 只统计打印, 不阻断; 想清零得改二进制字符串表, 代价另计。
+echo "==> privacy self-check inside bundle"
+PYC_LIST="$(find "${BUNDLE}" -name __pycache__ -o -name '*.pyc' | head -20)"
+if [ -n "${PYC_LIST}" ]; then
+  echo "    FAIL: 残留字节码缓存（.pyc 会带出源码绝对路径）:"
+  printf '%s\n' "${PYC_LIST}" | sed 's/^/      /'
+  exit 1
+fi
+HOME_HITS="${DIST}/.home-path-hits"
+: >"${HOME_HITS}"
+grep -rlaF "${HOME}" "${BUNDLE}" >>"${HOME_HITS}" 2>/dev/null || true
+HOME_N="$(wc -l <"${HOME_HITS}" | tr -d ' ')"
+if [ "${HOME_N}" != "0" ]; then
+  echo "    FAIL: bundle 内出现构建机 HOME 前缀 (${HOME_N} 个文件):"
+  sed 's/^/      /' "${HOME_HITS}"
+  rm -f "${HOME_HITS}"
+  exit 1
+fi
+rm -f "${HOME_HITS}"
+THIRD_HITS="${DIST}/.thirdparty-path-hits"
+: >"${THIRD_HITS}"
+grep -rlaE '/Users/[A-Za-z0-9_.-]+/' "${BUNDLE}" >>"${THIRD_HITS}" 2>/dev/null || true
+echo "    third-party /Users refs (upstream wheel builder, expected): $(wc -l <"${THIRD_HITS}" | tr -d ' ')"
+sed 's/^/      /' "${THIRD_HITS}"
+rm -f "${THIRD_HITS}"
 
 if [ "${CODESIGN}" = "1" ]; then
   echo "==> ad-hoc codesign"

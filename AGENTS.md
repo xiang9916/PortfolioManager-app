@@ -104,6 +104,10 @@ bash scripts/build_app.sh --with-venv --dmg     # 必须 --with-venv，否则优
   拦住，收益为零却要多维护一个脚本。仓库里的 `scripts/install_dmg.sh` 保留，供有仓库的人从终端安装。
 - **内置隐私加固（勿删）**：① venv 拷完后清 `__pycache__` 并把 `/Users/<user>/` 重写成 `/build`；
   ② 二进制 debug info 里的 `/Users/<user>` 在 codesign **之前**做等长替换成 `/tmp/pmbuild`。
+  **③ scripts 树下 `__pycache__` 必须递归清理（2026-10-17；ADR 0003 起 `Optimizer/scripts` 下有了子包 `portfolio_system/`）**：
+  `.pyc` 头部会原样写入源码**绝对路径**，旧写法只删顶层那一层 → 实测会把 `/Users/<user>/…/portfolio_system/core/linalg.py` 打进 bundle。
+  **④ 打包末尾的 bundle 隐私硬门（codesign 之前）**：包内出现任何 `__pycache__`/`*.pyc`、或出现**本机 HOME 前缀**，一律让打包 fail；
+  第三方 wheel 的 `.so` 里带**上游 builder** 的 `/Users/<name>/`（实测 2 个 cargo registry 路径，不含本人任何信息）只统计打印、不阻断。
   副作用：DMG 体积 85MB → 48MB（少了 .pyc），首次跑优化器会重新编译缓存。
 - 版本 bump：只改 `scripts/Info.plist`（`CFBundleShortVersionString` + `CFBundleVersion` 同步）→
   commit `chore: bump version to X.Y` → annotated tag `vX.Y`（message `PortfolioManager X.Y`）
