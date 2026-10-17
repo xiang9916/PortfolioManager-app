@@ -16,7 +16,7 @@ import numpy as np
 
 import asset_classes as AC
 
-from .constants import BOUNDS_TOL, FEASIBILITY_EPS
+from .constants import BOUNDS_TOL, FEASIBILITY_EPS, POOL_CONFLICT_EPS
 from .warnings import CodedWarning
 from ..models.data_types import ProblemSpec
 
@@ -141,7 +141,7 @@ def apply_active_caps(upper, assets, cap_map: Mapping[str, float], dom_idx, dom_
     pool_idx = [i for i, a in enumerate(assets) if a.get("pool") == "domestic"]
     if pool_idx:
         capsum = float(sum(upper[i] for i in pool_idx))
-        if capsum < dom_w - 1e-9 and capped:
+        if capsum < dom_w - POOL_CONFLICT_EPS and capped:
             # 只放宽"被上限压住"的境内成员，补足缺口
             relaxed = [i for i in pool_idx if assets[i].get("key") in cap_map]
             need = dom_w - capsum

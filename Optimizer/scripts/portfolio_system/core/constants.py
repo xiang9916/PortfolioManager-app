@@ -17,3 +17,5 @@ BOUNDS_TOL = 1e-6               # 多起点解 bounds 校验容差（_respects_b
 FEASIBILITY_EPS = 1e-9          # feasible_start 的可行性判定容差
 SCAN_TARGET_MARGIN_EPS = 1e-4   # 敏感性扫描点定位：放在最大可行收益略下方，避开不可行边界
 SCAN_LOOP_EPS = 1e-9            # 敏感性扫描目标清单的闭合容差（浮点累加，避免漏掉上界那一点）
+FALLBACK_MARGIN_EPS = 1e-6      # 阶段一末级回退的生效目标 = 最大可行收益 − ε（避开不可行边界）
+POOL_CONFLICT_EPS = 1e-9        # active 上限与境内池权重的冲突判定容差（apply_active_caps）

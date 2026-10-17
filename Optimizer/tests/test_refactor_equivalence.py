@@ -24,6 +24,9 @@ sys.path.insert(0, _SCRIPTS)
 
 import optimize_common as OC                      # noqa: E402
 import optimize_portfolio as OP                   # noqa: E402
+import params as P                                # noqa: E402
+from portfolio_system.core import engine as _engine  # noqa: E402
+from portfolio_system.core.sleeve_params import SleeveUniverse  # noqa: E402
 from portfolio_system.callers.base_runner import RunRequest, problem_from_legacy_rows  # noqa: E402
 from portfolio_system.callers.preset_runner import PresetRunner  # noqa: E402
 from portfolio_system.core.optimizer import LocalConvexOptimizer  # noqa: E402
@@ -43,6 +46,16 @@ ASSETS = [
      "pool": "overseas", "test_class": "broad"},
 ]
 CORR = {("O_US_CORE", "O_BTC"): 0.2}
+#: P3-b2：core 两层引擎要的"外部数据表"由装配层显式传参（core 不 import params）。
+UNIVERSE = SleeveUniverse(
+    us_internal=P.US_INTERNAL, us_internal_corr=P.US_INTERNAL_CORR,
+    jp_internal=P.JP_INTERNAL, jp_internal_corr=P.JP_INTERNAL_CORR,
+    gc_internal=P.GC_INTERNAL, gc_internal_corr=P.GC_INTERNAL_CORR,
+    sp500_internal_corr=OP.SP500_INTERNAL_CORR,
+    sp500_internal_corr_default=OP.SP500_INTERNAL_CORR_DEFAULT,
+    pool_specs=OP._SLEEVE_POOL_SPECS,
+    internal_pool_keys=tuple(P.US_INTERNAL) + tuple(P.JP_INTERNAL) + tuple(P.GC_INTERNAL),
+)
 EXTRACT = {"pool_mode": "fixture", "domestic_weight": DOM_W, "overseas_weight": OV_W,
            "domestic_value": TOTAL * DOM_W, "overseas_value": TOTAL * OV_W,
            "total_value": TOTAL, "rf": RF,
@@ -76,12 +89,18 @@ def _stub_round(assets_in, corr_pairs, **kw):
 
 
 def _with_stub(fn):
+    # P3-b2：实现已搬进 core/engine.py —— 两条路径都要打桩，否则新路径会跑真求解器：
+    #   ① OP._solve_once  → 旧薄壳路径（OP.solve_portfolio 的 hooks）
+    #   ② engine.solve_once → DTO 路径（core solve_portfolio 的默认 hooks，调用时解析模块名）
     original = OP._solve_once
+    original_core = _engine.solve_once
     OP._solve_once = _stub_round
+    _engine.solve_once = lambda assets_in, corr_pairs, **kw: _stub_round(assets_in, corr_pairs, **kw)
     try:
         return fn()
     finally:
         OP._solve_once = original
+        _engine.solve_once = original_core
 
 
 def _old_path():
@@ -98,12 +117,14 @@ def _new_path():
     problem = problem_from_legacy_rows([dict(a) for a in ASSETS], dict(CORR),
                                        dom_w=DOM_W, ov_w=OV_W, target=TARGET, rf=RF,
                                        total_assets=TOTAL, extract=dict(EXTRACT),
-                                       max_sleeve_iter=4, stage1_starts=40, stage2_starts=20)
+                                       max_sleeve_iter=4, stage1_starts=40, stage2_starts=20,
+                                       sleeve_universe=UNIVERSE)
     runner = PresetRunner(LocalConvexOptimizer())
     request = RunRequest(assets=problem.assets, target_return=TARGET, rf=RF,
                          domestic_weight=DOM_W, overseas_weight=OV_W,
                          corr_pairs=dict(CORR), total_assets=TOTAL, extract=dict(EXTRACT),
-                         max_sleeve_iter=4, stage1_starts=40, stage2_starts=20)
+                         max_sleeve_iter=4, stage1_starts=40, stage2_starts=20,
+                         sleeve_universe=UNIVERSE)
     return runner.run(request), problem
 
 

@@ -21,3 +21,11 @@ class CodedWarning(str):
         obj = super().__new__(cls, message)
         obj.code = code
         return obj
+
+
+def warning_items(warnings):
+    """加法式告警明细：[{code, message}]；warnings 本身（字符串数组）逐字节不变。
+
+    （P3-b2 从 optimize_portfolio._warning_items 等价搬入；旧位置再导出。）
+    """
+    return [{"code": getattr(w, "code", "other"), "message": str(w)} for w in warnings]

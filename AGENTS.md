@@ -366,7 +366,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 20 文件 / 118 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 20 文件 / 119 用例）**。
   ⚠️ 包的位置**必须**在 `Optimizer/scripts/` 下：该目录是打包（`scripts/build_app.sh:75`）与 Swift 三处资源路径
   （`OptimizationService`/`AppStore`/`pm-cli`）的外部契约；上提到 `Optimizer/portfolio_system/` 是 P4，
   必须与 `build_app.sh` + 三处 Swift 路径同批改。
@@ -383,8 +383,12 @@ pm-cli (headless CLI) 复用 PortfolioCore
   验证：`VERIFY-P3b1: OK`（逐行等价、非假搬迁、core 无上层 import、守卫覆盖新入口且两种注入都能红）；用例 115→118（新增 symtable「未定义全局名」闸 2 项 + 守卫证伪 1 项）。
   ⚠️ **兼容性注记（核验实测）**：薄壳**不等于**完整 monkeypatch 兼容 —— 模块级**变量**（`TARGET_RETURN`/`RF`/`CAP_HITS`/各 INTERNAL 表）仍在调用时解析（兼容），
   但模块级**函数**交叉打桩（例如替换 `OP.stage2_covariance`）**不再生效**；仓内无任何测试/生产代码这样打桩，产品路径无影响。
-  ⚠️ **P3-b2 未做（`core` 最后一处上层依赖）**：`core/sleeves.py:43` 的 `solve_sleeves` 门面仍在调用期委托 `optimize_portfolio.solve_portfolio`；
-  以及 `sensitivity_analysis.py:44` 仍是模块级 `from optimize_portfolio import solve_portfolio`（P3 的门未达成）；常量表外仍有 ~40 处 `1e-6/1e-9/1e-12`；`select_domestic_funds`（选基业务规则）未搬。
+  **P3-b2 已落地（2026-10-17）**：`core/fixpoint.py`（14 个袖内可行性/下限/择优函数）+ `core/engine.py`（`_solve_stage1`/`_solve_once`/`solve_portfolio`）+ `SleeveUniverse`（外部数据表显式入参）+ `SleeveHooks`（5 个策略函数注入）。
+  **`core/sleeves.py` 的调用期委托已删 —— core 里再无任何上层依赖**（`VERIFY-P3b2: OK`：干净子进程真调用 `solve_sleeves` 后 sys.modules 新增禁用模块为空）。
+  设计要点：内部池表经 `ProblemSpec.extract["sleeve_universe"]` 显式传入，**缺了抛 `InputError`**（不静默跑空）；薄壳每次调用现取模块级名字构造 hooks，于是**变量与函数两类打桩都继续生效**。用例 118→119。
+  ⚠️ **仍待办**：① `sensitivity_analysis.py:44` 仍是模块级 `from optimize_portfolio import solve_portfolio`（**P3 的正式门未达成**，属 P3-b3）；
+  ② core 内仍有 **~28 处**裸容差字面量（engine 5 / fixpoint ~20 / constraints 3）——「决策点不得出现裸字面量」尚未重新成立；
+  ③ `select_domestic_funds`（选基业务规则）未搬；④ `models/POOL_SUM_EPS` **有意留在 models**（放 core 会造成 models→core 反向依赖）。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。

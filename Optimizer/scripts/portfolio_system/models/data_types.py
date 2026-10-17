@@ -9,6 +9,9 @@ from typing import Any, Mapping, Optional, Tuple
 SLEEVE_KEYS: Tuple[str, ...] = ("O_US_CORE", "O_JP_EQ", "D_GREATER_CN")
 
 SEVERITIES: Tuple[str, ...] = ("info", "warning", "critical")
+#: 池权重之和自检容差（models 不得 import core —— 依赖方向是 core → models，
+#: 因此本常量留在 models 侧；core/constants.py 的常量是内核容差，两者语义不同）。
+POOL_SUM_EPS = 1e-6
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,7 @@ class PoolSpec:
 
     def __post_init__(self):
         total = float(self.domestic_weight) + float(self.overseas_weight)
-        if abs(total - 1.0) > 1e-6:
+        if abs(total - 1.0) > POOL_SUM_EPS:
             raise ValueError("pool weights must sum to 1, got %r" % (total,))
 
 

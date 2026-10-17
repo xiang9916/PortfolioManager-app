@@ -145,6 +145,31 @@ def main():
     damped = sleeve_params.damp_sleeve_params({"O_US_CORE": (0.07, 0.11)},
                                               {"O_US_CORE": (0.05, 0.10)}, 0.5)
 
+    # ⑤ core.engine.solve_portfolio：真的跑一遍两层流水线（虚构宇宙，不碰 params）
+    from portfolio_system.core import engine
+    from portfolio_system.core.sleeve_params import SleeveUniverse
+
+    GC = {"GC": {"mu": 0.10, "vol": 0.20}}
+    universe = SleeveUniverse(
+        us_internal=US, us_internal_corr=US_CORR,
+        jp_internal=JP, jp_internal_corr={},
+        gc_internal=GC, gc_internal_corr={},
+        sp500_internal_corr=SP500, sp500_internal_corr_default=SP500_DEF,
+        pool_specs={"O_US_CORE": (US, US_CORR, 19), "O_JP_EQ": (JP, {}, 31),
+                    "D_GREATER_CN": (GC, {}, 43)},
+        internal_pool_keys=("A_ACTIVE", "UA"),
+    )
+    engine_hits = []
+    engine_warns = []
+    engine_out = engine.solve_portfolio(
+        [{"key": "O_US_CORE", "mu": 0.08, "vol": 0.12, "pool": "overseas"},
+         {"key": "A_ACTIVE", "mu": 0.12, "vol": 0.30, "pool": "overseas"}],
+        {("O_US_CORE", "A_ACTIVE"): 0.3},
+        dom_w=0.0, ov_w=1.0, target=0.05, rf=0.02,
+        extract={"us_equity": {"holdings": [{"ticker": "UA"}]}}, total_assets=1000.0,
+        universe=universe, cap_hits_out=engine_hits, warnings=engine_warns,
+        max_sleeve_iter=2, stage1_starts=5, stage2_starts=5)
+
     after = snapshot()
     report = {
         "roots_added_after_core": sorted(set(after) - baseline),
@@ -174,6 +199,11 @@ def main():
         "tangency": [float(tangency[0]), float(tangency[1])],
         "injected_mu": float(injected[0]["mu"]),
         "damped_mu": float(damped["O_US_CORE"][0]),
+        # ⑤
+        "engine_ran": engine_out is not None,
+        "engine_iterations": int((engine_out or {}).get("sleeve_iterations") or 0),
+        "engine_deliverable": bool((engine_out or {}).get("deliverable", False)),
+        "engine_warnings": len(engine_warns),
     }
     sys.stdout.write(json.dumps(report, ensure_ascii=False, sort_keys=True))
 
@@ -235,6 +265,8 @@ def test_core_calls_do_not_pull_forbidden_modules():
     assert report["pool_max_return"] > 0.0, report
     assert report["us_params"] and report["tangency"], report
     assert abs(report["injected_mu"] - 0.07) < 1e-12 and abs(report["damped_mu"] - 0.06) < 1e-12, report
+    # P3-b2 新搬入口：core.engine.solve_portfolio 必须真的跑出结果（不是只 import）
+    assert report["engine_ran"] and report["engine_iterations"] >= 1, report
 
 
 def test_guard_is_falsifiable():
@@ -275,6 +307,28 @@ def test_lazy_import_in_moved_core_module_is_caught():
     roots, subs = _violations(report)
     assert "urllib.request" in subs, (
         "往 core/stage2.py 注入调用期 import urllib.request 后守卫没变红：新增根=%s 新增子模块=%s"
+        % (roots, report.get("submodules_after_core")))
+
+
+def test_lazy_import_in_engine_is_caught():
+    """守卫覆盖 P3-b2 新搬的 core/engine.py：注入调用期延迟 import → 必须红。"""
+    rel = os.path.join("portfolio_system", "core", "engine.py")
+    anchor = "    pool_specs = dict(universe.pool_specs or {})"
+    src_path = os.path.join(_SCRIPTS, rel)
+    assert os.path.isfile(src_path), "找不到 %s" % src_path
+    assert anchor in open(src_path, encoding="utf-8").read(), "注入锚点未命中 engine.py"
+    with tempfile.TemporaryDirectory(prefix="pm-deps-guard-tree-") as tmp:
+        tree = os.path.join(tmp, "scripts")
+        shutil.copytree(_SCRIPTS, tree, ignore=shutil.ignore_patterns("__pycache__"))
+        mutated = os.path.join(tree, rel)
+        body = open(mutated, encoding="utf-8").read()
+        body = body.replace(anchor, "    import urllib.request  # 证伪：调用期延迟 import" + chr(10) + anchor, 1)
+        open(mutated, "w", encoding="utf-8").write(body)
+        rc, out, err = _run_probe(tree)
+    report = _report_or_fail(rc, out, err)
+    roots, subs = _violations(report)
+    assert "urllib.request" in subs, (
+        "往 core/engine.py 注入调用期 import urllib.request 后守卫没变红：新增根=%s 新增子模块=%s"
         % (roots, report.get("submodules_after_core")))
 
 

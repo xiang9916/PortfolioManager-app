@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -82,3 +83,55 @@ def sleeve_tangency(key, rf, pool_specs, cache=None):
         cache[key] = got
     return got
 
+# ── 袖/固定点常量（P3-b2 从 optimize_portfolio 等价搬入；旧位置再导出）────────────
+SLEEVE_KEYS = ("O_US_CORE", "O_JP_EQ", "D_GREATER_CN")
+#: P1（2026-10-16）：只有这两只袖走 internal_pool_optimize —— 需要下限传导的路径。
+FLOOR_SLEEVE_KEYS = ("O_JP_EQ", "D_GREATER_CN")
+MAX_SLEEVE_ITER = 10
+#: 收敛判据：单只袖的 μ/σ 变化都小于 0.4 个百分点就认为阶段一与交付组合同源。
+SLEEVE_TOL = 4e-3
+#: 袖内选标是离散的，用阻尼把步长压小。
+SLEEVE_DAMPING = 0.5
+#: 袖 → 该袖"是否被解出"要看的结果字段（阶段二没跑就是 None）。
+SLEEVE_RESOLVED_FIELD = {
+    "O_US_CORE": "internal",
+    "O_JP_EQ": "japan_selection",
+    "D_GREATER_CN": "gc_selection",
+}
+
+
+@dataclass(frozen=True)
+class SleeveUniverse:
+    """两层流水线所需的**全部**外部数据表（由调用方装配；core 只读、不 import params）。
+
+    `pool_specs`：袖 → (内部候选池, 内部相关性, 随机种子)，与阶段二同一套池子
+    （optimize_portfolio._SLEEVE_POOL_SPECS 的同构映射；模块级变量打桩仍兼容）。
+    """
+
+    us_internal: Mapping
+    us_internal_corr: Mapping
+    jp_internal: Mapping
+    jp_internal_corr: Mapping
+    gc_internal: Mapping
+    gc_internal_corr: Mapping
+    sp500_internal_corr: Mapping = field(default_factory=dict)
+    sp500_internal_corr_default: float = 0.75
+    pool_specs: Mapping = field(default_factory=dict)
+    internal_pool_keys: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SleeveHooks:
+    """固定点迭代里**由调用方提供**的策略函数（P3-b2）。
+
+    设计意图：既有测试对 optimize_portfolio 的模块级**函数**打桩要尽量继续生效
+    （`_solve_once` / `_sleeve_params_us` / `_compute_sleeve_floors` /
+    `_seed_levels_for_target` / `_floor_seed`）→ 薄壳在调用时读模块级名字、经本结构注入。
+    全部为 None 时由 core 用自带实现（并把 universe.pool_specs 绑定进去）。
+    """
+
+    solve_once: Any = None
+    sleeve_params_us: Any = None
+    compute_sleeve_floors: Any = None
+    seed_levels_for_target: Any = None
+    floor_seed: Any = None

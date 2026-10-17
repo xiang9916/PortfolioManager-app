@@ -35,6 +35,10 @@ class RunRequest:
     #: 内部池清单（params 的 US/JP/GC_INTERNAL 的 key 全集）→ 进 ProblemSpec.extract，
     #: 供 core 的 active 上限表覆盖内部标的（core 不得 import params）。
     internal_pool_keys: Tuple[str, ...] = ()
+    #: P3-b2：core 两层引擎唯一的"外部数据表"入口（core.sleeve_params.SleeveUniverse）。
+    #: 装配职责在本层（core 不 import params）；缺省 None → 不写进 extract，
+    #: core 侧 solve_sleeves 会显式报错而不是静默跑空。
+    sleeve_universe: Any = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,8 @@ def assemble_problem(request: RunRequest, target_return: Optional[float] = None)
     extract = dict(request.extract)
     if request.internal_pool_keys:
         extract["internal_pool_keys"] = tuple(request.internal_pool_keys)
+    if request.sleeve_universe is not None:
+        extract["sleeve_universe"] = request.sleeve_universe
     return ProblemSpec(
         assets=tuple(request.assets),
         goal=GoalSpec(target_return=target, rf=float(request.rf),
@@ -78,7 +84,8 @@ def problem_from_legacy_rows(assets: Sequence[Mapping[str, Any]],
                              active_cap: float = 0.10, max_sleeve_iter: int = 10,
                              damping: float = 0.5, stage1_starts: int = 160,
                              stage2_starts: int = 80,
-                             internal_pool_keys: Sequence[str] = ()) -> ProblemSpec:
+                             internal_pool_keys: Sequence[str] = (),
+                             sleeve_universe: Any = None) -> ProblemSpec:
     """既有 asset 行 → ProblemSpec（等价性门用：旧输入 → 新 DTO，一处映射）。"""
     specs = []
     for row in assets:
@@ -97,6 +104,8 @@ def problem_from_legacy_rows(assets: Sequence[Mapping[str, Any]],
     extract_map = dict(extract or {})
     if internal_pool_keys:
         extract_map["internal_pool_keys"] = tuple(internal_pool_keys)
+    if sleeve_universe is not None:
+        extract_map["sleeve_universe"] = sleeve_universe
     return ProblemSpec(
         assets=tuple(specs),
         goal=GoalSpec(target_return=float(target), rf=float(rf), active_cap=float(active_cap),
