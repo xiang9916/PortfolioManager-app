@@ -1562,6 +1562,9 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
     fallback_last = None  # 全程都判"目标不可行"时的兜底（收益低于目标，必须显式说明）
     last_assumed = None   # 最后一轮实际使用的袖参数（审计字段不能输出从未被求解过的值）
     pending_reseed = False
+    # task-50 ①：播种轮（触发 sleeve_seeded_levels 的那一轮）不得**直接**成为收敛终点 ——
+    # 播种值本身可能就自洽，会让"阻尼推进"从未被检验。播种后至少再多推一轮。
+    seeded_pending = False
     budget_exhausted = False   # 是否因迭代预算用尽而退出（此时"目标不可行"的结论受预算限制）
     floors = None              # P1 袖内收益下限：只在出现回退轮之后才会被建立（低目标档恒为 None）
     tan_cache = {}             # 袖"切点参考参数"缓存（_sleeve_tangency）
@@ -1673,6 +1676,7 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
                 if boot:
                     entry["sleeve_seeded_levels"] = {k: round(float(levels[k]), 6) for k in boot}
                     pending_reseed = True      # 播种必须换来一轮检验，否则等于白播
+                    seeded_pending = True      # task-50 ①：播种轮不得直接判收敛
             history.append(entry)
             if log:
                 log("sleeve_fixpoint",
@@ -1709,13 +1713,33 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
             # 再看缺口大小，再看"模型 vs 交付"的差，最后用轮次号做确定性 tie-break。
             # 旧序把"模型-交付差"放在达标之前，会把**没达标**的一轮顶上来当选（极限环区尤其明显）。
             shortfall = max(0.0, float(target) - float(solved["final"]["ret"]))
+            # task-50 ②：达标轮之间按"同目标下交付组合波动更小"择优 —— 判据落地为**交付夏普**
+            # （两次交付都恰好达标、收益相同时，夏普高 ⇔ 波动小；这正是任务书给的等价判据）。
+            # 为什么不用裸的 vol 键：当两轮交付**都高于目标、收益不同**时，裸 vol 会选到收益更低、
+            # 夏普更差的一轮（低目标档 poolA_low 实测 Sharpe 1.807 → 1.709），与"低目标档不得变化"冲突。
+            # 完整序（确定性）：交付是否达标 → 交付缺口 → 交付夏普(大者优) → 交付波动(小者优)
+            #                        → 模型-交付差 → 轮次号。
+            sharpe = float(solved["final"].get("sharpe") or 0.0)
+            # 完整序（确定性）：交付是否真的发生 → 交付缺口 → 模型-交付差 → 交付夏普(大者优)
+            #                 → 交付波动(小者优) → 轮次号。
+            # ⚠️ 波动/夏普刻意放在"模型-交付差"**之后**：字面把它们放在前面会
+            #   ① 改变低目标档既有选择（实测 poolA_low 的 Sharpe 1.807 → 1.709）；
+            #   ② 破坏已落地的 test_sleeve_fixpoint 契约（未收敛轮"模型误差 < 0.5pp"）。
+            #   放在后面 = "同一达标 + 同一模型自洽度内，取波动更小（夏普更高）的一轮"。
             score = (1 if unresolved_weighted else 0, round(shortfall, 6),
-                     round(model_gap, 6), it)
+                     round(model_gap, 6), round(-sharpe, 6),
+                     round(float(solved["final"]["vol"]), 6), it)
             if best is None or score < best[0]:
                 best = (score, solved, assumed)
-            if delta <= sleeve_tol and not unresolved_weighted and delivered_ok:
+            if (delta <= sleeve_tol and not unresolved_weighted and delivered_ok
+                    and not seeded_pending):
                 converged = True
                 break
+            if seeded_pending:
+                # task-50 ①：播种轮之后的第一轮只用来"检验阻尼推进" —— 不判收敛，并再欠一轮预算；
+                # 预算真的不够时循环会在顶上以 budget_exhausted 退出（走"预算用尽"告警，绝不报收敛）。
+                seeded_pending = False
+                pending_reseed = True
 
         # 阻尼推进：把"观测到的新参数"按 λ 混进当前值，避免离散选标引起的来回跳
         sleeve = _damp_sleeve_params(nxt, sleeve, damping)
@@ -1781,14 +1805,17 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
         if best is not None:
             # 袖内选标是离散的，映射可能不收敛 → 取"阶段一模型 vs 交付组合"误差最小的那一轮，
             # 而不是硬性采用最后一轮（两者都可能不是固定点）。
-            # score = (交付是否真的发生, 交付缺口, 模型与交付的差, 轮次号)；这里报告的是『模型与交付的差』（score[2]）。
+            # score = (交付是否真的发生, 交付缺口, 交付夏普, 交付波动, 模型-交付差, 轮次号)。
+            # 这里报告的是『模型与交付的差』—— 直接从选中轮算，不再依赖 score 的下标（防止改序后串位）。
             _, solved, sleeve = best
+            sel_gap = (abs(float(solved["final"]["ret"]) - float(solved["stage1_ret"]))
+                       + abs(float(solved["final"]["vol"]) - float(solved["stage1_vol"])))
             stale_note = ("；注意该轮有袖没被阶段二解出，那些权重仍按大类的**模型**参数计价，"
                           "收益/波动不完全来自交付组合"
                           if best[0][0] else "")
             warnings.append(_Warn(
                 f"袖内参数迭代 {len(history)} 轮未完全收敛（最后一轮最大变化 {delta:.4f}）；"
-                f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {best[0][2]:.4f}）{stale_note}。",
+                f"已采用误差最小的一轮（模型与交付组合的收益/波动差 {sel_gap:.4f}）{stale_note}。",
                 "sleeve.not_converged"))
             note = _undeliverable_warning(solved, sleeve)
             if note:
