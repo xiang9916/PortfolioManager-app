@@ -421,3 +421,37 @@ def reseed_sleeves(sleeve, solved, rf, pool_specs, tol=RESEED_TOL):
         changed.append(key)
     return changed
 
+
+
+def restart_seed_params(rf, pool_specs, lambdas):
+    """多初值重启的**确定性**种子（2026-10-17，修「加新标的 → 夏普下降」）。
+
+    背景：目标播种分叉后，固定点映射存在多个自洽解（模型与交付都自洽），当前路径可能
+    锁在较差的一个。这里给出若干"确定性初值向量"供引擎重启固定点并择优：
+
+        μ_seed = 切点 μ + λ ×（该袖**无上限最大收益** μ − 切点 μ)，σ_seed = 切点 σ
+
+    - 取切点（= 该袖自己最大夏普篮子）作下界、无上限最大收益篮子作上界，
+      λ ∈ (0,1) 在两者之间线性插值；**确定性、无随机、不读取任何全局**。
+    - 只依赖显式入参 `pool_specs`（core 不 import params）；同输入同输出。
+    返回 [(label, {key: (mu, sigma)})]；无法构造任何种子时返回 []。
+    """
+    cache = {}
+    seeds = []
+    for lam in lambdas:
+        vec = {}
+        for key in SLEEVE_KEYS:
+            spec = pool_specs.get(key)
+            if spec is None:
+                continue
+            got = sleeve_tangency(key, rf, pool_specs, cache=cache)
+            if got is None:
+                continue
+            mu, vol = float(got[0]), float(got[1])
+            mx = pool_max_return(spec[0], spec[1], None)
+            if mx is not None and float(mx) > mu:
+                mu = mu + float(lam) * (float(mx) - mu)
+            vec[key] = (float(mu), float(vol))
+        if vec:
+            seeds.append(("lambda=%.2f" % float(lam), vec))
+    return seeds

@@ -73,11 +73,14 @@ class LocalConvexOptimizer(PortfolioOptimizer):
         raw: List[Any] = []
         # active 上限表：内部池清单（params 的 US/JP/GC_INTERNAL）由调用方经 extract 显式传入
         # —— core 不得 import params（D2）。触顶记录由内核返回、不进内核全局。
+        # 2026-10-17（P1）：上限值改由 GoalSpec.active_cap 显式注入（默认 0.10 → 行为不变）。
         internal_keys = tuple(problem.extract.get("internal_pool_keys") or ())
         asset_rows = serialization.legacy_asset_rows(problem)
-        constraints.apply_active_caps(upper, asset_rows,
-                                      constraints.active_cap_map(asset_rows, internal_keys),
-                                      dom_idx, dom_w, raw)
+        constraints.apply_active_caps(
+            upper, asset_rows,
+            constraints.active_cap_map(asset_rows, internal_keys,
+                                       cap=problem.goal.active_cap),
+            dom_idx, dom_w, raw)
         warnings: List[Warning] = [_to_warning(w) for w in raw]
 
         if not problem.is_single_layer:

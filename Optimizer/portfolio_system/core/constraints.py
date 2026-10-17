@@ -89,13 +89,14 @@ def _serialization():
 def bounds_arrays(problem: ProblemSpec):
     """(lower, upper) ndarray（ProblemSpec → 既有 bounds 口径）。
 
-    ⚠️ 已知限制（P3-b3 显式声明，见 tmp/agent-team/refactor-p3/found_issues.md P3-F1）：
-    这里走 stage1_bounds → 恒为 [0, 1]，**忽略** AssetSpec.upper / 行里的 upper 字段；
-    阶段一上界实际只由 active 上限表（apply_active_caps）压低。旧引擎同口径，故行为一致；
-    将来若要让装配层的单标的上界生效，需在此处改用 problem.assets[i].upper 作初值
-    （cap 只会压低、不会抬高，叠加顺序不变）。
+    2026-10-17（P1）：装配层的 `AssetSpec.lower/upper` 现在**真正生效**
+    （默认 lower=0.0 / upper=1.0 → 与旧行为逐字节一致；非默认值不再被静默忽略）。
+    阶段一上界仍会被 active 上限表进一步压低（cap 只压低、不抬高，叠加顺序不变）。
     """
-    return stage1_bounds(_serialization().legacy_asset_rows(problem))
+    lower, upper = stage1_bounds(_serialization().legacy_asset_rows(problem))
+    lower = np.maximum(lower, np.array([float(a.lower) for a in problem.assets]))
+    upper = np.minimum(upper, np.array([float(a.upper) for a in problem.assets]))
+    return lower, upper
 
 
 def pool_indices(problem: ProblemSpec) -> Tuple[List[int], List[int]]:
@@ -104,7 +105,7 @@ def pool_indices(problem: ProblemSpec) -> Tuple[List[int], List[int]]:
     return dom, ov
 
 
-def active_cap_map(assets, internal_pool_keys: Iterable[str] = ()) -> Dict[str, float]:
+def active_cap_map(assets, internal_pool_keys: Iterable[str] = (), cap=None) -> Dict[str, float]:
     """key → 组合权重上限。仅对 class == active 的标的生效。
 
     必须覆盖**所有**标的：大类槽位（如 O_US_ENERGY=XOM）、美股/日本/大中华内部标的
@@ -114,12 +115,16 @@ def active_cap_map(assets, internal_pool_keys: Iterable[str] = ()) -> Dict[str, 
     `internal_pool_keys`：内部池（params 的 US/JP/GC_INTERNAL）的 key 全集 ——
     core 不得 import params，因此**由调用方显式传入**（optimize_portfolio 传真实池清单；
     DTO 路径从 ProblemSpec.extract 读同名键）。只从大类槽位构建会漏掉内部标的。
+
+    `cap`：上限值（2026-10-17 P1）：缺省沿用 `asset_classes.ACTIVE_CAP`；DTO 路径由
+    `GoalSpec.active_cap` 显式注入（默认 0.10 → 与旧行为完全一致，非默认值不再被静默忽略）。
     """
+    cap_value = AC.ACTIVE_CAP if cap is None else float(cap)
     caps: Dict[str, float] = {}
 
     def consider(key, cls=None):
         if (cls or AC.asset_class(key)) == "active":
-            caps[key] = AC.ACTIVE_CAP
+            caps[key] = cap_value
 
     for a in assets or []:
         consider(a.get("key", ""), a.get("test_class"))

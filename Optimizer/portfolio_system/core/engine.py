@@ -11,14 +11,14 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
-from .constants import (CAP_HIT_EPS, DELIVERY_EPS, FALLBACK_MARGIN_EPS, TARGET_REACH_EPS,
-                        WEIGHT_ZERO_EPS)
+from .constants import (CAP_HIT_EPS, DELIVERY_EPS, FALLBACK_MARGIN_EPS, MODEL_GAP_TOL,
+                        SLEEVE_RESTART_LAMBDAS, TARGET_REACH_EPS, WEIGHT_ZERO_EPS)
 from .constraints import apply_active_caps, active_cap_map, stage1_bounds
 from .fixpoint import (compute_sleeve_floors, floor_next_params, floor_seed,
                        required_sleeve_mu, reseed_sleeves, resolved_sleeves,
-                       seed_levels_for_target, sleeve_levels_for_feasibility,
-                       sleeve_tangency, sleeve_tangency_all, stage1_weight,
-                       undeliverable_warning, unresolved_weighted_sleeves,
+                       restart_seed_params, seed_levels_for_target,
+                       sleeve_levels_for_feasibility, sleeve_tangency, sleeve_tangency_all,
+                       stage1_weight, undeliverable_warning, unresolved_weighted_sleeves,
                        validate_sleeve_params)
 from .linalg import build_broad_cov
 from .sleeve_params import (FLOOR_SLEEVE_KEYS, MAX_SLEEVE_ITER, SLEEVE_DAMPING, SLEEVE_KEYS,
@@ -105,7 +105,10 @@ def solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_as
     keys = [a["key"] for a in assets]
     mu = np.array([a["mu"] for a in assets])
     vols = np.array([a["vol"] for a in assets])
-    cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], corr_pairs)
+    # P1 可观测性（2026-10-17）：缺失相关对与 PSD 修复都留审计（加法式，默认路径数值不变）。
+    missing_pairs, psd_diag = [], []
+    cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], corr_pairs,
+                          missing_out=missing_pairs, diag_out=psd_diag)
     dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
     ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
 
@@ -188,14 +191,27 @@ def solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_as
     if floors_in:
         # 加法式内部键：本轮**实际生效**的袖内下限（未生效时不出现 → 低目标档逐字节一致）。
         out["sleeve_floors"] = {k: float(v) for k, v in floors_in.items()}
+    # P1 可观测性（加法式，仅在有缺失/确实发生 PSD 改写时出现）：
+    # 缺失相关对按 0 相关进模型，是被动策略（现金类资产近似零相关），但必须可审计。
+    if missing_pairs:
+        out["corr_missing"] = [list(p) for p in missing_pairs]
+    for stats in psd_diag:
+        if stats.get("changed_pairs") or stats.get("eigmin_before", 0.0) < 0.0:
+            out["cov_psd"] = dict(stats)
+            break
     return out
 
 
-def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
-                    universe, warnings=None, log=None, max_sleeve_iter=MAX_SLEEVE_ITER,
-                    sleeve_tol=SLEEVE_TOL, stage1_starts=160, stage2_starts=80,
-                    sleeve_start=None, damping=SLEEVE_DAMPING, cap_hits_out=None, hooks=None):
-    """完整求解（袖内参数固定点迭代）。
+def _solve_fixpoint_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
+                         universe, warnings=None, log=None, max_sleeve_iter=MAX_SLEEVE_ITER,
+                         sleeve_tol=SLEEVE_TOL, stage1_starts=160, stage2_starts=80,
+                         sleeve_start=None, damping=SLEEVE_DAMPING, cap_hits_out=None,
+                         hooks=None):
+    """完整求解（袖内参数固定点迭代）—— **单初值**内核。
+
+    公开入口是文件末尾的 `solve_portfolio`：它在「走过目标播种分叉」时会用确定性种子
+    再跑几遍本函数并择优（2026-10-17，修「加新标的 → 夏普下降」的多固定点问题）。
+    本函数的契约与行为保持与修复前逐字节一致。
 
     返回 None（不可行）或结果字典；袖参数、迭代轮数与是否收敛一并带出，便于审计与提示。
 
@@ -591,3 +607,164 @@ def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, tot
     })
     return solved
 
+
+
+def _restart_triggered(solved):
+    """是否走过「目标播种」分叉（只有这种路径才可能锁进较差的固定点）。"""
+    for entry in (solved.get("sleeve_history") or []):
+        if entry.get("sleeve_seeded_levels"):
+            return True
+    return False
+
+
+def _restart_model_gap(solved):
+    """该候选的「阶段一模型 vs 交付组合」差：|Δret| + |Δvol|（与轮内择优同一口径）。"""
+    final = solved.get("final") or {}
+    return (abs(float(final.get("ret") or 0.0) - float(solved.get("stage1_ret") or 0.0))
+            + abs(float(final.get("vol") or 0.0) - float(solved.get("stage1_vol") or 0.0)))
+
+
+def _restart_eligible(solved):
+    """候选是否**合格**（硬门，2026-10-17 核验修正）：
+
+    必须真的交付（`deliverable` + `final_source='delivered'`）且「模型 vs 交付」差 ≤0.5pp。
+    模型差是自洽性的**硬合格线**，不是排序前缀 —— 否则「基路径没达标 + 某候选达标但模型不自洽」
+    会把一个不可执行的结果顶上来。不合格候选一律不得替换基路径；全部不合格时保留基路径。
+    """
+    if not solved.get("deliverable", True):
+        return False
+    if solved.get("final_source", "delivered") != "delivered":
+        return False
+    return _restart_model_gap(solved) <= MODEL_GAP_TOL
+
+
+def _restart_score(solved, target):
+    """跨初值择优键（确定性）：交付是否发生 → 交付缺口 → 模型差是否越界 → 交付夏普 → 波动。
+
+    调用方必须先用 `_restart_eligible` 过滤（硬门）；本键只用于**合格候选之间**排序。
+    """
+    final = solved.get("final") or {}
+    ret = float(final.get("ret") or 0.0)
+    vol = float(final.get("vol") or 0.0)
+    sharpe = float(final.get("sharpe") or 0.0)
+    deliverable = 0 if (solved.get("deliverable", True)
+                        and solved.get("final_source", "delivered") == "delivered") else 1
+    return (deliverable,
+            round(max(0.0, float(target) - ret), 6),
+            0 if _restart_model_gap(solved) <= MODEL_GAP_TOL else 1,
+            round(-sharpe, 6),
+            round(vol, 6))
+
+
+def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
+                    universe, warnings=None, log=None, max_sleeve_iter=MAX_SLEEVE_ITER,
+                    sleeve_tol=SLEEVE_TOL, stage1_starts=160, stage2_starts=80,
+                    sleeve_start=None, damping=SLEEVE_DAMPING, cap_hits_out=None, hooks=None):
+    """完整求解（袖内固定点迭代）+ **多初值重启择优**（2026-10-17）。
+
+    背景（用户实测「加新标的 → 夏普下降」）：「回退角点把袖压到 0 → 目标水平播种 → 播种值
+    自身也自洽」会锁在一个**较差的固定点**；而同一输入下从更高初值出发存在**更好且同样
+    自洽**的固定点。单次迭代无法同时探索两者 → 这里只在「走过目标播种分叉」（history 出现
+    `sleeve_seeded_levels`）时，用**确定性**种子（切点 μ 与无上限最大收益 μ 的线性插值，
+    见 `restart_seed_params`）再跑 `_solve_fixpoint_once`，按 `_restart_score` 择优，
+    并把加法式审计键 `sleeve_restarts` 写进结果。
+
+    未触发时**只跑一遍**、输出与修复前逐字节一致、一个键都不多；被弃候选的中间告警与
+    触顶记录不进交付结果（按候选隔离）。公开签名与旧版完全一致。
+    """
+    warnings = [] if warnings is None else warnings
+    cap_list = cap_hits_out if isinstance(cap_hits_out, list) else None
+    warn_start = len(warnings)
+    cap_start = len(cap_list) if cap_list is not None else 0
+    kwargs = dict(dom_w=dom_w, ov_w=ov_w, target=target, rf=rf, extract=extract,
+                  total_assets=total_assets, universe=universe,
+                  max_sleeve_iter=max_sleeve_iter, sleeve_tol=sleeve_tol,
+                  stage1_starts=stage1_starts, stage2_starts=stage2_starts,
+                  damping=damping, hooks=hooks)
+    solved = _solve_fixpoint_once(assets, corr_pairs, warnings=warnings, log=log,
+                                  sleeve_start=sleeve_start, cap_hits_out=cap_hits_out,
+                                  **kwargs)
+    if solved is None or not _restart_triggered(solved):
+        return solved
+
+    seeds = restart_seed_params(rf, dict(universe.pool_specs or {}), SLEEVE_RESTART_LAMBDAS)
+    if not seeds:
+        return solved
+
+    best, best_score = solved, _restart_score(solved, target)
+    best_eligible = _restart_eligible(solved)
+    best_warn = list(warnings[warn_start:])
+    best_caps = list(cap_list[cap_start:]) if cap_list is not None else []
+    chosen = "base"
+    audits = [{"seed": "base", "label": "原路径（目标播种）", "feasible": True,
+               "picked": True, "eligible": bool(best_eligible),
+               "delivered_ret": round(float((solved.get("final") or {}).get("ret") or 0.0), 6),
+               "delivered_vol": round(float((solved.get("final") or {}).get("vol") or 0.0), 6),
+               "delivered_sharpe": round(float((solved.get("final") or {}).get("sharpe") or 0.0), 6),
+               "model_gap": round(_restart_model_gap(solved), 6),
+               "iterations": solved.get("sleeve_iterations"),
+               "converged": bool(solved.get("sleeve_converged"))}]
+    for label, seed in seeds:
+        # 触顶记录按候选隔离：候选调用期间的新增记录先追加、调用后整段摘出并清除；
+        # 无论 hooks 是否愿意接收 cap 列表（生产薄壳直接写全局 CAP_HITS），只要它写的是
+        # 调用方传进来的同一个 list，这里都能正确切片（2026-10-17 独立核验抓出的接线缺陷）。
+        cap_from = len(cap_list) if cap_list is not None else 0
+        cand_warn = []
+        cand = _solve_fixpoint_once(
+            assets, corr_pairs, warnings=cand_warn, log=None, sleeve_start=seed,
+            cap_hits_out=cap_list if cap_list is not None else None, **kwargs)
+        cand_caps = list(cap_list[cap_from:]) if cap_list is not None else []
+        if cap_list is not None:
+            del cap_list[cap_from:]
+        if cand is None:
+            audits.append({"seed": label, "feasible": False, "picked": False,
+                           "eligible": False})
+            continue
+        score = _restart_score(cand, target)
+        eligible = _restart_eligible(cand)
+        # 硬门：只有合格候选才能替换基路径；合格候选之间再按 score 取优。
+        # 基路径本身**不合格**时不能无条件接受候选：候选还必须有正面证据（交付收益真正达标），
+        # 否则「基路径不可交付 + 候选未达标」只是换一种坏结果（2026-10-17 二次核验边角）。
+        if eligible and best_eligible:
+            picked = score < best_score
+        elif eligible:
+            picked = (float((cand.get("final") or {}).get("ret") or 0.0)
+                      >= float(target) - TARGET_REACH_EPS)
+        else:
+            picked = False
+        audits.append({
+            "seed": label, "feasible": True, "picked": bool(picked),
+            "eligible": bool(eligible),
+            "delivered_ret": round(float((cand.get("final") or {}).get("ret") or 0.0), 6),
+            "delivered_vol": round(float((cand.get("final") or {}).get("vol") or 0.0), 6),
+            "delivered_sharpe": round(float((cand.get("final") or {}).get("sharpe") or 0.0), 6),
+            "model_gap": round(_restart_model_gap(cand), 6),
+            "iterations": cand.get("sleeve_iterations"),
+            "converged": bool(cand.get("sleeve_converged")),
+        })
+        if picked:
+            best, best_score, best_eligible = cand, score, True
+            chosen = label
+            best_warn, best_caps = cand_warn, cand_caps
+
+    if chosen != "base":
+        # 交付改成候选：把基路径写进调用方列表的增量整段替换成被选中候选的增量
+        # （调用方传入的既有告警/既有触顶记录保持不动，语义与旧版一致）。
+        del warnings[warn_start:]
+        warnings.extend(best_warn)
+        if cap_list is not None:
+            del cap_list[cap_start:]
+            cap_list.extend(best_caps)
+        best["warnings"] = warnings
+        best["warning_items"] = warning_items(warnings)
+        if log is not None:
+            log("sleeve_restart",
+                f"袖内固定点存在多个自洽解：已按交付夏普择优（选中 {chosen}，"
+                f"共 {len(seeds) + 1} 个候选；审计见 sleeve_restarts）")
+
+    for item in audits:
+        item["picked"] = bool(item.get("seed") == chosen)
+    audits[0]["picked"] = chosen == "base"
+    best["sleeve_restarts"] = {"triggered": True, "chosen": chosen,
+                               "candidates": audits}
+    return best

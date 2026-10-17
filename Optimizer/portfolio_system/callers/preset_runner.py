@@ -665,6 +665,15 @@ def build_output_payload(*, solved, keys, stage1_weights, stage1_stats, extract,
         "warnings": warnings,
     }
 
+    # 加法式诊断（2026-10-17）：只在真的发生时出现，既有键名/键序不变。
+    #   sleeve_restarts：多初值重启择优审计（chosen + 每候选摘要）
+    #   corr_missing   ：模型里按 0 相关处理的缺失相关对（现金类资产确实近似零相关）
+    #   cov_psd        ：PSD 修复统计（仅当确有改写或原本非 PSD 时出现）
+    for _extra_key in ("sleeve_restarts", "corr_missing", "cov_psd"):
+        _extra_val = solved.get(_extra_key)
+        if _extra_val is not None:
+            output[_extra_key] = _extra_val
+
     if cap_hits:
         warnings.append(cap_hit_warning(cap_hits))
 

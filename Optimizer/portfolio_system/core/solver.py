@@ -107,8 +107,13 @@ def solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_ta
 
 def max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
                         n_starts=80, seed=11):
-    """Find the maximum achievable portfolio return under pool constraints."""
+    """Find the maximum achievable portfolio return under pool constraints.
+
+    2026-10-17（P1）：它决定「目标不可行」时的回退目标，因此**必须**校验候选解：
+    满仓 / 境内池权重 / bounds 不合格的迭代点一律丢弃（旧版只信 res.success）。
+    """
     bounds = list(zip(lower, upper))
+    upper_arr = upper_bounds_array(bounds)
     cons = _pool_constraints(dom_idx, dom_w)
     rng = np.random.default_rng(seed)
     best = -1.0
@@ -125,8 +130,16 @@ def max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
                 constraints=cons,
                 options={"maxiter": 2000, "ftol": 1e-14},
             )
-            if res.success:
-                best = max(best, float(mu @ res.x))
+            if not res.success:
+                continue
+            w = res.x
+            if abs(w.sum() - 1.0) > CONSTRAINT_EPS:
+                continue
+            if abs(w[dom_idx].sum() - dom_w) > CONSTRAINT_EPS:
+                continue
+            if not _respects_bounds(w, upper_arr):
+                continue
+            best = max(best, float(mu @ w))
         except Exception:
             continue
     return best
