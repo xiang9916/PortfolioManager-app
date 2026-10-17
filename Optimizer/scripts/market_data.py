@@ -30,6 +30,15 @@ ctx.verify_mode = ssl.CERT_NONE
 
 _MIN_SERIES = 30
 
+# 东财 pingzhongdata 的 `x` 毫秒时间戳按**北京时间**记账（当日 00:00），
+# 取日必须用 UTC+8；按 UTC 取会把境内基金日期整体提前一天。
+_CN_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _eastmoney_date(ts_ms):
+    """东财毫秒时间戳 → 北京时间日期（纯函数：不联网、不依赖本机时区）。"""
+    return datetime.datetime.fromtimestamp(ts_ms / 1000, _CN_TZ).date()
+
 
 def yahoo_history(ticker, years=None, adjusted=False):
     """日线收盘序列 [(date, close)]。
@@ -92,7 +101,7 @@ def eastmoney_nav(code, years=None):
             continue
         if ts is None or val is None:
             continue
-        d = datetime.datetime.fromtimestamp(ts / 1000, datetime.timezone.utc).date()
+        d = _eastmoney_date(ts)
         rows.append((d, float(val)))
     rows.sort()
     seen = set()
