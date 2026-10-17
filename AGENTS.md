@@ -369,7 +369,13 @@ pm-cli (headless CLI) 复用 PortfolioCore
   等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 19 文件 / 110 用例）**。
   ⚠️ 包的位置**必须**在 `Optimizer/scripts/` 下：该目录是打包（`scripts/build_app.sh:75`）与 Swift 三处资源路径
   （`OptimizationService`/`AppStore`/`pm-cli`）的外部契约；上提到 `Optimizer/portfolio_system/` 是 P4，
-  必须与 `build_app.sh` + 三处 Swift 路径同批改。P2–P4 未做：搬纯数学、消全局、入口变薄壳、包上提 ——
+  必须与 `build_app.sh` + 三处 Swift 路径同批改。
+  **P2 已落地（2026-10-17）**：`optimize_common.py` 的纯函数与 `params.higham_psd` 已搬进 `core/`（`linalg`/`solver`/`constraints`），
+  容差常量搬进 `core/constants.py` 并由旧位置**再导出**（旧名继续可用、无第二处字面量）；`core`/`callers` 已无模块级全局读取。
+  ⚠️ **已知残留（P3 必须消）**：`core` 里还有两处**延迟转发到上层** —— `linalg.build_cov` → `params.build_broad_cov`、
+  `constraints` 的 active 上限表 → `optimize_portfolio`；后者在**调用时**会把 `fund_pipeline`/`test_tickers` 拉进 `sys.modules`，
+  而 `test_core_purity.py` 只扫 core 自身的 import，**看不见传递依赖**（当前只有 import 期两级证据）。
+  P3/P4 未做：编排搬进 callers、消除上述两处延迟转发、入口变薄壳、包上提 ——
   详见 `docs/adr/0003-optimizer-modularization.md`。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）

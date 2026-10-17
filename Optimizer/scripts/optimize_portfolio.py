@@ -347,11 +347,11 @@ def select_domestic_funds(stage1_weights, assets, hsbc_pool, total_assets):
 
 # 袖内收益下限的绝对容差（P1）：SLSQP 末位噪声 + 离散选标。
 # ── 容差的唯一来源（2026-10-17 收口）────────────────────────────────────────────
-DELIVERY_EPS = 1e-4        # **交付保证的唯一语义 ε**：交付收益 ≥ 目标 − ε（4 个决策点引用）
-SLEEVE_ROOM_EPS = 1e-4     # 袖"尚未达到可达上限"的**余量筛选**阈值 —— 语义与交付保证无关
-CHECK_SUM_EPS = 1e-4       # 数值守恒/求和自检容差（权重合计、内部权重合计），也与交付保证无关
-SLEEVE_FLOOR_EPS = DELIVERY_EPS   # 兼容旧名（文档/既有测试引用）；语义等同 DELIVERY_EPS
-_SOLVER_EPS = 1e-7               # 纯数值松弛（SLSQP 末位噪声），不参与"需求 − ε"的保证链
+# P2（2026-10-17）：容差常量的唯一来源已搬进 portfolio_system/core/constants.py，
+# 这里只做再导出，保持既有 import 路径与名字不变（不许再出现字面量）。
+from portfolio_system.core.constants import (  # noqa: E402
+    CHECK_SUM_EPS, DELIVERY_EPS, SLEEVE_FLOOR_EPS, SLEEVE_ROOM_EPS)
+from portfolio_system.core.constants import SOLVER_EPS as _SOLVER_EPS  # noqa: E402
 
 
 def _pool_cap_norm(internal_pool, cap_map, total_w):

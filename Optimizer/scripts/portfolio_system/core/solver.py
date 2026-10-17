@@ -1,29 +1,136 @@
-"""求解内核壳：**委托** optimize_common（ADR 0003 §7 P0）。"""
+"""求解内核：实现（P2 从 optimize_common 等价搬入）。
+
+只有 4 处约束校验容差由裸字面量换成同值常量 CONSTRAINT_EPS（任务 4 常量单源），
+其余逐字保留 —— 多起点 + bounds 校验 + 池约束行为与搬迁前完全一致。
+"""
 
 from __future__ import annotations
 
-from typing import Any, List, Mapping, Sequence, Tuple
+from typing import Any, List
+
+import numpy as np
+from scipy.optimize import minimize
 
 from . import errors
+from .constants import CONSTRAINT_EPS
+from .constraints import _pool_constraints, _respects_bounds, feasible_start, upper_bounds_array
 
 
-def _oc():
-    import optimize_common as OC
-    return OC
+def solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_target,
+                  n_starts=120, seed=7, rf=0.025):
+    """Minimize portfolio variance subject to full-investment, pool, and return constraints.
+
+    Returns (w, ret, vol, sharpe) or None if no feasible solution is found.
+    """
+    bounds = list(zip(lower, upper))
+    upper_arr = upper_bounds_array(bounds)
+    cons = _pool_constraints(dom_idx, dom_w) + [
+        {"type": "ineq", "fun": lambda w: mu @ w - ret_target},
+    ]
+    rng = np.random.default_rng(seed)
+    best = None
+    for _ in range(n_starts):
+        start = feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng)
+        if start is None:
+            continue
+        res = minimize(
+            lambda w: float(np.sqrt(w @ cov @ w)),
+            start,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=cons,
+            options={"maxiter": 2500, "ftol": 1e-14},
+        )
+        if not res.success:
+            continue
+        w = res.x
+        if abs(w[dom_idx].sum() - dom_w) > CONSTRAINT_EPS:
+            continue
+        if not _respects_bounds(w, upper_arr):
+            continue
+        if mu @ w < ret_target - CONSTRAINT_EPS:
+            continue
+        vol = float(np.sqrt(w @ cov @ w))
+        # 最优候选 = 方差最小者（best[2]）；此前误写 best[3]（夏普），见模块 docstring。
+        if best is None or vol < best[2]:
+            ret = float(mu @ w)
+            sharpe = (ret - rf) / vol if vol > 0 else 0.0
+            best = (w, ret, vol, sharpe)
+    return best
 
 
-def solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_target, **kw):
-    return _oc().solve_min_var(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
-                               ret_target, **kw)
+def solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_target,
+                     n_starts=160, seed=13, rf=0.025):
+    """最大化夏普比率 s.t. 满仓 / 池权重 / 收益下限（2026-10-13 起两阶段统一用这个目标）。
+
+    夏普是**比值**目标（拟凹而非凸），所以必须多起点搜索，并且**必须显式校验 bounds** ——
+    SLSQP 未收敛时返回的迭代点可能越界（实测过单标的超过上限的情况）。
+
+    返回 (w, ret, vol, sharpe) 或 None。
+    """
+    bounds = list(zip(lower, upper))
+    upper_arr = upper_bounds_array(bounds)
+    cons = _pool_constraints(dom_idx, dom_w) + [
+        {"type": "ineq", "fun": lambda w: mu @ w - ret_target},
+    ]
+
+    def neg_sharpe(w):
+        vol = float(np.sqrt(w @ cov @ w))
+        if vol <= 0:
+            return 1e6
+        return -float((mu @ w - rf) / vol)
+
+    rng = np.random.default_rng(seed)
+    best = None
+    for _ in range(n_starts):
+        start = feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng)
+        if start is None:
+            continue
+        res = minimize(neg_sharpe, start, method="SLSQP", bounds=bounds, constraints=cons,
+                       options={"maxiter": 2500, "ftol": 1e-12})
+        w = res.x
+        if abs(w.sum() - 1) > CONSTRAINT_EPS or abs(w[dom_idx].sum() - dom_w) > CONSTRAINT_EPS:
+            continue
+        if not _respects_bounds(w, upper_arr):
+            continue
+        if mu @ w < ret_target - CONSTRAINT_EPS:
+            continue
+        vol = float(np.sqrt(w @ cov @ w))
+        if vol <= 0:
+            continue
+        ret = float(mu @ w)
+        sharpe = (ret - rf) / vol
+        if best is None or sharpe > best[3]:
+            best = (w, ret, vol, sharpe)
+    return best
 
 
-def solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, ret_target, **kw):
-    return _oc().solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
-                                  ret_target, **kw)
+def max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w,
+                        n_starts=80, seed=11):
+    """Find the maximum achievable portfolio return under pool constraints."""
+    bounds = list(zip(lower, upper))
+    cons = _pool_constraints(dom_idx, dom_w)
+    rng = np.random.default_rng(seed)
+    best = -1.0
+    for _ in range(n_starts):
+        start = feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng)
+        if start is None:
+            continue
+        try:
+            res = minimize(
+                lambda w: -mu @ w,
+                start,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=cons,
+                options={"maxiter": 2000, "ftol": 1e-14},
+            )
+            if res.success:
+                best = max(best, float(mu @ res.x))
+        except Exception:
+            continue
+    return best
 
-
-def max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w):
-    return _oc().max_feasible_return(mu, lower, upper, dom_idx, ov_idx, dom_w, ov_w)
 
 
 def solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf,
@@ -32,7 +139,6 @@ def solve_stage1(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target, rf
 
     返回 (解, 生效目标)；三级都失败时返回 (None, target)，由调用方决定整体失败。
     """
-    OC = _oc()
     solved = solve_max_sharpe(mu, cov, lower, upper, dom_idx, ov_idx, dom_w, ov_w, target,
                               n_starts=n_starts, rf=rf)
     if solved is None:

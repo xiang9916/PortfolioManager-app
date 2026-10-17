@@ -573,25 +573,9 @@ BROAD_CORR = {
 
 
 def higham_psd(matrix, max_iter=200):
-    """Project a symmetric matrix to the nearest PSD correlation matrix."""
-    a = (matrix + matrix.T) / 2.0
-    x = a.copy()
-    y = a.copy()
-    for _ in range(max_iter):
-        r = x - y
-        vals, vecs = np.linalg.eigh(x)
-        vals = np.clip(vals, 0.0, None)
-        xn = vecs @ np.diag(vals) @ vecs.T
-        y = xn + r
-        x = y.copy()
-    x = (x + x.T) / 2.0
-    vals, vecs = np.linalg.eigh(x)
-    vals = np.clip(vals, 0.0, None)
-    x = vecs @ np.diag(vals) @ vecs.T
-    d = np.sqrt(np.diag(x))
-    corr = x / np.outer(d, d)
-    return (corr + corr.T) / 2.0
-
+    """Higham 最近 PSD 投影（P2：实现已搬进 portfolio_system.core.linalg，这里只再导出）。"""
+    from portfolio_system.core.linalg import higham_psd as _impl
+    return _impl(matrix, max_iter=max_iter)
 
 def us_core_params(internal_weights):
     """Aggregate US core equity mu/vol from current internal weights."""
