@@ -356,6 +356,18 @@ pm-cli (headless CLI) 复用 PortfolioCore
   把个股 σ 算成 114%；规则是"窗口内够长就用真实标的，代理只在真实标的铺不满窗口时顶上"（`_pick_series`）。
   ② `argparse` 的 help 走 %-格式化，中文说明里的 `%` 必须写成 `%%`。
 
+- **优化器 Python 侧模块化重构进行中（ADR 0003，2026-10-17）**：目标是「纯计算内核 + 三种调用器 + services + models」。
+  P0/P1 已落地，形态是**加法式**包 `Optimizer/scripts/portfolio_system/`（`models`/`core`/`callers`/`services`/`cli`），
+  **既有脚本一字未改、CLI 与 JSON 契约不变**。三条铁律且都有机械校验：
+  ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
+  ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
+  ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 19 文件 / 110 用例）**。
+  ⚠️ 包的位置**必须**在 `Optimizer/scripts/` 下：该目录是打包（`scripts/build_app.sh:75`）与 Swift 三处资源路径
+  （`OptimizationService`/`AppStore`/`pm-cli`）的外部契约；上提到 `Optimizer/portfolio_system/` 是 P4，
+  必须与 `build_app.sh` + 三处 Swift 路径同批改。P2–P4 未做：搬纯数学、消全局、入口变薄壳、包上提 ——
+  详见 `docs/adr/0003-optimizer-modularization.md`。
+
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。
 - **X 轴是 String 类别值**：类别数量跟随数据，不会因为视觉上不连续就自动排序友好——**先保证传入数组已按时间升序**（`2023 Q4` 混到末尾就是乱序数据没排）。
