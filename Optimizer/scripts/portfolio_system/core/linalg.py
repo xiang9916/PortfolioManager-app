@@ -72,10 +72,22 @@ def higham_psd(matrix, max_iter=200):
 
 
 
+def build_broad_cov(assets, corr_pairs):
+    """Build covariance matrix for broad asset keys."""
+    keys = [a["key"] for a in assets]
+    vols = np.array([a["vol"] for a in assets])
+    corr = np.eye(len(keys))
+    for (i, j), v in corr_pairs.items():
+        if i in keys and j in keys:
+            ii, jj = keys.index(i), keys.index(j)
+            corr[ii, jj] = corr[jj, ii] = v
+    corr = higham_psd(corr)
+    return np.outer(vols, vols) * corr
+
+
 def build_cov(rows, corr_pairs):
     """协方差：延迟转发 params.build_broad_cov（P2 残留：该函数不在本任务搬迁清单）。
 
     本函数只是转发，避免 core 与 params 两处各写一份实现；P3/P4 搬走后删除。
     """
-    from params import build_broad_cov as _impl
-    return _impl(list(rows), dict(corr_pairs))
+    return build_broad_cov(list(rows), dict(corr_pairs))

@@ -95,6 +95,14 @@ Python 又会自动把「脚本所在目录」放进 `sys.path`，连路径引�
 | R6 | 包内不得出现真实持仓信息（标的/数量/成本/金额/组合构成）；验证记录只进 `tmp/`（gitignore） | `scripts/privacy_check.sh` + 人工 |
 | R7 | 新旧两条路径对同一输入必须给出**逐字段相同**的结果 | `Optimizer/tests/test_refactor_equivalence.py` |
 
+**R1 的机械校验是两层，缺一不可**（2026-10-17 被独立核验抓出的守卫盲区，实测教训）：
+① **AST 静态层**（`test_core_purity.py`）：只覆盖 `core/**`/`models/**` **自身**的 import；
+② **运行时调用路径层**（`test_runtime_deps_guard.py`）：在子进程里**真的调用** core 的公开入口，再断言 `sys.modules` 不含
+   `urllib/requests/socket/ssl/subprocess/sqlite3/fund_pipeline/market_data/test_tickers/optimize_portfolio`。
+为什么必须两层：`core/constraints` 曾把 active 上限表的 import **放进函数体**（调用期延迟 import）—— 静态层完全看不见，
+而它一旦被调用就会把 `optimize_portfolio`/`fund_pipeline` 拉进 `sys.modules`，等于内核仍然连着网络与子进程。
+**两层都要能证伪**（各自都有「注入违规 → 必须红」的自检用例），否则守卫只是装饰。
+
 ## 4. 接口规格（骨架契约）
 
 ### 4.1 DTO（`models/data_types.py`，全部 `@dataclass(frozen=True)`）
@@ -198,7 +206,7 @@ OptimizerError
 | **P0** | 落包骨架：`models` / `core` / `callers` / `services` / `cli`；接口与 DTO 定稿；`core` 内以**委托**方式调用既有 `solve_min_var`/`solve_max_sharpe`；脚本入口保持原样不动 | 17 个既有测试文件全绿；新增 R1/R3 静态检查通过；`grep` 证明未改既有脚本行为 |
 | **P1** | 等价性门：`test_refactor_equivalence.py` —— 同一受控桩输入，旧路径（`solve_portfolio`）与新路径（`PresetRunner`+`LocalConvexOptimizer`）**逐字段比对**；并证明该门**能失败**（人为扰动一次，必须红） | 等价测试绿 + 扰动实验留证（`tmp/`） |
 | **P2** | 把纯数学从 `optimize_common.py` / `params.py`（`higham_psd`）搬进 `core/`，`optimize_common` 变薄再导出壳；消除 `TARGET_RETURN`/`RF` 等全局，改为 `GoalSpec` 显式传参 | 每搬一个函数跑一次等价测试；全局名 grep 归零 |
-| **P3** | 把编排从 `optimize_portfolio.py` 搬进 `callers/` + `services/`；`sensitivity_analysis.py` 不再 import `optimize_portfolio`；脚本入口变薄壳 | 三个调用器各自的单测（不联网、用桩）独立通过；`sensitivity_analysis` 的 import 图不再指向调用器 |
+| **P3** | 拆两段。**P3-a（已落地 2026-10-17）**：消 core 的两处延迟转发（`build_broad_cov` 进 `core/linalg`；active 上限表改显式入参、`apply_active_caps` 返回触顶记录且零全局写）、告警载体 `core/warnings.py`、常量进 `core/constants.py`、补运行时依赖守卫。**P3-b（未做）**：编排搬进 `callers/`+`services/`、`sensitivity_analysis.py` 解耦（第 44 行仍是模块级 import）、`core/sleeves.py` 的调用期委托、常量表外残余字面量 | P3-a 已过（等价门 + 20 文件/115 用例 + 四档 CLI warnings 与祖先逐项一致，见 `tmp/` 核验报告）；P3-b 的门仍是：三个调用器各自不联网/用桩独立跑，且 `sensitivity_analysis` 的 import 图与**调用期 `sys.modules`** 都不指向 `optimize_portfolio` |
 | **P4** | 包上提 + 打包路径切换（`build_app.sh`、三处 Swift 资源路径、`PM_OPT_SCRIPTS` 语义），删除薄壳 | DMG 重新打包 + 解压回验 + 一次真实结果页/敏感性端到端 |
 
 **不变式（贯穿全部阶段）**：CLI 契约、JSON 键名、告警 code、既有用例数只增不减；

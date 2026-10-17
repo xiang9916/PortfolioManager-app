@@ -20,6 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import math
 
 import numpy as np
+
+from portfolio_system.core.constants import (  # noqa: E402
+    SCAN_LOOP_EPS as _SCAN_LOOP_EPS,
+    SCAN_TARGET_MARGIN_EPS as _SCAN_MARGIN)
 try:
     from scipy import integrate, stats
 except ImportError:
@@ -218,7 +222,7 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
     # Generate targets: 5%, 5.5%, 6%, ..., up to floor(max_ret)
     targets = []
     t = step_min
-    while t <= upper_bound + 1e-9:
+    while t <= upper_bound + _SCAN_LOOP_EPS:
         targets.append(round(t, 4))
         t += 0.005
 
@@ -288,7 +292,7 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         _add_point(t)
         t += 0.005
     if max_ret_final > 0 and (not points or abs(points[-1]["target_return"] - max_ret_final) > 0.002):
-        _add_point(max_ret_final - 1e-4)
+        _add_point(max_ret_final - _SCAN_MARGIN)
 
     return {
         "max_feasible_return": round(max_ret_final, 6),

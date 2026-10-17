@@ -596,16 +596,9 @@ def us_core_params(internal_weights):
 
 
 def build_broad_cov(assets, corr_pairs):
-    """Build covariance matrix for broad asset keys."""
-    keys = [a["key"] for a in assets]
-    vols = np.array([a["vol"] for a in assets])
-    corr = np.eye(len(keys))
-    for (i, j), v in corr_pairs.items():
-        if i in keys and j in keys:
-            ii, jj = keys.index(i), keys.index(j)
-            corr[ii, jj] = corr[jj, ii] = v
-    corr = higham_psd(corr)
-    return np.outer(vols, vols) * corr
+    """Broad-asset covariance（P3：实现已搬进 portfolio_system.core.linalg，这里只再导出）。"""
+    from portfolio_system.core.linalg import build_broad_cov as _impl
+    return _impl(assets, corr_pairs)
 
 
 # 基金搜索易（HSBC China 内地代销开放式基金）的简单类别映射。

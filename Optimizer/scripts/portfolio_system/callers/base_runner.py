@@ -32,6 +32,9 @@ class RunRequest:
     stage1_starts: int = 160
     stage2_starts: int = 80
     targets: Tuple[float, ...] = ()
+    #: 内部池清单（params 的 US/JP/GC_INTERNAL 的 key 全集）→ 进 ProblemSpec.extract，
+    #: 供 core 的 active 上限表覆盖内部标的（core 不得 import params）。
+    internal_pool_keys: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,9 @@ class RunOutcome:
 def assemble_problem(request: RunRequest, target_return: Optional[float] = None) -> ProblemSpec:
     """共享装配：RunRequest → ProblemSpec（三个调用器都只走这里）。"""
     target = float(request.target_return if target_return is None else target_return)
+    extract = dict(request.extract)
+    if request.internal_pool_keys:
+        extract["internal_pool_keys"] = tuple(request.internal_pool_keys)
     return ProblemSpec(
         assets=tuple(request.assets),
         goal=GoalSpec(target_return=target, rf=float(request.rf),
@@ -58,7 +64,7 @@ def assemble_problem(request: RunRequest, target_return: Optional[float] = None)
         corr_pairs=dict(request.corr_pairs),
         pools=PoolSpec(float(request.domestic_weight), float(request.overseas_weight)),
         total_assets=float(request.total_assets),
-        extract=dict(request.extract),
+        extract=extract,
         stage1_starts=int(request.stage1_starts),
         stage2_starts=int(request.stage2_starts),
     )
@@ -71,7 +77,8 @@ def problem_from_legacy_rows(assets: Sequence[Mapping[str, Any]],
                              extract: Optional[Mapping[str, Any]] = None,
                              active_cap: float = 0.10, max_sleeve_iter: int = 10,
                              damping: float = 0.5, stage1_starts: int = 160,
-                             stage2_starts: int = 80) -> ProblemSpec:
+                             stage2_starts: int = 80,
+                             internal_pool_keys: Sequence[str] = ()) -> ProblemSpec:
     """既有 asset 行 → ProblemSpec（等价性门用：旧输入 → 新 DTO，一处映射）。"""
     specs = []
     for row in assets:
@@ -87,6 +94,9 @@ def problem_from_legacy_rows(assets: Sequence[Mapping[str, Any]],
                    "name": str(row.get("name", row["key"])),
                    "test_class": str(row.get("test_class", "broad"))},
         ))
+    extract_map = dict(extract or {})
+    if internal_pool_keys:
+        extract_map["internal_pool_keys"] = tuple(internal_pool_keys)
     return ProblemSpec(
         assets=tuple(specs),
         goal=GoalSpec(target_return=float(target), rf=float(rf), active_cap=float(active_cap),
@@ -94,7 +104,7 @@ def problem_from_legacy_rows(assets: Sequence[Mapping[str, Any]],
         corr_pairs=dict(corr_pairs),
         pools=PoolSpec(float(dom_w), float(ov_w)),
         total_assets=float(total_assets),
-        extract=dict(extract or {}),
+        extract=extract_map,
         stage1_starts=int(stage1_starts),
         stage2_starts=int(stage2_starts),
     )

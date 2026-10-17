@@ -53,6 +53,14 @@ from fund_pipeline import (
 from test_tickers import parse_test_tickers, resolve_test_assets
 import asset_classes as AC
 
+# D2：active 上限表与告警载体已搬进 core（portfolio_system.core.constraints / core.warnings）。
+# 本模块只保留「薄壳 + 模块级 CAP_HITS 汇总」，原有公开名与调用签名一律不变。
+from portfolio_system.core.constraints import (
+    active_cap_map as _core_active_cap_map,
+    apply_active_caps as _core_apply_active_caps,
+)
+from portfolio_system.core.warnings import CodedWarning as _Warn   # noqa: F401
+
 
 
 # 「个股/主动」类单标的组合权重上限（asset_classes.ACTIVE_CAP = 10%）触发记录，
@@ -72,25 +80,19 @@ def _note_cap_hit(key, weight, cap):
     CAP_HITS.append((key, float(weight), float(cap)))
 
 
+#: 内部池清单（params 的 US/JP/GC_INTERNAL 的 key 全集）—— 上限表**必须**覆盖内部标的。
+#: D2 起 core 侧 active_cap_map 不再 import params，改由本模块（调用方）显式传入。
+_INTERNAL_POOL_KEYS = tuple(US_INTERNAL) + tuple(JP_INTERNAL) + tuple(GC_INTERNAL)
+
+
 def _active_cap_map(assets):
-    """key → 组合权重上限。仅对 class == active 的标的生效。
+    """key → 组合权重上限。仅对 class == active 的标的生效（D2 起为 core 的薄壳）。
 
     必须覆盖**所有**标的：大类槽位（如 O_US_ENERGY=XOM）、美股/日本/香港/大中华内部标的
     （AAPL、NVDA…）以及 test_class=active 的测试标的 —— 漏掉内部标的会让上限形同虚设
     （2026-10-13 实测：曾出现单标的被拿到超过 10% 上限、却没人拦截的情况）。
     """
-    caps = {}
-
-    def consider(key, cls=None):
-        if (cls or AC.asset_class(key)) == "active":
-            caps[key] = AC.ACTIVE_CAP
-
-    for a in assets or []:
-        consider(a.get("key", ""), a.get("test_class"))
-    for internal in (US_INTERNAL, JP_INTERNAL, GC_INTERNAL):
-        for key in internal:
-            consider(key)
-    return caps
+    return _core_active_cap_map(assets, _INTERNAL_POOL_KEYS)
 
 
 def apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings):
@@ -98,30 +100,14 @@ def apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings):
 
     可行性条件：每个池的 upper 之和必须 ≥ 该池的目标权重，否则优化必然不可行
     （典型情形：境内池只有一只可用标的，却要求它 ≤ 10%，而境内目标权重 30%）。
+
+    实现（含文案逐字与告警 code）已搬进 core/constraints；本函数为薄壳。
+    ⚠️ **不得**把 core 返回的「上界被夹紧」记录记成触顶：夹紧只说明某个 active 腿的上界
+    被压到 cap（无论它最终拿不拿得到权重），而触顶 = **交付/生效权重 ≥ cap − ε**。
+    真触顶由调用方在拿到权重后判定（`_solve_once` / 阶段二内部各自 `_note_cap_hit`）；
+    把夹紧当触顶会让结果页点名一只**权重为 0**的标的（2026-10-17 核验实测的缺陷）。
     """
-    capped = []
-    for i, a in enumerate(assets):
-        cap = cap_map.get(a.get("key"))
-        if cap is not None and upper[i] > cap:
-            upper[i] = cap
-            capped.append(a["key"])
-    if not capped:
-        return
-    pool_idx = [i for i, a in enumerate(assets) if a.get("pool") == "domestic"]
-    if pool_idx:
-        capsum = float(sum(upper[i] for i in pool_idx))
-        if capsum < dom_w - 1e-9 and capped:
-            # 只放宽"被上限压住"的境内成员，补足缺口
-            relaxed = [i for i in pool_idx if assets[i].get("key") in cap_map]
-            need = dom_w - capsum
-            if relaxed:
-                add = need / len(relaxed)
-                for i in relaxed:
-                    upper[i] = min(1.0, upper[i] + add)
-                warnings.append(_Warn(
-                    f"active 类单标的上限 {AC.ACTIVE_CAP:.0%} 会与境内池权重 {dom_w:.2%} 冲突"
-                    f"（境内可用标的的合计上界不足），已相应放宽 {len(relaxed)} 个境内标的的上限以保证可行。",
-                    "active_cap.pool_conflict"))
+    _core_apply_active_caps(upper, assets, cap_map, dom_idx, dom_w, warnings)
 
 
 def log_step(step, message, level="info", log_path=None):
@@ -1220,19 +1206,10 @@ WARNING_CODES = {
 }
 
 
-class _Warn(str):
-    """告警字符串：str 子类，额外携带稳定 code。
-
-    JSON 序列化、字符串拼接与相等比较都与普通 str 完全一致 → **不改变任何既有输出字节**；
-    Swift 侧改用加法式的 warning_items[].code 分类（warnings 保持字符串数组不变）。
-    """
-
-    __slots__ = ("code",)
-
-    def __new__(cls, message, code="other"):
-        obj = super().__new__(cls, message)
-        obj.code = code
-        return obj
+# _Warn 位于模块头部的 import：D2 起用 core.warnings.CodedWarning 作为**唯一载体**
+# （str 子类 + .code，构造签名 (message, code="other") 与旧类逐字相同）。
+# JSON 序列化、字符串拼接与相等比较都与普通 str 完全一致 → 既有输出字节不变；
+# Swift 侧改用加法式的 warning_items[].code 分类（warnings 保持字符串数组不变）。
 
 
 def _warning_items(warnings):

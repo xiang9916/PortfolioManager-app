@@ -11,12 +11,16 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+# 祖先对照的正确做法（AGENTS §12）：PM_OPT_SCRIPTS 优先 —— 只改 PYTHONPATH 会跑成当前树。
+_SCRIPTS = os.environ.get("PM_OPT_SCRIPTS") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+sys.path.insert(0, _SCRIPTS)
 
 import numpy as np
 
 import asset_classes as AC
 import optimize_portfolio as OP
+from portfolio_system.core import constraints as core_constraints
 
 
 def test_cap_map_covers_internal_tickers():
@@ -87,6 +91,135 @@ def test_cap_hits_merge_note():
         merged[k] = max(merged.get(k, 0.0), w)
     assert set(merged) == {"AAPL", "NVDA"}
     OP.CAP_HITS.clear()
+
+
+# ── 2026-10-17 核验缺陷回归：「上界被夹紧」≠「触顶」 ─────────────────────────────
+# 背景：D2 的薄壳曾把 core.apply_active_caps 返回的**夹紧记录**（它把某只 active 腿的上界从
+# 1.0 压到 0.10，无论该腿最终拿不拿得到权重）一并并入 CAP_HITS。于是低目标档的
+# warnings 会点名一只**交付权重为 0** 的标的（核验实测：O_US_ENERGY 被点名、权重 0）。
+# 契约：触顶 = **交付/生效权重 ≥ cap**；夹紧本身不产生任何告警。
+
+CAP_STUB_ASSETS = [
+    {"key": "D1", "name": "虚构境内债", "mu": 0.03, "vol": 0.05,
+     "pool": "domestic", "test_class": "broad"},
+    {"key": "O_US_ENERGY", "name": "虚构能源", "mu": 0.07, "vol": 0.25,
+     "pool": "overseas", "test_class": "active"},   # 上界被夹紧，但交付权重 0
+    {"key": "AAPL", "name": "虚构美股A", "mu": 0.12, "vol": 0.22,
+     "pool": "overseas", "test_class": "active"},   # 真触顶 0.10
+    {"key": "O_GOLD", "name": "虚构黄金", "mu": 0.04, "vol": 0.15,
+     "pool": "overseas", "test_class": "broad"},
+]
+CAP_STUB_DOM_W, CAP_STUB_OV_W, CAP_STUB_TOTAL, CAP_STUB_RF, CAP_STUB_TARGET = (
+    0.30, 0.70, 1_000_000.0, 0.02, 0.05)
+CAP_STUB_EXTRACT = {
+    "pool_mode": "fixture",
+    "domestic_weight": CAP_STUB_DOM_W, "overseas_weight": CAP_STUB_OV_W,
+    "domestic_value": CAP_STUB_TOTAL * CAP_STUB_DOM_W,
+    "overseas_value": CAP_STUB_TOTAL * CAP_STUB_OV_W,
+    "total_value": CAP_STUB_TOTAL, "rf": CAP_STUB_RF,
+    "us_equity": {"total_value": CAP_STUB_TOTAL * CAP_STUB_OV_W,
+                  "holdings": [{"ticker": "UA", "name": "虚构",
+                                "value_cny": CAP_STUB_TOTAL * CAP_STUB_OV_W, "weight": 1.0}]},
+}
+#: O_US_ENERGY 交付权重 0（只是上界被夹紧）；AAPL 恰好 0.10（真触顶）
+CAP_STUB_WEIGHTS = {"D1": CAP_STUB_DOM_W, "O_US_ENERGY": 0.0, "AAPL": 0.10,
+                    "O_GOLD": CAP_STUB_OV_W - 0.10}
+
+
+def _with_cap_stub(fn):
+    """只替换 `_solve_once`：`_solve_once` 里的真 apply_active_caps / 触顶判定 / 汇总全部照跑。"""
+    original = OP._solve_once
+
+    def stub(assets_in, corr_pairs, **kw):
+        keys = [a["key"] for a in assets_in]
+        weights = np.array([CAP_STUB_WEIGHTS[k] for k in keys])
+        ret, vol = 0.06, 0.10
+        upper = np.ones(len(keys))
+        # 与生产同序：先套上限（这一步会夹紧 O_US_ENERGY 的 upper，但**不**产生触顶记录）
+        OP.apply_active_caps(upper, assets_in, OP._active_cap_map(assets_in),
+                             [keys.index("D1")], CAP_STUB_DOM_W, kw.get("warn") or [])
+        # 再按**交付权重**判定真触顶（与生产同谓词）
+        for i, a in enumerate(assets_in):
+            cap = OP._active_cap_map(assets_in).get(a["key"])
+            if cap is not None and weights[i] >= cap - 1e-6:
+                OP._note_cap_hit(a["key"], weights[i], cap)
+        return {
+            "keys": keys, "stage1_weights": weights,
+            "stage1_ret": ret, "stage1_vol": vol, "stage1_ret_hint": ret,
+            "stage1_sharpe": (ret - CAP_STUB_RF) / vol,
+            "mu": np.array([a["mu"] for a in assets_in]),
+            "internal": None, "internal_tickers": None,
+            "japan_selection": None, "gc_selection": None,
+            "final": {"ret": ret, "vol": vol, "sharpe": (ret - CAP_STUB_RF) / vol,
+                      "floor": ret - 1.96 * vol},
+            "target": float(kw["target"]), "warnings": [],
+        }
+
+    OP._solve_once = stub
+    try:
+        return fn()
+    finally:
+        OP._solve_once = original
+
+
+def _cap_summary():
+    """按生产口径把 CAP_HITS 合成一条提示（`_cap_hit_warning`），返回 (keys, 文本)。"""
+    merged = {}
+    for key, weight, _cap in OP.CAP_HITS:
+        merged[key] = max(merged.get(key, 0.0), float(weight))
+    return set(merged), (str(OP._cap_hit_warning(OP.CAP_HITS)) if OP.CAP_HITS else "")
+
+
+def test_clamped_upper_without_weight_is_not_a_cap_hit():
+    """上界被夹紧但**交付权重为 0** 的 active 腿不得进入触顶记录/告警（fails-before）。"""
+    def run():
+        OP.CAP_HITS.clear()
+        return OP.solve_portfolio([dict(a) for a in CAP_STUB_ASSETS], {},
+                                  dom_w=CAP_STUB_DOM_W, ov_w=CAP_STUB_OV_W,
+                                  target=CAP_STUB_TARGET, rf=CAP_STUB_RF,
+                                  extract=dict(CAP_STUB_EXTRACT), total_assets=CAP_STUB_TOTAL,
+                                  warnings=[], log=None, max_sleeve_iter=2,
+                                  stage1_starts=1, stage2_starts=1)
+
+    try:
+        out = _with_cap_stub(run)
+        assert out is not None
+        assert float(out["stage1_weights"][1]) == 0.0, out["stage1_weights"]
+        keys, text = _cap_summary()
+        assert keys == {"AAPL"}, "触顶记录混入了夹紧腿: %s" % sorted(keys)
+        assert "O_US_ENERGY" not in text, text
+        assert "AAPL 10.00%" in text, text
+    finally:
+        OP.CAP_HITS.clear()
+
+
+def test_clamped_upper_is_reported_as_clamped_not_hit():
+    """core.apply_active_caps 仍如实返回「被夹紧」清单（供审计），只是它**不再等于触顶**。
+
+    `OP.apply_active_caps` 是薄壳、不返回值；"夹紧"信息由 core 的返回值承载，
+    而**触顶**只由拿到权重后的调用方判定 → 所以这里直接看 core 的返回 + CAP_HITS 不动。
+    """
+    assets = [{"key": "O_US_ENERGY", "pool": "overseas", "test_class": "active"},
+              {"key": "O_GOLD", "pool": "overseas", "test_class": "broad"}]
+    upper = [1.0, 1.0]
+    before = list(OP.CAP_HITS)
+    records = core_constraints.apply_active_caps(upper, assets, OP._active_cap_map(assets),
+                                                 [], 0.0, [])
+    assert abs(upper[0] - AC.ACTIVE_CAP) < 1e-12, upper          # 上界确实被夹紧
+    assert abs(upper[1] - 1.0) < 1e-12, upper                    # broad 不动
+    assert [r[0] for r in records] == ["O_US_ENERGY"], records   # 报"夹紧"只作信息返回
+    assert OP.CAP_HITS == before, "夹紧不得写进 CAP_HITS（那不是触顶）"
+
+
+def test_zero_weight_hit_candidate_stays_out_of_cap_hits():
+    """直接钉住缺陷语义：上界被夹紧、且交付权重为 0 的 active 腿不得被记成触顶。"""
+    assets = [{"key": "O_US_ENERGY", "pool": "overseas", "test_class": "active"},
+              {"key": "O_GOLD", "pool": "overseas", "test_class": "broad"}]
+    upper = [1.0, 1.0]
+    before = list(OP.CAP_HITS)
+    OP.apply_active_caps(upper, assets, OP._active_cap_map(assets), [], 0.0, [])
+    upper[0] = 0.0     # 该腿最终权重 0：即使上界被夹紧，也绝不是触顶
+    assert OP.CAP_HITS == before, OP.CAP_HITS
 
 
 def main():

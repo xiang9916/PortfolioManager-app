@@ -12,3 +12,8 @@ CHECK_SUM_EPS = 1e-4       # 数值守恒/求和自检容差（权重合计等�
 CONSTRAINT_EPS = 1e-4      # 多起点求解器内部的约束校验容差（满仓/池权重/收益下限）
 SOLVER_EPS = 1e-7          # 纯数值松弛（SLSQP 末位噪声）
 SLEEVE_FLOOR_EPS = DELIVERY_EPS   # 兼容旧名；语义等同 DELIVERY_EPS
+
+BOUNDS_TOL = 1e-6               # 多起点解 bounds 校验容差（_respects_bounds 默认值）
+FEASIBILITY_EPS = 1e-9          # feasible_start 的可行性判定容差
+SCAN_TARGET_MARGIN_EPS = 1e-4   # 敏感性扫描点定位：放在最大可行收益略下方，避开不可行边界
+SCAN_LOOP_EPS = 1e-9            # 敏感性扫描目标清单的闭合容差（浮点累加，避免漏掉上界那一点）

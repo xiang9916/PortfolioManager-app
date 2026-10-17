@@ -3,6 +3,8 @@
 单层问题（无袖）**真正走纯求解路径**：直接调 optimize_common 的 solve_max_sharpe/solve_min_var
 并自己算 stats —— 不整段转发 solve_portfolio。
 袖路径 P0 允许委托（见 core/sleeves.py），但入参必须显式收敛成 ProblemSpec。
+D2：active 上限表已搬进 core/constraints（本模块直接调用，不再延迟 import optimize_portfolio）；
+内部池清单由调用方经 `ProblemSpec.extract["internal_pool_keys"]` 显式传入（core 不得 import params）。
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import math
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Mapping, Sequence
 
+from ..models import serialization
 from ..models.data_types import ProblemSpec, SolveResult, Warning
 from . import constraints, errors, linalg, sleeves, solver
 
@@ -67,7 +70,13 @@ class LocalConvexOptimizer(PortfolioOptimizer):
         ov_w = float(problem.pools.overseas_weight)
 
         raw: List[Any] = []
-        constraints.apply_active_caps(upper, problem, constraints.active_cap_map(problem), raw)
+        # active 上限表：内部池清单（params 的 US/JP/GC_INTERNAL）由调用方经 extract 显式传入
+        # —— core 不得 import params（D2）。触顶记录由内核返回、不进内核全局。
+        internal_keys = tuple(problem.extract.get("internal_pool_keys") or ())
+        asset_rows = serialization.legacy_asset_rows(problem)
+        constraints.apply_active_caps(upper, asset_rows,
+                                      constraints.active_cap_map(asset_rows, internal_keys),
+                                      dom_idx, dom_w, raw)
         warnings: List[Warning] = [_to_warning(w) for w in raw]
 
         if not problem.is_single_layer:

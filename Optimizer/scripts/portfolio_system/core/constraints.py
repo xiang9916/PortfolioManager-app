@@ -1,15 +1,23 @@
 """约束装配：上下界 / active 上限表 / 池约束 / 可行性。
 
 P2：bounds 与池约束的实现已从 optimize_common 等价搬入本模块（optimize_common 只再导出）。
-active 上限表仍在既有脚本（P3 搬），这里以延迟 import 方式委托。
+D2：active 上限表（`active_cap_map` / `apply_active_caps`）从 optimize_portfolio **等价搬入**，
+不再延迟 import 上层脚本。核心规则仍只有一份事实来源 = `asset_classes`（纯规则表，允许 import）；
+内部池清单（params 的 US/JP/GC_INTERNAL）与触顶记录的下游处理**一律由调用方显式传入** ——
+本模块不 import params / optimize_portfolio / market_data / fund_pipeline / test_tickers，
+也不写任何模块级全局（触顶记录作为**返回值**交给调用方）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
+import asset_classes as AC
+
+from .constants import BOUNDS_TOL, FEASIBILITY_EPS
+from .warnings import CodedWarning
 from ..models.data_types import ProblemSpec
 
 
@@ -30,10 +38,10 @@ def feasible_start(lower, upper, dom_idx, ov_idx, dom_w, ov_w, rng):
         hi = upper[idx]
         cap = hi - lo
         rem = target - lo.sum()
-        if rem < -1e-9:
+        if rem < -FEASIBILITY_EPS:
             return None
         if cap.sum() <= 0:
-            if abs(rem) > 1e-9:
+            if abs(rem) > FEASIBILITY_EPS:
                 return None
             x[idx] = lo
             continue
@@ -63,7 +71,7 @@ def _pool_constraints(dom_idx, dom_w):
     ]
 
 
-def _respects_bounds(w, upper_arr, tol=1e-6):
+def _respects_bounds(w, upper_arr, tol=BOUNDS_TOL):
     """SLSQP 未收敛时返回的迭代点可能越界（实测过单标的超过上限），必须显式校验。
 
     下界统一按 0 处理（组合权重不为负）；上界来自 bounds 数组（None 已转 inf）。
@@ -88,23 +96,68 @@ def pool_indices(problem: ProblemSpec) -> Tuple[List[int], List[int]]:
     return dom, ov
 
 
-def active_cap_map(problem: ProblemSpec) -> Dict[str, float]:
-    """active 类单标的上限表（延迟委托既有 optimize_portfolio；P3 搬入）。"""
-    import optimize_portfolio as OP
-    return OP._active_cap_map(_serialization().legacy_asset_rows(problem))
+def active_cap_map(assets, internal_pool_keys: Iterable[str] = ()) -> Dict[str, float]:
+    """key → 组合权重上限。仅对 class == active 的标的生效。
+
+    必须覆盖**所有**标的：大类槽位（如 O_US_ENERGY=XOM）、美股/日本/大中华内部标的
+    （AAPL、NVDA…）以及 test_class=active 的测试标的 —— 漏掉内部标的会让上限形同虚设
+    （2026-10-13 实测：曾出现单标的被拿到超过 10% 上限、却没人拦截的情况）。
+
+    `internal_pool_keys`：内部池（params 的 US/JP/GC_INTERNAL）的 key 全集 ——
+    core 不得 import params，因此**由调用方显式传入**（optimize_portfolio 传真实池清单；
+    DTO 路径从 ProblemSpec.extract 读同名键）。只从大类槽位构建会漏掉内部标的。
+    """
+    caps: Dict[str, float] = {}
+
+    def consider(key, cls=None):
+        if (cls or AC.asset_class(key)) == "active":
+            caps[key] = AC.ACTIVE_CAP
+
+    for a in assets or []:
+        consider(a.get("key", ""), a.get("test_class"))
+    for key in internal_pool_keys or ():
+        consider(key)
+    return caps
 
 
-def apply_active_caps(upper, problem: ProblemSpec, cap_map: Mapping[str, float],
-                      warnings_out: List[Any]) -> None:
-    """就地套用 active 上限（延迟委托既有实现；warnings_out 收既有 _Warn 对象）。"""
-    import optimize_portfolio as OP
-    rows = _serialization().legacy_asset_rows(problem)
-    dom_idx, _ov = pool_indices(problem)
-    OP.apply_active_caps(upper, rows, dict(cap_map), dom_idx,
-                         float(problem.pools.domestic_weight), warnings_out)
+def apply_active_caps(upper, assets, cap_map: Mapping[str, float], dom_idx, dom_w,
+                      warnings) -> List[Tuple[str, float, float]]:
+    """把 active 类单标的上限写进 stage-1 上界；与池权重约束冲突时放宽到可行并报警。
+
+    可行性条件：每个池的 upper 之和必须 ≥ 该池的目标权重，否则优化必然不可行
+    （典型情形：境内池只有一只可用标的，却要求它 ≤ 10%，而境内目标权重 30%）。
+
+    **不写任何模块级全局**：触顶记录以 `[(key, weight, cap), …]` 返回，
+    由调用方决定是否并入自己的汇总（optimize_portfolio 据此更新 CAP_HITS）。
+    """
+    capped = []
+    for i, a in enumerate(assets):
+        cap = cap_map.get(a.get("key"))
+        if cap is not None and upper[i] > cap:
+            upper[i] = cap
+            capped.append(a["key"])
+    if not capped:
+        return []
+    pool_idx = [i for i, a in enumerate(assets) if a.get("pool") == "domestic"]
+    if pool_idx:
+        capsum = float(sum(upper[i] for i in pool_idx))
+        if capsum < dom_w - 1e-9 and capped:
+            # 只放宽"被上限压住"的境内成员，补足缺口
+            relaxed = [i for i in pool_idx if assets[i].get("key") in cap_map]
+            need = dom_w - capsum
+            if relaxed:
+                add = need / len(relaxed)
+                for i in relaxed:
+                    upper[i] = min(1.0, upper[i] + add)
+                warnings.append(CodedWarning(
+                    f"active 类单标的上限 {AC.ACTIVE_CAP:.0%} 会与境内池权重 {dom_w:.2%} 冲突"
+                    f"（境内可用标的的合计上界不足），已相应放宽 {len(relaxed)} 个境内标的的上限以保证可行。",
+                    "active_cap.pool_conflict"))
+    return [(k, float(upper[next(i for i, a in enumerate(assets) if a.get("key") == k)]),
+             float(cap_map[k])) for k in capped]
 
 
-def respects_bounds(weights, upper, tol: float = 1e-6) -> bool:
+def respects_bounds(weights, upper, tol: float = BOUNDS_TOL) -> bool:
     """多起点解必须校验 bounds（本模块实现）。"""
     return _respects_bounds(weights, upper, tol=tol)
 

@@ -366,16 +366,21 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 19 文件 / 110 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 20 文件 / 115 用例）**。
   ⚠️ 包的位置**必须**在 `Optimizer/scripts/` 下：该目录是打包（`scripts/build_app.sh:75`）与 Swift 三处资源路径
   （`OptimizationService`/`AppStore`/`pm-cli`）的外部契约；上提到 `Optimizer/portfolio_system/` 是 P4，
   必须与 `build_app.sh` + 三处 Swift 路径同批改。
   **P2 已落地（2026-10-17）**：`optimize_common.py` 的纯函数与 `params.higham_psd` 已搬进 `core/`（`linalg`/`solver`/`constraints`），
   容差常量搬进 `core/constants.py` 并由旧位置**再导出**（旧名继续可用、无第二处字面量）；`core`/`callers` 已无模块级全局读取。
-  ⚠️ **已知残留（P3 必须消）**：`core` 里还有两处**延迟转发到上层** —— `linalg.build_cov` → `params.build_broad_cov`、
-  `constraints` 的 active 上限表 → `optimize_portfolio`；后者在**调用时**会把 `fund_pipeline`/`test_tickers` 拉进 `sys.modules`，
-  而 `test_core_purity.py` 只扫 core 自身的 import，**看不见传递依赖**（当前只有 import 期两级证据）。
-  P3/P4 未做：编排搬进 callers、消除上述两处延迟转发、入口变薄壳、包上提 ——
+  **P3-a 已落地（2026-10-17）**：core 的两处延迟转发已消 —— `build_broad_cov` 搬进 `core/linalg`；active 上限表改**显式入参**
+  （`active_cap_map(assets, internal_pool_keys=())`，内部池清单由调用方传，覆盖 US/JP/GC 内部标的），`apply_active_caps` 改为
+  **返回触顶记录、零模块级全局写**；告警载体统一为 `core/warnings.py` 的 `CodedWarning(str)`（`optimize_portfolio._Warn` 变别名，文本与 code 逐字不变）。
+  ⚠️ **P3-a 的教训（`test_core_purity.py` 的盲区）**：静态 AST 守卫**看不见函数体内的调用期延迟 import** ——
+  `constraints` 曾用它把 `optimize_portfolio`/`fund_pipeline` 拉进 `sys.modules`。已新增 `Optimizer/tests/test_runtime_deps_guard.py`
+  （子进程内**真的调用** core 入口后断言 `sys.modules` 干净，且**可证伪**）。**两层守卫缺一不可**，都写进了 ADR §3。
+  ⚠️ **P3-b（未做）**：`core/sleeves.py:43` 调用期委托 `optimize_portfolio`；`sensitivity_analysis.py:44` 仍是**模块级**
+  `from optimize_portfolio import solve_portfolio`（P3 的门未达成）；常量表外仍有 42 处 `1e-6/1e-9/1e-12`（core 内 3 处）。
+  P4 未做：编排搬进 callers、入口变薄壳、包上提 ——
   详见 `docs/adr/0003-optimizer-modularization.md`。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）

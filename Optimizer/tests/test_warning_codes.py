@@ -12,8 +12,8 @@
 运行：Optimizer/.venv/bin/python3 Optimizer/tests/test_warning_codes.py
 """
 
+import ast
 import os
-import re
 import sys
 
 # 祖先对照的正确做法（2026-10-17 收口）：
@@ -27,10 +27,56 @@ sys.path.insert(0, _SCRIPTS)
 import optimize_portfolio as OP  # noqa: E402
 
 _SRC_PATH = os.path.join(_SCRIPTS, "optimize_portfolio.py")
+#: D2 起部分 code 的发出点上移到 core（active_cap.pool_conflict → core/constraints）；
+#: 「登记 ↔ 发出」是**跨模块**的性质，扫描范围必须覆盖实现所在模块，否则会把
+#: 已经发出的 code 误判成死 code（本文件在 D2 后确实红过一次，原因就是这个）。
+_IMPL_PATHS = (
+    _SRC_PATH,
+    os.path.join(_SCRIPTS, "portfolio_system", "core", "constraints.py"),
+)
 
 
 def _source():
+    """登记表所在文件（optimize_portfolio.py）的源码。"""
     return open(_SRC_PATH, encoding="utf-8").read()
+
+
+def _literal_codes(node):
+    """从一个实参表达式里取出它可能承载的 code 字面量。
+
+    支持两种真实写法：直接字面量（`"active_cap.hit"`）与条件表达式
+    （`"target.budget_exhausted" if budget else "target.infeasible"`）。
+    只取字符串常量，不递归进任意 f-string → 不会把消息文本误当 code。
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.IfExp):
+        return _literal_codes(node.body) + _literal_codes(node.orelse)
+    return []
+
+
+def _emitted_codes():
+    """AST 精确提取「真的被当参数传给告警构造器」的 code。
+
+    不用正则扫文本：登记表里的键、注释、文档字符串都会假命中 —— 本文件在 D2 后
+    先踩过一次「把登记表当发出点」的假绿（删掉 core 的发出块仍全绿）。
+    告警构造器在实现里的名字：_Warn（optimize_portfolio，D2 起 = core CodedWarning 别名）
+    与 CodedWarning（core/constraints 直接用）。
+    """
+    codes = set()
+    for path in _IMPL_PATHS:
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if name in ("_Warn", "CodedWarning"):
+                for arg in node.args[1:]:
+                    codes.update(_literal_codes(arg))
+    return codes
 
 
 def _table_and_rest():
@@ -63,19 +109,19 @@ def test_skip_scenario_flows_into_warning_items():
 
 
 def test_every_registered_code_is_emitted():
-    """登记表里每个 code 都必须真的被发出去（否则就是死 code / 生产恒不出现的态）。"""
-    table_src, rest = _table_and_rest()
-    registered = [c for c in OP.WARNING_CODES if c != "other"]
-    dead = [c for c in registered
-            if not re.search(r"['\"]" + re.escape(c) + r"['\"]", rest)]
+    """登记表里每个 code 都必须真的被发出去（否则就是死 code / 生产恒不出现的态）。
+
+    发出点扫描范围 = optimize_portfolio.py + 发出点上移后的 core 模块（D2）；
+    用 AST 取**构造器实参**，不把登记表键/注释当发出点（否则是假绿）。
+    """
+    emitted = _emitted_codes()
+    dead = sorted(c for c in OP.WARNING_CODES if c != "other" and c not in emitted)
     assert not dead, "已登记但从未发出: %s" % dead
 
 
 def test_every_emitted_code_is_registered():
     """发出的 code 必须都在登记表里（防拼错/漏登）。"""
-    _table_src, rest = _table_and_rest()
-    emitted = set(re.findall(r"['\"]([a-z][a-z0-9_]*\.[a-z0-9_.]+)['\"]", rest))
-    unknown = sorted(c for c in emitted if c not in OP.WARNING_CODES)
+    unknown = sorted(c for c in _emitted_codes() if c not in OP.WARNING_CODES)
     assert not unknown, "发出了但未登记: %s" % unknown
 
 
