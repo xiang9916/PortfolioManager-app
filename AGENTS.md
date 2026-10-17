@@ -366,7 +366,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 25 文件 / 139 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 29 文件 / 161 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
@@ -397,6 +397,24 @@ pm-cli (headless CLI) 复用 PortfolioCore
   + `test_preset_pipeline_offline.py`（5 项，受控桩；祖先树 ImportError = 红）。`VERIFY-MAINSLIM: OK`（证据 `tmp/agent-team/verify-mainslim/`）。
   ⚠️ 仍留（有意）：`data_fetcher` 运行时无生产调用点（行情在校准阶段取）；`models/POOL_SUM_EPS` 有意留在 models；入口的 `_inject_test_assets` 薄壳
   仅为既有测试/兼容保留（生产走 callers）；`OP.select_domestic_funds` 的 monkeypatch 兼容性已失效（仓内无调用方）。
+
+- **「加新标的 → 夏普反而下降」修复（2026-10-17，两个独立根因）**：
+  ① **东财时间戳时区错位**：`eastmoney_nav` 曾按 UTC 取日（东财 `x` 实为北京时间 00:00）→ 境内基金日期整体早一天，
+  与 Yahoo 序列配对时相关性被系统性带偏（同敞口实测 −0.06 vs 修正后 +0.97；校准里基金×Yahoo 288/946 对全受影响）。
+  已改 `market_data._eastmoney_date`（UTC+8）并**重新生成 `Optimizer/data/calibrated_params.json`**（corr 833 对变化；
+  非基金×Yahoo 漂移 ≤0.0041，证明变化主要来自日期修正）。旧 bundle 备份在 `tmp/agent-team/evidence/diag-sharpe/`。
+  回归：`test_market_data_dates.py`（5 项，旧码全红）。
+  ② **袖内固定点多解**：目标播种分叉会锁进较差固定点，而更高初值存在更好且同样自洽的固定点（模型-交付差 ≤0.5pp）。
+  `core/engine.solve_portfolio` 现拆为 `_solve_fixpoint_once` + 包装：**仅当** history 出现 `sleeve_seeded_levels` 时，
+  用确定性种子（切点 μ 与无上限最大收益 μ 的线性插值 λ=0.35/0.50）重启并择优（交付发生 → 缺口 → 模型差合格线 → 交付夏普 → 波动），
+  输出加法式 `sleeve_restarts` 审计；未触发只跑一遍、逐字节不变。被弃候选的 warnings/cap_hits 按候选隔离。
+  回归：`test_sleeve_restart.py`（9 项，祖先必红）；旧 bundle 捕获模型上注入场景交付夏普由明显劣于主运行回到优于主运行（数值只在 tmp）。
+  ③ **P1 可观测性/硬化**：`build_broad_cov(missing_out=…)` + 结果 JSON 加法式 `corr_missing`；PSD 修复统计 `cov_psd`（eigmin 前后/改写对数/最大 Δ）；
+  `bounds_arrays` 让 `AssetSpec.lower/upper` 生效；`active_cap_map(cap=…)` + `GoalSpec.active_cap` 生效（默认值不变）；`max_feasible_return` 校验 bounds/守恒。
+  新测试：`test_cov_diagnostics.py`（4 项）+ `test_solver_hardening.py`（4 项）。
+  ⚠️ 已知残留：Swift 侧 `EastmoneySource` 的毫秒时间戳同样按 UTC 取日（影响 App 里基金 K 线/最新价的**日期标签**，不影响优化器计算路径）——
+  待单独修（改 Asia/Shanghai + Swift 用例）。`prices_cache` 命中即复用，升级后建议清一次优化器临时目录。
+  ⚠️ 修正日期后校准矩阵仍非 PSD（内部池 eigmin ≈ −0.20）：收缩/稳健估计（Ledoit-Wolf 等）属 P2，默认关，需 walk-forward A/B 后再定。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。
