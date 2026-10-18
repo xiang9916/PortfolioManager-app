@@ -10,7 +10,8 @@
 - daily_return_map / pairwise_corr: 日收益两两相关 (重叠不足回退默认值)
 - SOURCES / PROXY_MAP: 校准数据表, 原样迁自 calibrate_params.py
 - series_for_broad_key: 大类取数 (代理历史更长则优先代理, 与校准同逻辑)
-- cached_series: work_dir 内按 symbol 缓存, 优化器关闭时随 work_dir 一起清理
+- cached_series: work_dir 内按 symbol 缓存, 优化器关闭时随 work_dir 一起清理;
+  目录自带取数口径版本标记, 升级/崩溃残留导致的旧日期缓存会自动失效
 """
 
 import datetime
@@ -18,6 +19,7 @@ import json
 import math
 import os
 import re
+import shutil
 import ssl
 import time
 import urllib.request
@@ -33,6 +35,11 @@ _MIN_SERIES = 30
 # 东财 pingzhongdata 的 `x` 毫秒时间戳按**北京时间**记账（当日 00:00），
 # 取日必须用 UTC+8；按 UTC 取会把境内基金日期整体提前一天。
 _CN_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+# prices_cache 的格式/取数口径版本。写入 work_dir/prices_cache/.cache_version；
+# 标记不一致或缺失时缓存目录整体清空（见 _prices_cache_dir）。
+# 2 = 2026-10-18 起：东财毫秒时间戳按北京时间（UTC+8）取日。
+PRICES_CACHE_SCHEMA = 2
 
 
 def _eastmoney_date(ts_ms):
@@ -166,14 +173,47 @@ def pairwise_corr(rets_a, rets_b, min_periods=180, default=0.30):
     return round(float(c), 4)
 
 
+def _prices_cache_dir(work_dir):
+    """取 prices_cache 目录, 并做**版本自愈**: 标记不匹配/缺失时整体清空后重建.
+
+    为什么必须有这一步: 缓存文件存的是 `[date, close]`, 日期标签由取数口径决定。
+    口径修正后（例如 2026-10-18 东财时间戳改按北京时间取日）旧缓存里的日期是错的,
+    「命中即复用」会让修正对老用户**不生效**。正常关闭 App 会删整个 work_dir, 但
+    崩溃 / 强制退出 / 跨版本升级时的残留只能靠这里兜底。
+
+    返回 (cache_dir) 路径; 清空是原子的「删目录 → 重建 → 写标记」。
+    """
+    cache_dir = os.path.join(work_dir, "prices_cache")
+    marker = os.path.join(cache_dir, ".cache_version")
+    version = None
+    try:
+        with open(marker, encoding="utf-8") as f:
+            version = int(f.read().strip())
+    except Exception:
+        version = None
+    if version != PRICES_CACHE_SCHEMA:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(str(PRICES_CACHE_SCHEMA))
+        except Exception:
+            pass
+    else:
+        os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+
 def cached_series(work_dir, source, symbol, log=None):
     """按 (source, symbol) 缓存全历史收盘序列 [(date, close)], 命中直接返回.
 
     缓存文件位于 work_dir/prices_cache/, 生命周期与优化器联网管线共享目录一致
     (App 关闭优化器时由 Swift 侧 cleanupWorkDir 整体删除)。
+
+    缓存里存的是**日期标签**, 取数口径一旦变化旧标签就永远是错的（不会自愈）——
+    因此目录带版本标记, 由 `_prices_cache_dir` 在版本不一致时整体清空。
     """
-    cache_dir = os.path.join(work_dir, "prices_cache")
-    os.makedirs(cache_dir, exist_ok=True)
+    cache_dir = _prices_cache_dir(work_dir)
     safe = re.sub(r"[^A-Za-z0-9_.=\-]", "_", symbol)
     path = os.path.join(cache_dir, f"{source}_{safe}.json")
     if os.path.exists(path):
