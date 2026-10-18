@@ -945,7 +945,7 @@ def param_origin(key):
 
 
 def describe_param_source(key):
-    """中文一句话，说明该标的 μ/σ 的来历（结果页与 CLI 展示用）。"""
+    """中文一句话，说明该标的 μ/σ 的来历（诊断用：当前无生产调用，CLI 未接线）。"""
     cls = _AC.asset_class(key)
     origin = param_origin(key)
     if origin == "aggregated":

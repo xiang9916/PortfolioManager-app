@@ -383,6 +383,13 @@ pm-cli (headless CLI) 复用 PortfolioCore
   **2026-10-18 清理**：其中 8 个全仓零引用的薄壳（`_reseed_sleeves` / `_sleeve_failure_reason` / `_undeliverable_warning` /
   `_sleeve_tangency` / `_required_sleeve_mu` / `_floor_next_params` / `_sleeve_tangency_all` / `_sleeve_levels_for_feasibility`）已删除；
   仍被生产/测试使用的再导出保留，接口不变。
+  **2026-10-18 二次清理（死代码尾巴）**：删除上次薄壳删除后遗留的再导出/导入（`optimize_portfolio.py`）、
+  `asset_classes.AGGREGATES`、两个零引用薄包装与 `_INTERNAL_POOL_KEYS`、`core/optimizer.py` 未读的 `rf_default`
+  构造参数，以及 4 个测试的未使用导入与 1 个死测试助手；`core/fixpoint.py` 的两份逐字相同的 `ceiling` 闭包
+  抽成 `_ceiling_solver`。`requirements.txt` 补 `pandas`（`market_data.py` 模块级使用；运行时经 `held_assets` 加载，
+  按 requirements 重建 venv 时缺它会在启动即失败）。**有意保留**：`services/` ABC、`core/errors.SingularCovariance`、
+  `core/optimizer.py` + `core/sleeves.py` 的 DTO 路径（等价门/ADR 预留）、测试文件各自自带的 runner（祖先树单文件
+  对照要求自包含，不做去重）。用例数不变（33 文件 / 209；Swift 87）。
   验证：`VERIFY-P3b1: OK`（逐行等价、非假搬迁、core 无上层 import、守卫覆盖新入口且两种注入都能红）；用例 115→118（新增 symtable「未定义全局名」闸 2 项 + 守卫证伪 1 项）。
   ⚠️ **兼容性注记（核验实测）**：薄壳**不等于**完整 monkeypatch 兼容 —— 模块级**变量**（`TARGET_RETURN`/`RF`/`CAP_HITS`/各 INTERNAL 表）仍在调用时解析（兼容），
   但模块级**函数**交叉打桩（例如替换 `OP.stage2_covariance`）**不再生效**；仓内无任何测试/生产代码这样打桩，产品路径无影响。

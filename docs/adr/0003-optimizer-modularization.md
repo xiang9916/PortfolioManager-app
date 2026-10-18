@@ -52,21 +52,21 @@ Optimizer/scripts/portfolio_system/
 │   ├── data_fetcher.py          # 行情序列抓取（包装 market_data，唯一网络入口）
 │   ├── pipeline.py              # 在售/申赎状态子进程（包装 fund_pipeline）
 │   └── portfolio_source.py      # 读取持仓/配置载荷（extract JSON），不直连数据库
-└── cli/
-    ├── optimize_portfolio_cli.py
-    └── sensitivity_cli.py       # 保留既有 argparse 契约，参数名/语义一字不改
 ```
 
 依赖方向（单向，无环）：
 
 ```
-   cli/ ──▶ callers/ ──▶ core/ ──▶ models/
+   Optimizer/scripts/*.py ──▶ callers/ ──▶ core/ ──▶ models/
               │
               └──▶ services/ ──▶ models/
 
    core/  ✗──▶ services/     （机械禁止：见 §3 R1）
    callers/ ✗──▶ callers/    （机械禁止：调用器之间不得互相 import）
 ```
+
+> `cli/` 的 P0 骨架（两个仅 `raise SystemExit` 的入口）已于 2026-10-18 删除（见 §10）；
+> 生产入口仍是 `Optimizer/scripts/optimize_portfolio.py` / `sensitivity_analysis.py`，CLI 契约不变。
 
 ### 为什么落在 `Optimizer/scripts/portfolio_system/` 而不是仓库根
 
