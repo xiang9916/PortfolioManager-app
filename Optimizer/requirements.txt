@@ -5,3 +5,4 @@
 numbers_parser>=4.0   # 仅用于读取 Apple Numbers 文档（外部表格导入）
 numpy>=2.0
 scipy>=1.14
+pandas>=2.2           # market_data.py 模块级使用（运行时经 held_assets 加载）
