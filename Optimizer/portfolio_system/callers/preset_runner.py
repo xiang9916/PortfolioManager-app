@@ -347,33 +347,32 @@ def build_benchmark(output, final, *, tables, rf=0.0):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
-    """Build a clean Finance result file: per-asset weights/return/vol/sharpe + totals."""
-    # 境外/跨池大类的执行代码（标的名前加 [代码] 前缀，便于直接下单；
-    # 无单一成交代码的大类保持 None，不加前缀）
-    exec_code = {
-        "O_BTC": "BTC",
-        "O_HYLB": "HYLB",
-        "O_SG_EQ": "G3B.SI",
-        "O_US_TLT": "TLH",
-        "O_US_REIT": "REZ",
-        "O_US_ENERGY": "XOM",
-    }
-    # 大中华二级风格桶 → 境内基金池类别（风格桶本身无单一成交代码，
-    # 执行代表基金取自对应类别的去重/最低费率代表，与境内大类同一套哲学）
-    gc_bucket_pool = {
-        "CSI300": "D_HSBC_CSI300",
-        "DIVLOWVOL": "D_HSBC_DIVLOWVOL",
-        "DIVLOWVOL100": "D_CN_DIVLOWVOL100",
-        "STOCK": "D_CN_STOCK",
-        "MIXED": "D_CN_MIXED",
-        "INDEX": "D_CN_INDEX",
-        "HK_BROAD": "D_CN_HK",
-        "HK_DIV": "D_CN_HK",
-        "HK_TECH": "D_HSBC_HSTECH",
-    }
-    assets = []
-    # Domestic categories with selected representative funds
+_EXEC_CODE = {
+    "O_BTC": "BTC",
+    "O_HYLB": "HYLB",
+    "O_SG_EQ": "G3B.SI",
+    "O_US_TLT": "TLH",
+    "O_US_REIT": "REZ",
+    "O_US_ENERGY": "XOM",
+}
+
+# 大中华二级风格桶 → 境内基金池类别（风格桶本身无单一成交代码，
+# 执行代表基金取自对应类别的去重/最低费率代表，与境内大类同一套哲学）。
+_GC_BUCKET_POOL = {
+    "CSI300": "D_HSBC_CSI300",
+    "DIVLOWVOL": "D_HSBC_DIVLOWVOL",
+    "DIVLOWVOL100": "D_CN_DIVLOWVOL100",
+    "STOCK": "D_CN_STOCK",
+    "MIXED": "D_CN_MIXED",
+    "INDEX": "D_CN_INDEX",
+    "HK_BROAD": "D_CN_HK",
+    "HK_DIV": "D_CN_HK",
+    "HK_TECH": "D_HSBC_HSTECH",
+}
+
+
+def _append_domestic_rows(assets, output, tables, rf):
+    """境内大类 → 选中代表基金行（保持原清单顺序）。"""
     for key, sel in output.get("domestic_selection", {}).items():
         a = next((x for x in tables.broad_assets if x["key"] == key), None)
         if a is None:
@@ -388,7 +387,10 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             "volatility": vol,
             "sharpe": (mu - rf) / vol if vol else 0.0,
         })
-    # US core internal split
+
+
+def _append_us_core_rows(assets, output, tables, rf):
+    """O_US_CORE 袖内拆分的执行标的行。"""
     stage2 = output.get("stage2") or {}
     for ticker, w in stage2.get("internal_weights_total", {}).items():
         if w <= TINY_WEIGHT_EPS:
@@ -406,68 +408,77 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             "volatility": vol,
             "sharpe": (mu - rf) / vol if vol else 0.0,
         })
-    # Japan equity internal factor split
+
+
+def _append_japan_rows(assets, output, tables, rf):
+    """O_JP_EQ 袖内因子拆分行。"""
     jp = output.get("japan_selection")
-    if jp is not None:
-        for ticker, w in jp.get("internal_weights_total", {}).items():
-            if w <= TINY_WEIGHT_EPS:
-                continue
-            info = tables.jp_internal.get(ticker)
-            if info is None:
-                continue
-            mu = info["mu"]
-            vol = info["vol"]
-            assets.append({
-                "key": f"JP:{ticker}",
-                "name": f"[{ticker}] 日本·{info['name']}",
-                "weight": w,
-                "expected_return": mu,
-                "volatility": vol,
-                "sharpe": (mu - rf) / vol if vol else 0.0,
-            })
+    if jp is None:
+        return
+    for ticker, w in jp.get("internal_weights_total", {}).items():
+        if w <= TINY_WEIGHT_EPS:
+            continue
+        info = tables.jp_internal.get(ticker)
+        if info is None:
+            continue
+        mu = info["mu"]
+        vol = info["vol"]
+        assets.append({
+            "key": f"JP:{ticker}",
+            "name": f"[{ticker}] 日本·{info['name']}",
+            "weight": w,
+            "expected_return": mu,
+            "volatility": vol,
+            "sharpe": (mu - rf) / vol if vol else 0.0,
+        })
 
-    # Greater China equity internal factor split
-    # 风格桶无单一成交代码：前缀用对应境内基金池的代表基金代码
+
+def _append_greater_china_rows(assets, output, tables, rf, hsbc_pool):
+    """D_GREATER_CN 袖内风格桶行；同池多桶避免重复同一代表基金。"""
     gc = output.get("gc_selection")
-    if gc is not None:
-        gc_used = {}  # pool_key -> 已用 code 列表，同池多桶避免重复同一代表
-        for ticker, w in gc.get("internal_weights_total", {}).items():
-            if w <= TINY_WEIGHT_EPS:
-                continue
-            info = tables.gc_internal.get(ticker)
-            if info is None:
-                continue
-            mu = info["mu"]
-            vol = info["vol"]
-            rep = None
-            if hsbc_pool:
-                pool_key = gc_bucket_pool.get(ticker)
-                cands = hsbc_pool.get(pool_key) or []
-                used = gc_used.setdefault(pool_key, [])
-                rep = next((c for c in cands if c["code"] not in used), None)
-                if rep is not None:
-                    used.append(rep["code"])
-            name = (f"[{rep['code']}] 大中华·{info['name']} → {rep['name']}"
-                    if rep is not None else f"大中华·{info['name']}")
-            assets.append({
-                "key": f"GC:{ticker}",
-                "name": name,
-                "weight": w,
-                "expected_return": mu,
-                "volatility": vol,
-                "sharpe": (mu - rf) / vol if vol else 0.0,
-            })
+    if gc is None:
+        return
+    gc_used = {}
+    for ticker, w in gc.get("internal_weights_total", {}).items():
+        if w <= TINY_WEIGHT_EPS:
+            continue
+        info = tables.gc_internal.get(ticker)
+        if info is None:
+            continue
+        mu = info["mu"]
+        vol = info["vol"]
+        rep = None
+        if hsbc_pool:
+            pool_key = _GC_BUCKET_POOL.get(ticker)
+            cands = hsbc_pool.get(pool_key) or []
+            used = gc_used.setdefault(pool_key, [])
+            rep = next((c for c in cands if c["code"] not in used), None)
+            if rep is not None:
+                used.append(rep["code"])
+        name = (f"[{rep['code']}] 大中华·{info['name']} → {rep['name']}"
+                if rep is not None else f"大中华·{info['name']}")
+        assets.append({
+            "key": f"GC:{ticker}",
+            "name": name,
+            "weight": w,
+            "expected_return": mu,
+            "volatility": vol,
+            "sharpe": (mu - rf) / vol if vol else 0.0,
+        })
 
-    # Other overseas broad assets
+
+def _append_overseas_rows(assets, output, tables, rf):
+    """其余境外/跨池大类行（已展开的袖/大类跳过）。"""
+    listed = {a["key"] for a in assets}
     for key, w in output.get("stage1", {}).get("weights", {}).items():
-        if key in [a["key"] for a in assets] or key in ("O_US_CORE", "O_JP_EQ", "O_HK_HSTECH", "D_GREATER_CN"):
+        if key in listed or key in ("O_US_CORE", "O_JP_EQ", "O_HK_HSTECH", "D_GREATER_CN"):
             continue
         a = next((x for x in tables.broad_assets if x["key"] == key), None)
         if a is None:
             continue
         mu = a["mu"]
         vol = a["vol"]
-        code = a.get("fund_code") or exec_code.get(key)
+        code = a.get("fund_code") or _EXEC_CODE.get(key)
         name = f"[{code}] {a['name']}" if code else a["name"]
         assets.append({
             "key": key,
@@ -477,10 +488,10 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             "volatility": vol,
             "sharpe": (mu - rf) / vol if vol else 0.0,
         })
-    # 测试标的 (T_ 前缀): 它们是"新标的测试"临时注入的大类, 不在 tables.broad_assets 里,
-    # 但同样占用第一阶段权重。以前这里直接 continue 掉, 后果是:
-    # (a) 权重合计 < 1(看起来"没买满"), (b) 用户看到的清单里永远没有新标的,
-    # 于是"加入新标的值不值得"这个问题的答案被整段吞掉 (2026-10-13 修)。
+
+
+def _append_test_rows(assets, output, rf):
+    """新标的测试注入的顶层 what-if 腿（T_ 前缀）。"""
     test_meta = {t["key"]: t for t in (output.get("test") or {}).get("assets", [])}
     listed = {a["key"] for a in assets}
     for key, w in output.get("stage1", {}).get("weights", {}).items():
@@ -502,8 +513,10 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             "sharpe": (mu - rf) / vol if vol else 0.0,
             "is_test": True,
         })
-    # 持仓纳入（Q1）：H_ 前缀的顶层 what-if 腿。与测试标的同理，必须进清单 ——
-    # 否则 summary.missing_weights 自检会把它们当成映射漏项（权重合计 ≠ 1）。
+
+
+def _append_held_rows(assets, output, rf):
+    """持仓纳入的顶层 what-if 腿（H_ 前缀）。"""
     held_meta = {t["key"]: t for t in ((output.get("held") or {}).get("included") or [])}
     listed = {a["key"] for a in assets}
     for key, w in output.get("stage1", {}).get("weights", {}).items():
@@ -526,12 +539,26 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             "sharpe": (mu - rf) / vol if vol else 0.0,
             "is_held": True,
         })
+
+
+def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
+    """Build a clean Finance result file: per-asset weights/return/vol/sharpe + totals."""
+    assets = []
+    _append_domestic_rows(assets, output, tables, rf)
+    _append_us_core_rows(assets, output, tables, rf)
+    _append_japan_rows(assets, output, tables, rf)
+    _append_greater_china_rows(assets, output, tables, rf, hsbc_pool)
+    _append_overseas_rows(assets, output, tables, rf)
+    _append_test_rows(assets, output, rf)
+    _append_held_rows(assets, output, rf)
+
     assets.sort(key=lambda x: -x["weight"])
     for a in assets:
         a["weight"] = round(float(a["weight"]), 6)
         a["expected_return"] = round(float(a["expected_return"]), 6)
         a["volatility"] = round(float(a["volatility"]), 6)
         a["sharpe"] = round(float(a["sharpe"]), 6)
+
     final = output.get("final") or {}
     # 自检: 报告清单必须覆盖第一阶段所有权重。历史上测试标的(T_)被静默丢弃过一次,
     # 于是"清单合计 82%、指标却按 100% 算"这种错能一路滑到界面上 —— 这里把它变成显式提示。
@@ -558,7 +585,7 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             f"自检: 结果清单权重合计为 {total_w:.4f}，不等于 1 —— 请对照第一阶段权重核对映射是否漏项。",
             "summary.weight_sum_mismatch"))
     held_block = output.get("held")
-    summary = {
+    return {
         "generated_at": output.get("availability", {}).get("checked_at"),
         "portfolio": {
             "expected_return": round(float(final.get("ret", 0.0)), 6),
@@ -590,7 +617,6 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
         "warning_items": warning_items(summary_warnings),
         "source_detail": None,
     }
-    return summary
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -809,7 +835,7 @@ def build_output_payload(*, solved, keys, stage1_weights, stage1_stats, extract,
         output["held"] = held_block
 
     if internal is not None:
-        x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal
+        x_internal, ret2, vol2, sharpe2, _w2, internal_tickers = internal
         internal_total = float(x_internal.sum())
         output["stage2"] = {
             "internal_total_weight": internal_total,

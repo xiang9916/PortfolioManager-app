@@ -1,5 +1,3 @@
-import Foundation
-
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
     public static let version: Int = 8

@@ -34,7 +34,6 @@ import argparse
 import datetime
 import os
 import json
-import statistics
 import sys
 import urllib.parse
 import urllib.request

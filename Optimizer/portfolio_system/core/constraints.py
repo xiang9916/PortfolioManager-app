@@ -10,7 +10,7 @@ D2：active 上限表（`active_cap_map` / `apply_active_caps`）从 optimize_po
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
 
@@ -173,17 +173,6 @@ def apply_active_caps(upper, assets, cap_map: Mapping[str, float], dom_idx, dom_
 def respects_bounds(weights, upper, tol: float = BOUNDS_TOL) -> bool:
     """多起点解必须校验 bounds（本模块实现）。"""
     return _respects_bounds(weights, upper, tol=tol)
-
-
-def max_feasible_return_for(problem: ProblemSpec) -> float:
-    """ProblemSpec 口径的最大可行收益（数组口径实现在 core/solver.py）。"""
-    mu = np.array([float(a.mu) for a in problem.assets])
-    lower, upper = bounds_arrays(problem)
-    dom, ov = pool_indices(problem)
-    from .solver import max_feasible_return
-    return float(max_feasible_return(mu, lower, upper, dom, ov,
-                                    float(problem.pools.domestic_weight),
-                                    float(problem.pools.overseas_weight)))
 
 
 def max_return_given_mu(mu, upper, dom_idx, ov_idx, dom_w, ov_w):

@@ -864,13 +864,6 @@ public final class AppStore {
         }
     }
 
-    public func cancelOptimization() {
-        pollTask?.cancel()
-        pollTask = nil
-        // note: the subprocess is not killed here; it finishes on its own and is finalized lazily
-        isOptimizing = false
-    }
-
     // MARK: 能力2 — 新标的测试
 
     /// 临时加入标的重跑一次优化。结果写入 testOptimization（「测试结果」弹窗），
@@ -917,12 +910,6 @@ public final class AppStore {
             testOptimizeError = String(describing: error)
             isTestOptimizing = false
         }
-    }
-
-    public func cancelTestOptimization() {
-        pollTask?.cancel()
-        pollTask = nil
-        isTestOptimizing = false
     }
 
     // MARK: 能力3 — 备份数据导入/导出 (可移植 JSON)

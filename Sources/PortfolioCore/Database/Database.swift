@@ -1,4 +1,3 @@
-import Foundation
 import SQLite3
 
 // SQLITE_TRANSIENT is a C macro, not exposed to Swift; define it here.
@@ -606,10 +605,6 @@ public final class Database {
     }
 
     // MARK: 能力4 — quarterly_reports (逐季度财务分析底稿)
-
-    private static let quarterlyColumns = ["period_end", "market_value", "total_cost",
-        "interest_domestic", "interest_overseas", "dividend_domestic", "dividend_overseas",
-        "capital_gain_domestic", "capital_gain_overseas", "taxes", "source"]
 
     public func fetchQuarterlyReports() throws -> [QuarterlyReport] {
         let sql = "SELECT id, period_end, market_value, total_cost, interest_domestic, interest_overseas, dividend_domestic, dividend_overseas, capital_gain_domestic, capital_gain_overseas, taxes, source FROM quarterly_reports ORDER BY period_end"

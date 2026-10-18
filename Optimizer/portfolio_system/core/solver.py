@@ -11,7 +11,6 @@ from typing import Any, List
 import numpy as np
 from scipy.optimize import minimize
 
-from . import errors
 from .constants import CONSTRAINT_EPS, FALLBACK_MARGIN_EPS
 from .constraints import _pool_constraints, _respects_bounds, feasible_start, upper_bounds_array
 

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from ..models.data_types import (AssetSpec, GoalSpec, PoolSpec, ProblemSpec, SLEEVE_KEYS,
+from ..models.data_types import (AssetSpec, GoalSpec, PoolSpec, ProblemSpec,
                                  SolveResult)
 from ..models import serialization
 

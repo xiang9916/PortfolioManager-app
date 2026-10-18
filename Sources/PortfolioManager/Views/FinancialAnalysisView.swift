@@ -373,35 +373,6 @@ public struct FinancialAnalysisView: View {
 
     // MARK: - 格式化
 
-    private static let moneyFmt: NumberFormatter = {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.minimumFractionDigits = 2
-        f.maximumFractionDigits = 2
-        f.usesGroupingSeparator = true
-        return f
-    }()
-
-    private func money(_ v: Double?) -> String {
-        guard let v else { return "" }
-        return Self.moneyFmt.string(from: NSNumber(value: v)) ?? ""
-    }
-
-    private func pct(_ v: Double?) -> String {
-        guard let v else { return "" }
-        return String(format: "%.2f%%", v * 100)
-    }
-
-    private func signedPct(_ v: Double?) -> String {
-        guard let v else { return "" }
-        return String(format: "%+.2f%%", v * 100)
-    }
-
-    private func days(_ v: Int?) -> String {
-        guard let v else { return "" }
-        return String(v)
-    }
-
     // MARK: - 行定义 (顺序与标签 1:1 对齐 xlsx)
 
     /// 网格的一行: 左侧标签 + 每季一单元格.
@@ -480,16 +451,16 @@ public struct FinancialAnalysisView: View {
     // 行定义里用的轻量格式化助手 (static 上下文).
     private static func m(_ v: Double?) -> String {
         guard let v else { return "" }
-        return moneyFmt.string(from: NSNumber(value: v)) ?? ""
+        return DisplayFormat.money(v, decimals: 2)
     }
     private static func money0(_ v: Double) -> String { m(v) }
     private static func p(_ v: Double?) -> String {
         guard let v else { return "" }
-        return String(format: "%.2f%%", v * 100)
+        return DisplayFormat.pct(v)
     }
     private static func sp(_ v: Double?) -> String {
         guard let v else { return "" }
-        return String(format: "%+.2f%%", v * 100)
+        return DisplayFormat.pct(v, signed: true)
     }
     private static func d(_ v: Int?) -> String {
         guard let v else { return "" }

@@ -65,10 +65,9 @@ public struct AssetPerspectiveView: View {
     }
 
     private func money(_ v: Double) -> String {
-        let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0
-        return f.string(from: NSNumber(value: v)) ?? "0"
+        DisplayFormat.money(v)
     }
-    private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
+    private func pct(_ v: Double) -> String { DisplayFormat.pct(v) }
 }
 
 /// Per-asset detail (模块2).
@@ -239,18 +238,15 @@ public struct AssetDetailView: View {
     }
 
     private func amount2(_ v: Double) -> String {
-        let f = NumberFormatter(); f.numberStyle = .decimal
-        f.minimumFractionDigits = 2; f.maximumFractionDigits = 2
-        return f.string(from: NSNumber(value: v)) ?? "0.00"
+        DisplayFormat.money(v, decimals: 2)
     }
     private func money(_ v: Double) -> String {
-        let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0
-        return f.string(from: NSNumber(value: v)) ?? "0"
+        DisplayFormat.money(v)
     }
     private func signedMoney(_ v: Double) -> String {
         (v >= 0 ? "+" : "-") + money(abs(v))
     }
-    private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
+    private func pct(_ v: Double) -> String { DisplayFormat.pct(v) }
 
     private func pnlRow(_ label: String, _ v: Double) -> some View {
         HStack {

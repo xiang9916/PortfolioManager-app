@@ -266,23 +266,15 @@ public struct AssetOverviewView: View {
     // MARK: helpers
 
     private func money(_ v: Double) -> String {
-        if store.hideNumbers { return PrivacyStyle.masked }
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.maximumFractionDigits = 0
-        return "¥" + (f.string(from: NSNumber(value: v)) ?? "0")
+        guard !store.hideNumbers else { return PrivacyStyle.masked }
+        return "¥" + DisplayFormat.money(v)
     }
     /// 股息金额用两位小数 (金额小, 取整会看不出差别).
     private func money2(_ v: Double) -> String {
-        if store.hideNumbers { return PrivacyStyle.masked }
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.minimumFractionDigits = 2
-        f.maximumFractionDigits = 2
-        return "¥" + (f.string(from: NSNumber(value: v)) ?? "0.00")
+        guard !store.hideNumbers else { return PrivacyStyle.masked }
+        return "¥" + DisplayFormat.money(v, decimals: 2)
     }
     private func pct(_ v: Double) -> String {
-        if store.hideNumbers { return PrivacyStyle.masked }
-        return String(format: "%.2f%%", v * 100)
+        DisplayFormat.pct(v, hidden: store.hideNumbers)
     }
 }

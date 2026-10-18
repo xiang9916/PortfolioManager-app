@@ -143,7 +143,7 @@ public struct OptimizeButton: View {
             HStack {
                 Text("目标收益率（下限）")
                 Spacer()
-                Text(String(format: "%.1f%%", targetReturnInput * 100))
+                Text(DisplayFormat.pct(targetReturnInput, decimals: 1))
                     .monospacedDigit().foregroundStyle(.secondary)
             }
             Slider(value: $targetReturnInput, in: 0.05...0.25, step: 0.005)

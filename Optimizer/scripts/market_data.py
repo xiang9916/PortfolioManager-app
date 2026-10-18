@@ -337,18 +337,17 @@ PROXY_MAP = {
 def series_for_broad_key(work_dir, key, log=None):
     """大类资产的代表收盘序列: 代理历史更长则优先代理 (与校准同逻辑)."""
     src = SOURCES.get(key)
-    prices, best_sym = [], None
+    prices = []
     if src is not None:
-        typ, sym = src
-        prices = cached_series(work_dir, typ, sym, log=log)
-        best_sym = sym
+        typ, _sym = src
+        prices = cached_series(work_dir, typ, _sym, log=log)
     proxy = PROXY_MAP.get(key)
     if proxy is not None:
         ptyp, psym = proxy
         try:
             pprices = cached_series(work_dir, ptyp, psym, log=log)
             if len(pprices) > len(prices):
-                prices, best_sym = pprices, psym
+                prices = pprices
         except Exception:
             pass
     return prices if len(prices) >= _MIN_SERIES else []

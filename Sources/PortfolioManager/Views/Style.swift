@@ -24,6 +24,53 @@ public enum DateFormatters {
     }
 }
 
+/// 数字/百分比显示的唯一入口：静态 formatter 复用，避免每个 cell 新建。
+/// 输出格式与改造前逐字一致（0/2 位小数、分组、可选正负号）。
+enum DisplayFormat {
+    private static let grouped0: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.maximumFractionDigits = 0
+        return f
+    }()
+
+    private static let grouped2: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        return f
+    }()
+
+    static func money(_ v: Double, decimals: Int = 0, hidden: Bool = false) -> String {
+        guard !hidden else { return PrivacyStyle.masked }
+        let f = decimals == 0 ? grouped0 : grouped2
+        return f.string(from: NSNumber(value: v)) ?? (decimals == 0 ? "0" : "0.00")
+    }
+
+    static func pct(_ v: Double, decimals: Int = 2, signed: Bool = false,
+                    hidden: Bool = false) -> String {
+        guard !hidden else { return PrivacyStyle.masked }
+        return String(format: signed ? "%+.\(decimals)f%%" : "%.\(decimals)f%%", v * 100)
+    }
+}
+
+/// 结果页/敏感性页共用的指标卡片。
+struct StatCard: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.title3).fontWeight(.semibold).monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 /// Shared UI styling: asset-class display names + deterministic colors + date helpers.
 public enum AssetClassStyle {
     public static func displayName(_ cls: String) -> String {

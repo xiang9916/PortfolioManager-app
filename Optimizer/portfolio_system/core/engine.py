@@ -7,8 +7,6 @@ fund_pipeline/test_tickers，无延迟转发；不写模块级全局（触顶记
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence
-
 import numpy as np
 
 from .constants import (CAP_HIT_EPS, DELIVERY_EPS, FALLBACK_MARGIN_EPS, MODEL_GAP_TOL,
@@ -21,7 +19,7 @@ from .fixpoint import (compute_sleeve_floors, floor_next_params, floor_seed,
                        stage1_weight, undeliverable_warning, unresolved_weighted_sleeves,
                        validate_sleeve_params)
 from .linalg import build_broad_cov
-from .sleeve_params import (FLOOR_SLEEVE_KEYS, MAX_SLEEVE_ITER, SLEEVE_DAMPING, SLEEVE_KEYS,
+from .sleeve_params import (MAX_SLEEVE_ITER, SLEEVE_DAMPING, SLEEVE_KEYS,
                             SLEEVE_TOL, SleeveHooks, SleeveUniverse, damp_sleeve_params,
                             inject_sleeve_params, sleeve_params_us)
 from .solver import max_feasible_return, solve_max_sharpe, solve_min_var
@@ -37,6 +35,21 @@ STAGE1_FALLBACK_MARK = "目标在当前约束下不可行，已回退到最大�
 def is_stage1_fallback_prompt(message):
     """是否为阶段一逐轮回退提示（数字随轮次变，必须合并而不是逐条累积）。"""
     return STAGE1_FALLBACK_MARK in message
+
+
+def _round_score(solved, *, target, unresolved_weighted, it):
+    """固定点单轮择优键（确定性）：交付是否发生 → 缺口 → 模型-交付差 → 夏普 → 波动 → 轮次。"""
+    final = solved["final"]
+    shortfall = max(0.0, float(target) - float(final["ret"]))
+    model_gap = (abs(float(final["ret"]) - float(solved["stage1_ret"]))
+                 + abs(float(final["vol"]) - float(solved["stage1_vol"])))
+    sharpe = float(final.get("sharpe") or 0.0)
+    return (1 if unresolved_weighted else 0,
+            round(shortfall, 6),
+            round(model_gap, 6),
+            round(-sharpe, 6),
+            round(float(final["vol"]), 6),
+            it)
 
 
 def zero_weight_sleeves(solved):
@@ -180,7 +193,7 @@ def solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_as
         cap_hits_out=cap_hits_out)
 
     if internal is not None:
-        x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal
+        x_internal, ret2, vol2, sharpe2, _w2, internal_tickers = internal
         final = {"ret": ret2, "vol": vol2, "sharpe": sharpe2, "floor": ret2 - 1.96 * vol2}
     else:
         # stage2 不可行时汇总回退第一阶段统计，否则结果文件会全成 0（Bug D2）
@@ -417,36 +430,14 @@ def _solve_fixpoint_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract
             if log:
                 tail = "（已收敛）" if delta <= sleeve_tol and not unresolved_weighted else ""
                 log("sleeve_fixpoint", f"袖内参数迭代 {it + 1}/{max_rounds}：最大变化 {delta:.4f}{tail}")
-            # 排序键：先排除"交付其实没发生"的轮次，再看"模型与交付组合差多少"
-            # （这才是我们要的一致性），最后看是否收敛。
-            model_gap = abs(solved["final"]["ret"] - solved["stage1_ret"]) + \
-                abs(solved["final"]["vol"] - solved["stage1_vol"])
-            # 条件⑤（P1）：袖内下限一旦生效，"阶段一模型达标"不再等于"交付达标" ——
-            # 只有**交付组合**收益 ≥ 本轮生效目标（非回退轮即用户目标）才算收敛。
-            # 回退轮走的是另一个分支（本来就排除在收敛判定外）→ 不可行路径不会因此永不收敛（U3）。
+            # 条件⑤（P1）：袖内下限一旦生效，"阶段一模型达标"不再等于"交付达标"。
             floor_active = bool(solved.get("sleeve_floors"))
             delivered_ok = (not floor_active
                             or float(solved["final"]["ret"]) >= float(solved["target"]) - DELIVERY_EPS)
-            # 加固③（2026-10-16）：择优以**交付目标**为第一序 —— 先看这一轮交付有没有达标，
-            # 再看缺口大小，再看"模型 vs 交付"的差，最后用轮次号做确定性 tie-break。
-            # 旧序把"模型-交付差"放在达标之前，会把**没达标**的一轮顶上来当选（极限环区尤其明显）。
-            shortfall = max(0.0, float(target) - float(solved["final"]["ret"]))
-            # task-50 ②：达标轮之间按"同目标下交付组合波动更小"择优 —— 判据落地为**交付夏普**
-            # （两次交付都恰好达标、收益相同时，夏普高 ⇔ 波动小；这正是任务书给的等价判据）。
-            # 为什么不用裸的 vol 键：当两轮交付**都高于目标、收益不同**时，裸 vol 会选到收益更低、
-            # 夏普更差的一轮（低目标档 poolA_low 实测 Sharpe 1.807 → 1.709），与"低目标档不得变化"冲突。
-            # 完整序（确定性）：交付是否达标 → 交付缺口 → 交付夏普(大者优) → 交付波动(小者优)
-            #                        → 模型-交付差 → 轮次号。
-            sharpe = float(solved["final"].get("sharpe") or 0.0)
-            # 完整序（确定性）：交付是否真的发生 → 交付缺口 → 模型-交付差 → 交付夏普(大者优)
-            #                 → 交付波动(小者优) → 轮次号。
-            # ⚠️ 波动/夏普刻意放在"模型-交付差"**之后**：字面把它们放在前面会
-            #   ① 改变低目标档既有选择（实测 poolA_low 的 Sharpe 1.807 → 1.709）；
-            #   ② 破坏已落地的 test_sleeve_fixpoint 契约（未收敛轮"模型误差 < 0.5pp"）。
-            #   放在后面 = "同一达标 + 同一模型自洽度内，取波动更小（夏普更高）的一轮"。
-            score = (1 if unresolved_weighted else 0, round(shortfall, 6),
-                     round(model_gap, 6), round(-sharpe, 6),
-                     round(float(solved["final"]["vol"]), 6), it)
+            # 排序键：交付是否真的发生 → 交付缺口 → 模型-交付差 → 交付夏普 → 波动 → 轮次。
+            # 完整口径见 `_round_score` 与下方注释（顺序不可随意调整，低目标档契约依赖它）。
+            score = _round_score(solved, target=target,
+                                 unresolved_weighted=unresolved_weighted, it=it)
             if best is None or score < best[0]:
                 best = (score, solved, assumed)
             if (delta <= sleeve_tol and not unresolved_weighted and delivered_ok

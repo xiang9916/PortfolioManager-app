@@ -859,7 +859,7 @@ struct FinancialChartPanel: View {
     }
 
     private func pct(_ v: Double?) -> String {
-        v.map { String(format: "%.1f%%", $0 * 100) } ?? "—"
+        v.map { DisplayFormat.pct($0, decimals: 1) } ?? "—"
     }
 }
 

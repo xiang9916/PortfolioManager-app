@@ -1,5 +1,3 @@
-import Foundation
-
 public enum SourceKind: String, Codable, Hashable, Sendable { case yahoo, fund }
 
 public struct AssetRef: Codable, Hashable, Sendable {

@@ -253,3 +253,14 @@ OptimizerError
 教训（写给后续阶段的自己）：**架构文档里的行数、行号、清单、命令，都要像代码一样被核验**；
 本轮错的那条「pytest」如果没被抓到，P0 的验收就会变成一句无法执行的命令，而没人会发现自己其实没跑测试。
 
+---
+
+## 10. 2026-10-18 增补（代码清理）
+
+- `portfolio_system/cli/` 的 P0 骨架（两个仅 `raise SystemExit` 的入口）已删除：P4 之后生产入口仍是
+  `Optimizer/scripts/*.py`，这些骨架从未接线，保留只会让读者误以为存在第二条 CLI 路径。
+  CLI 参数名/语义契约仍由既有脚本承担，R4 不变。
+- `services/` 的 `DataFetcher` / `PortfolioSource` / `Pipeline` ABC 保留为 §4.4 的预留边界，
+  当前无生产调用点（`data_fetcher` 只在未来编排中接线）；它们不属于本次清理的“死代码”。
+- 本次删除的仅为全仓零引用、且不属于上述边界/公开 API 的代码；JSON 键名、告警 code 与用例数未变。
+

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, List
 
 from ..models import serialization
 from ..models.data_types import ProblemSpec, SolveResult, Warning

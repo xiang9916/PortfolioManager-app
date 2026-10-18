@@ -1,6 +1,8 @@
 # PortfolioManager 项目结构
 
-> 2026-09-08 更新（v0.2-beta2 之后）。架构健康度评估见文末。
+> 2026-10-18 更新（v0.6-alpha.3 之后）：补充 ADR 0003 的 `Optimizer/portfolio_system/` 包、
+> 持仓纳入（ADR 0004）与敏感性锚定。早先的 2026-09-08 结构说明仍适用于 Swift 侧。
+> 架构健康度评估见文末。
 
 ## 总览（3 层）
 
@@ -37,9 +39,11 @@
                                │ 调用 vendored Python
 ┌──────────────────────────────▼───────────────────────────────────────┐
 │  Optimizer/ (Python 脚本链, venv 解释器)                               │
-│  scripts/: extract_portfolio / optimize_portfolio / market_data /     │
-│            fund_pipeline / monte_carlo_sim / sensitivity_analysis …    │
+│  scripts/: 入口与数据装配（optimize_portfolio / sensitivity_analysis /  │
+│            market_data / fund_pipeline / params / asset_classes …）     │
+│  portfolio_system/: 纯计算内核 + 调用器 + services（ADR 0003）           │
 │  data/: calibrated_params.json                                        │
+│  手动工具: monte_carlo_sim / bond_prior / fetch_*（不属运行时主链）      │
 └───────────────────────────────────────────────────────────────────────┘
 
 pm-cli (CLI executableTarget) ──▶ 复用 PortfolioCore (headless 验证/调试)

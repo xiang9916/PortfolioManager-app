@@ -191,7 +191,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   **不要写死 `/Users/<某人>/…` 路径**（构建机绝对路径是隐私泄露源，见 §1）。
 - venv 解释器 `/opt/anaconda3/bin/python3`（实测 3.14.6；`/opt/miniconda3` 在本机已不存在，别照旧路径找）。
   bundle 里 `Resources/Optimizer/.venv/bin/python3` 是指向它的**绝对符号链接**（strict 校验的坑见 §5）。
-- futu-api 仅声明于 requirements，当前无代码 import；行情走 Yahoo/Eastmoney 公开源。仓库不得出现任何 API key/凭据。
+- futu-api 已从 `Optimizer/requirements.txt` 移除（代码中无 import；它会带入约 30MB 的 pycryptodome 等依赖）；行情走 Yahoo/Eastmoney 公开源。仓库不得出现任何 API key/凭据。
 - 「新标的测试」= 临时加 ticker 重跑，不改持仓，结果在弹窗（testOptimization 状态）。
 - **🔴 参数口径（2026-10-14 定稿，改前务必读 `Optimizer/scripts/asset_classes.py` 的 docstring）**：
   预期收益 μ / 波动 σ 按**资产类别**分别构造，类别与规则**只有一份事实来源** = `asset_classes.py`：
@@ -361,7 +361,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ② `argparse` 的 help 走 %-格式化，中文说明里的 `%` 必须写成 `%%`。
 
 - **优化器 Python 侧模块化重构进行中（ADR 0003，2026-10-17）**：目标是「纯计算内核 + 三种调用器 + services + models」。
-  P0/P1 已落地，形态是**加法式**包 `Optimizer/scripts/portfolio_system/`（`models`/`core`/`callers`/`services`/`cli`），
+  P0/P1 已落地，形态是**加法式**包 `Optimizer/portfolio_system/`（`models`/`core`/`callers`/`services`），
   **既有脚本一字未改、CLI 与 JSON 契约不变**。三条铁律且都有机械校验：
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
@@ -380,6 +380,9 @@ pm-cli (headless CLI) 复用 PortfolioCore
   （子进程内**真的调用** core 入口后断言 `sys.modules` 干净，且**可证伪**）。**两层守卫缺一不可**，都写进了 ADR §3。
   **P3-b1 已落地（2026-10-17）**：袖内/阶段二纯数学搬到 `core/stage2.py`（8 个）+ `core/sleeve_params.py`（5 个）+ `core/constraints.py`（`max_return_given_mu`），
   依赖全部改**显式入参**（内部池表/相关性/target/rf/pool_specs）、触顶经 `cap_hits_out` 回传；旧位置留 8 个薄壳 + 6 个同名再导出（既有 import 不破）。
+  **2026-10-18 清理**：其中 8 个全仓零引用的薄壳（`_reseed_sleeves` / `_sleeve_failure_reason` / `_undeliverable_warning` /
+  `_sleeve_tangency` / `_required_sleeve_mu` / `_floor_next_params` / `_sleeve_tangency_all` / `_sleeve_levels_for_feasibility`）已删除；
+  仍被生产/测试使用的再导出保留，接口不变。
   验证：`VERIFY-P3b1: OK`（逐行等价、非假搬迁、core 无上层 import、守卫覆盖新入口且两种注入都能红）；用例 115→118（新增 symtable「未定义全局名」闸 2 项 + 守卫证伪 1 项）。
   ⚠️ **兼容性注记（核验实测）**：薄壳**不等于**完整 monkeypatch 兼容 —— 模块级**变量**（`TARGET_RETURN`/`RF`/`CAP_HITS`/各 INTERNAL 表）仍在调用时解析（兼容），
   但模块级**函数**交叉打桩（例如替换 `OP.stage2_covariance`）**不再生效**；仓内无任何测试/生产代码这样打桩，产品路径无影响。

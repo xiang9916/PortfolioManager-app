@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Tuple
 
 #: 与 optimize_portfolio.SLEEVE_KEYS 一致（P0 镜像；P2 由 core 持有唯一来源）
 SLEEVE_KEYS: Tuple[str, ...] = ("O_US_CORE", "O_JP_EQ", "D_GREATER_CN")

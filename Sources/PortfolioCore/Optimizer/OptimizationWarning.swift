@@ -1,5 +1,3 @@
-import Foundation
-
 /// 优化器告警的严重度（供结果页决定是否常显警示条）。
 public enum OptimizationWarningSeverity: String, Sendable, CaseIterable {
     /// 交付被降级 / 目标未达成：必须常显，不得折叠。

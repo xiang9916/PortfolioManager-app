@@ -373,6 +373,26 @@ def _anchor_consistency(target, point, main_ret, main_vol, rf, warnings):
             "point": point, "main": main}
 
 
+def _build_targets(*, step_min, step_max, max_ret, anchor_target, anchor_mode):
+    """构造扫描目标网格：等步长 → 锚点目标 → max feasible 末点；返回 (targets, cap, anchor_t)。"""
+    upper_bound = min(step_max, max_ret) if step_max is not None else max_ret
+    targets = []
+    t = step_min
+    while t <= upper_bound + _SCAN_LOOP_EPS:
+        targets.append(round(t, 4))
+        t += 0.005
+    cap = min(step_max, max_ret) if step_max is not None else max_ret
+    anchor_t = round(float(anchor_target), 4) if anchor_mode else None
+    if anchor_t is not None:
+        targets.append(anchor_t)
+    if max_ret > 0 and (not targets or abs(targets[-1] - max_ret) > 0.005):
+        if max_ret <= cap + _SCAN_LOOP_EPS:
+            targets.append(round(max_ret, 4))
+    if anchor_t is not None:
+        targets = sorted(set(targets))
+    return targets, cap, anchor_t
+
+
 def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
                     request_timeout=12.0, check_total_timeout=300.0,
                     step_min=0.05, step_max=None, tail_dof=3.0, log=None,
@@ -444,34 +464,10 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         return {"error": "无法计算最大可行收益率", "points": [],
                 "warnings": warnings, "pipeline": pipeline_info}
 
-    # Determine step range
-    if step_max is not None:
-        upper_bound = min(step_max, max_ret)
-    else:
-        upper_bound = max_ret
-
-    # Generate targets: 5%, 5.5%, 6%, ..., up to floor(max_ret)
-    targets = []
-    t = step_min
-    while t <= upper_bound + _SCAN_LOOP_EPS:
-        targets.append(round(t, 4))
-        t += 0.005
-
-    # --step-max 是**上限**（契约 §2.2：第二阶段补点遵守它）：网格、尾部补点与
-    # 「最大可行收益」那一点都不得越过上限。锚点目标例外 —— 用户真正关心的点必须
-    # 出现在曲线上，即使它在 --step-max 之上。
-    cap = min(step_max, max_ret) if step_max is not None else max_ret
-    anchor_t = round(float(anchor_target), 4) if anchor_mode else None
-    if anchor_t is not None:
-        targets.append(anchor_t)
-
-    # Always include the max feasible as last point
-    if max_ret > 0 and (not targets or abs(targets[-1] - max_ret) > 0.005):
-        if max_ret <= cap + _SCAN_LOOP_EPS:
-            targets.append(round(max_ret, 4))
-    if anchor_t is not None:
-        # 锚点目标并入网格：去重、排序、四舍五入 4 位。
-        targets = sorted(set(targets))
+    # Determine step range / target grid；--step-max 是上限，锚点目标例外（见 _build_targets）。
+    targets, cap, anchor_t = _build_targets(
+        step_min=step_min, step_max=step_max, max_ret=max_ret,
+        anchor_target=anchor_target, anchor_mode=anchor_mode)
 
     # 逐点跑**完整**流水线（阶段一 + 袖内固定点 + 阶段二）：图上每一点就是
     # 「把目标设成 T 时实际会交付的那个组合」，与结果页同源。

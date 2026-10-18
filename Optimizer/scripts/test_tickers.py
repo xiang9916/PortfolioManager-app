@@ -209,8 +209,8 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
     # 测试标的互相之间
     for i in range(len(chosen)):
         for j in range(i + 1, len(chosen)):
-            t1, k1, r1 = chosen[i]
-            t2, k2, r2 = chosen[j]
+            _t1, k1, r1 = chosen[i]
+            _t2, k2, r2 = chosen[j]
             corr_pairs[(k1, k2)] = pairwise_corr(r1, r2, _CORR_MIN_PERIODS, _CORR_DEFAULT)
 
     return assets, corr_pairs, skipped, estimates

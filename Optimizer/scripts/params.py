@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import os
 import os as _os
 import sys
 
@@ -684,29 +685,6 @@ def _fund_base_name(name):
     return n
 
 
-def _dedup_a_class(candidates, anchor=None):
-    """Prefer A-class over C-class for the same underlying fund; keep anchor if present."""
-    groups = {}
-    for c in candidates:
-        base = _fund_base_name(c["name"])
-        groups.setdefault(base, []).append(c)
-    out = []
-    for base, items in groups.items():
-        # Bug B 修复: 锚定基金(用户实际持有, 可能是 C 类)的份额类别必须原样保留,
-        # 不能被 A 类合并掉 — 否则后续按 code 查锚定永远找不到, 会选出同基金的另一份额。
-        if anchor:
-            anchor_item = next((c for c in items if c["code"] == anchor), None)
-            if anchor_item is not None:
-                out.append(anchor_item)
-                continue
-        a_items = [c for c in items if "A类" in c["name"] or c["name"].rstrip().endswith("A")]
-        chosen = a_items[0] if a_items else items[0]
-        out.append(chosen)
-    return out
-
-
-import os
-
 # External data file paths: env override → Finance/tmp (dev machine) → bundled Resources/data.
 # Packaged app sets DSH_FINANCE_DIR via PythonSidecar env, or falls back to Resources/data.
 _FINANCE_TMP = os.environ.get("DSH_FINANCE_DIR", os.path.expanduser("~/Finance/tmp"))
@@ -751,89 +729,18 @@ def _inefficient(c, fees):
     return False
 
 
-def _select_lowest_fee(candidates, fees, anchor):
-    """Drop inefficient funds, then keep the lowest annual-cost fund in a style bucket."""
-    valid = [c for c in candidates if not _inefficient(c, fees)]
-    if not valid:
-        valid = candidates  # keep at least the anchor if everything is filtered
-    if anchor:
-        # Bug A 修复: 锚定基金(静态代表或用户实际持仓)只要在校验后的候选里就优先返回。
-        # 原条件 len(valid) == 1 使得候选>=2 时锚定永远被最低费率分支覆盖(死代码)。
-        anchor_fund = next((c for c in valid if c["code"] == anchor), None)
-        if anchor_fund is not None:
-            return [anchor_fund]
-
-    def cost(c):
-        info = fees.get(c["code"]) or {}
-        return info.get("annual_cost")
-
-    with_cost = [c for c in valid if cost(c) is not None]
-    if with_cost:
-        best = min(with_cost, key=lambda c: (cost(c), -((fees.get(c["code"]) or {}).get("aum_yi") or 0)))
-        return [best]
-    if anchor:
-        a = next((c for c in valid if c["code"] == anchor), None)
-        return [a] if a else [valid[0]]
-    return [valid[0]]
-
-
-def load_hsbc_fund_pool(path, live_anchors=None):
-    """Load 基金搜索易 open funds JSON and group them by broad asset key.
-
-    A-share dedup rules:
-    - A/C 份额只保留 A 类；
-    - 同一基金/风格仅保留一个代表；
-    - 按费率最低去重（使用 tmp/hsbc_fund_fees.json），并剔除规模<1亿或成立<1年的低效基金。
-
-    live_anchors: dict of {category_key: fund_code} from the App's actual domestic
-    holdings (extract_live.json domestic_holdings). When a category has a live
-    anchor, it overrides params.py's static fund_code — so select_domestic_funds
-    prefers the user's actual fund over a hardcoded stale snapshot.
-    """
-    fees = _load_fees()
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    funds = data.get("funds", data if isinstance(data, list) else [])
-    anchors = {a["key"]: a.get("fund_code") for a in BROAD_ASSETS if a["pool"] == "domestic"}
-    if live_anchors:
-        anchors = {**anchors, **live_anchors}  # live 优先, 静态作 fallback
-    pool = {}
-    for item in funds:
-        if not item.get("open", True):
-            continue
-        code = str(item.get("code", "")).strip()
-        name = str(item.get("name", "")).strip()
-        if not code or not name:
-            continue
-        key = classify_domestic_fund(name)
-        pool.setdefault(key, []).append({"code": code, "name": name})
-    for key, candidates in pool.items():
-        anchor = anchors.get(key)
-        deduped = _dedup_a_class(candidates, anchor)
-        pool[key] = _select_lowest_fee(deduped, fees, anchor)
-    return pool
-
-
-def load_hsbc_raw_funds(path):
-    """Load the raw 基金搜索易 funds list (code/name/status), for cross-source checks."""
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    funds = data.get("funds", data if isinstance(data, list) else [])
-    return funds
-
-
 def _dedup_with_fallback(candidates, anchor=None):
     """A/C 去重, 但每组保留 [锚定/首选, A类备选] 两个候选。
 
-    与 _dedup_a_class 的区别: 天天基金状态过滤前不能只留一个 —— 锚定份额
-    (可能是 C 类) 若被暂停申购, 还需要同基金的 A 类兄弟份额兜底, 所以每组
+    与旧静态选基逻辑（A/C 只留 A）的区别: 天天基金状态过滤前不能只留一个 ——
+    锚定份额（可能是 C 类）若被暂停申购, 还需要同基金的 A 类兄弟份额兜底, 所以每组
     最多保留两个候选, 供状态过滤后回退。
     """
     groups = {}
     for c in candidates:
         groups.setdefault(_fund_base_name(c["name"]), []).append(c)
     out = []
-    for base, items in groups.items():
+    for _base, items in groups.items():
         picks = []
         if anchor:
             anchor_item = next((c for c in items if c["code"] == anchor), None)

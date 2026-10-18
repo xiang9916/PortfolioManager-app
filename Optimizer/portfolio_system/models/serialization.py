@@ -49,15 +49,6 @@ def legacy_asset_rows(problem: ProblemSpec) -> List[Dict[str, Any]]:
     return rows
 
 
-def corr_pairs_to_payload(pairs: Mapping[Tuple[str, str], float]) -> List[List[Any]]:
-    """{('A','B'): r} → [['A','B',r]]（corr_pairs 的既有载荷形状）。"""
-    return [[str(a), str(b), float(r)] for (a, b), r in pairs.items()]
-
-
-def corr_pairs_from_payload(payload: Sequence[Sequence[Any]]) -> Dict[Tuple[str, str], float]:
-    return {(str(row[0]), str(row[1])): float(row[2]) for row in payload}
-
-
 def result_payload(result: SolveResult) -> Dict[str, Any]:
     """SolveResult → 既有结果键名（用于等价性逐字段比较）。"""
     return {

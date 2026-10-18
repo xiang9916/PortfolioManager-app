@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Optional, Sequence
+from typing import Sequence
 
 from ..models.data_types import AssetSpec
 from .base_runner import Runner, RunOutcome, RunRequest, assemble_problem

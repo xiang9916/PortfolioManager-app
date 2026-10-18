@@ -255,19 +255,13 @@ public struct SensitivityAnalysisView: View {
     }
 
     private func statCard(_ t: String, _ v: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(t).font(.caption).foregroundStyle(.secondary)
-            Text(v).font(.title3).fontWeight(.semibold).monospacedDigit()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        StatCard(title: t, value: v)
     }
 
     private func tableHeader(_ t: String) -> some View {
         Text(t).frame(maxWidth: .infinity).font(.caption2).fontWeight(.semibold)
     }
 
-    private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
-    private func pctShort(_ v: Double) -> String { String(format: "%.1f%%", v * 100) }
+    private func pct(_ v: Double) -> String { DisplayFormat.pct(v) }
+    private func pctShort(_ v: Double) -> String { DisplayFormat.pct(v, decimals: 1) }
 }

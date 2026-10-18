@@ -13,7 +13,9 @@
 - Sources/PortfolioCore —— 纯逻辑库（模型 / SQLite / 数据源 / 备份 / 优化器 sidecar）
 - Sources/PortfolioManager —— SwiftUI UI 层
 - Sources/pm-cli —— 无 UI 的 CLI（可 headless 验证核心逻辑）
-- Optimizer/scripts —— vendored 的 portfolio-optimizer Python 脚本链
+- Optimizer/scripts —— vendored 的 portfolio-optimizer Python 脚本链（入口与数据装配）
+- Optimizer/portfolio_system —— 纯计算内核 + 调用器 + services（ADR 0003）
+- Optimizer/data —— 离线校准数据（calibrated_params.json）
 - scripts/ —— Info.plist、图标生成、打包脚本
 
 ## 构建

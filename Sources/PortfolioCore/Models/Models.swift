@@ -1,5 +1,3 @@
-import Foundation
-
 /// 资金池归属 —— 只有两种。池是**派生量**：由 `AssetMarket` 解析出的市场推导
 /// （中国内地 → 境内，其余 → 境外；市场解析不出来时按币种回退，CNY → 境内）。
 /// 旧的第三态 `cross` 已废除，见 `docs/adr/0002-remove-cross-pool.md`。

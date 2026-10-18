@@ -276,18 +276,12 @@ public struct OptimizationResultView: View {
     }
 
     private func statCard(_ t: String, _ v: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(t).font(.caption).foregroundStyle(.secondary)
-            Text(v).font(.title3).fontWeight(.semibold).monospacedDigit()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        StatCard(title: t, value: v)
     }
-    private func pct(_ v: Double) -> String { String(format: "%.2f%%", v * 100) }
+    private func pct(_ v: Double) -> String { DisplayFormat.pct(v) }
 
     /// 带符号百分比（+2.31% / -1.05%），用于「实际 − 目标」的差额
-    private func pctSigned(_ v: Double) -> String { String(format: "%+.2f%%", v * 100) }
+    private func pctSigned(_ v: Double) -> String { DisplayFormat.pct(v, signed: true) }
 
     /// 关键（critical）告警 —— 交付被降级 / 目标未达成的那一类（严重度分档由 Core 定义）。
     /// 分类与严重度**全部来自 PortfolioCore**：新结果只认 warning_items 的 stable code，

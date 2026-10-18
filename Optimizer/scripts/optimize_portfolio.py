@@ -13,8 +13,6 @@ if _PKG_ROOT not in sys.path:
 
 from datetime import datetime, timezone
 
-import numpy as np
-
 try:
     from scipy.optimize import minimize
 except ImportError:
@@ -81,6 +79,7 @@ from portfolio_system.core.constraints import (
 from portfolio_system.core.warnings import CodedWarning as _Warn   # noqa: F401
 
 # P3-b1：袖内/阶段二纯数学已搬进 core；这里保留同名薄壳与再导出（公开名与私有名都保留）。
+# `_max_return_given_mu` 生产路径不调用，但既有测试（test_sleeve_no_room.py）直接使用 → 保留兼容别名。
 from portfolio_system.core.constraints import max_return_given_mu as _max_return_given_mu
 from portfolio_system.core.stage2 import (
     internal_pool_optimize as _core_internal_pool_optimize,
@@ -372,45 +371,6 @@ def _sleeve_reseed_params(key, rf):
     return _core_sleeve_reseed_params(key, rf, _SLEEVE_POOL_SPECS)
 
 
-def _reseed_sleeves(sleeve, solved, rf, tol=RESEED_TOL):
-    """把本轮没被解出的袖按候选池重新播种（P3-b2 薄壳：池表在调用时读取）。"""
-    return _core_reseed_sleeves(sleeve, solved, rf, _SLEEVE_POOL_SPECS, tol=tol)
-
-
-
-
-
-
-def _sleeve_failure_reason(key):
-    """袖没被阶段二解出时的可诊断原因（P3-b2 薄壳：池表在调用时读取）。"""
-    return _core_sleeve_failure_reason(key, _SLEEVE_POOL_SPECS)
-
-
-
-
-def _undeliverable_warning(solved, sleeve):
-    """本轮交付统计其实只是阶段一模型统计时的显式提示（P3-b2 薄壳：池表在调用时读取）。"""
-    return _core_undeliverable_warning(solved, sleeve, _SLEEVE_POOL_SPECS)
-
-
-
-
-def _sleeve_tangency(key, rf, cache=None):
-    """袖"不加下限"的参考参数 (μ,σ) = 它自己的最大夏普篮子（P3-b1 薄壳：池表在调用时读取）。"""
-    return _core_sleeve_tangency(key, rf, _SLEEVE_POOL_SPECS, cache=cache)
-
-
-def _required_sleeve_mu(solved, tan_mu, target, dom_w, ov_w):
-    """二分求让阶段一可达上限 ≥ 目标所需的最小统一袖内 μ（P3-b2 薄壳：池表在调用时读取）。"""
-    return _core_required_sleeve_mu(solved, tan_mu, target, dom_w, ov_w, _SLEEVE_POOL_SPECS)
-
-
-def _floor_next_params(solved, key, t, rf):
-    """下限袖下一轮的假设参数（P3-b2 薄壳：池表与 _floor_seed 在调用时读取）。"""
-    return _core_floor_next_params(solved, key, t, rf, _SLEEVE_POOL_SPECS,
-                                   floor_seed_fn=_floor_seed)
-
-
 def _floor_seed(key, t, rf):
     """下限对应的可执行篮子参数 (μ,σ)（P3-b2 薄壳：池表在调用时读取）。"""
     return _core_floor_seed(key, t, rf, _SLEEVE_POOL_SPECS)
@@ -487,7 +447,7 @@ def _us_equity_outside_catalog_warning(tickers):
 def _cap_hit_warning(cap_hits):
     """active 单标的上限命中提示（合并成一条，带稳定 code）。"""
     merged = {}
-    for k, w, cap in cap_hits:
+    for k, w, _cap in cap_hits:
         merged[k] = max(merged.get(k, 0.0), float(w))
     return _Warn(
         f"active（个股/主动）类单标的上限 {AC.ACTIVE_CAP:.0%} 生效，以下标的被压到上限: "
@@ -520,17 +480,6 @@ def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_a
 def _seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w):
     """回退角点清零袖后的播种水平（P3-b2 薄壳：池表在调用时读取）。"""
     return _core_seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w, _SLEEVE_POOL_SPECS)
-
-
-def _sleeve_tangency_all(rf, cache):
-    """全部袖的切点 μ（带缓存）（P3-b2 薄壳：池表在调用时读取）。"""
-    return _core_sleeve_tangency_all(rf, cache, _SLEEVE_POOL_SPECS)
-
-
-def _sleeve_levels_for_feasibility(solved, tan_mu, target, dom_w, ov_w):
-    """组合层可达性复核（P3-b2 薄壳：池表在调用时读取）。"""
-    return _core_sleeve_levels_for_feasibility(solved, tan_mu, target, dom_w, ov_w,
-                                               _SLEEVE_POOL_SPECS)
 
 
 def solve_portfolio(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,
