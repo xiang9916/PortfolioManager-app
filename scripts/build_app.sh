@@ -1,8 +1,8 @@
 #!/bin/bash
 # Phase 8: assemble a distributable PortfolioManager.app from the SPM release build.
 # Usage: scripts/build_app.sh [--with-venv] [--no-codesign] [--dmg] [--zip]
-#   --dmg  产出 DMG（隐含 --zip：发布产物固定为 DMG + 仅含 .app 的 zip 两件套）
-#   --zip  只产出 PortfolioManager-<version>.zip（顶层就是 PortfolioManager.app）
+#   --dmg  产出 DMG（自 0.6-beta.4 起，DMG 是**唯一发布产物**；不再随发布提供 zip）
+#   --zip  仅本地调试：额外产出 PortfolioManager-<version>.zip（不随发布上传）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # repo root
@@ -20,7 +20,7 @@ for a in "$@"; do
   case "$a" in
     --with-venv) WITH_VENV=1 ;;
     --no-codesign) CODESIGN=0 ;;
-    --dmg) MAKE_DMG=1; MAKE_ZIP=1 ;;   # DMG 与 zip 是固定搭配的发布产物, 不做单选
+    --dmg) MAKE_DMG=1 ;;               # DMG 是唯一发布产物（不再隐含 zip）
     --zip) MAKE_ZIP=1 ;;
   esac
 done
@@ -76,7 +76,7 @@ cp -R "Optimizer/scripts" "${BUNDLE}/Contents/Resources/Optimizer/scripts"
 # 必须**递归**清 __pycache__: ADR 0003 起 Optimizer/scripts 下有了子包 (portfolio_system/),
 # 只删顶层那一层会漏掉嵌套缓存, 而 .pyc 头部会原样写入源码**绝对路径**
 # (实测 strings 出 /Users/<user>/Documents/Github/.../portfolio_system/core/linalg.py) ——
-# 那就是 AGENTS §1 的构建机绝对路径红线, 会随 DMG/zip 一起发布出去。
+# 那就是 AGENTS §1 的构建机绝对路径红线, 会随 DMG 一起发布出去。
 find "${BUNDLE}/Contents/Resources/Optimizer/scripts" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 # P4（2026-10-17）：Python 包已上提到 Optimizer/portfolio_system（scripts 的兄弟目录）——
 # bundle 内保持同构，脚本里 dirname(dirname(__file__)) 正好是包根。
@@ -118,7 +118,7 @@ if [ "${WITH_VENV}" = "1" ]; then
   VENV="${BUNDLE}/Contents/Resources/Optimizer/.venv"
   find "${VENV}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   # 注意: 不要写成 `grep ... | while ... done` —— venv 里已经没有 /Users 引用时 grep 返回 1,
-  # 配合脚本开头的 set -o pipefail 会把整个打包脚本在这里中止（实测踩过：无 DMG/无 zip/未签名）。
+  # 配合脚本开头的 set -o pipefail 会把整个打包脚本在这里中止（实测踩过：无 DMG/未签名）。
   # 先把命中列表落盘再处理, 列表为空就跳过。
   SCRUB_LIST="${DIST}/.venv-scrub-list"
   if grep -rlI -E '/Users/[A-Za-z0-9_.-]+/' "${VENV}" >"${SCRUB_LIST}" 2>/dev/null; then
@@ -167,7 +167,8 @@ if [ "${CODESIGN}" = "1" ]; then
   codesign --verify --verbose=2 "${BUNDLE}"
 fi
 
-# 发布产物固定为两件套: DMG（拖拽安装, 带 /Applications 快捷方式）+ 仅含 .app 的 zip。
+# 发布产物: DMG（拖拽安装, 带 /Applications 快捷方式）是唯一发布产物。
+# 自 0.6-beta.4 起不再随发布提供 zip；--zip 仅保留给本地调试（不生成发布附件）。
 if [ "${MAKE_DMG}" = "1" ] || [ "${MAKE_ZIP}" = "1" ]; then
   VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${BUNDLE}/Contents/Info.plist")"
 fi
