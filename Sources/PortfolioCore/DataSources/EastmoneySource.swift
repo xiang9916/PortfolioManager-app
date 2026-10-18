@@ -4,6 +4,11 @@ public final class EastmoneySource: DataSource, Sendable {
     public let name = "eastmoney"
     private let session: URLSession
 
+    /// 东财 `pingzhongdata` 的时间戳是**北京时间 00:00**（UTC+8）的毫秒值。
+    /// 取日必须按 `Asia/Shanghai`；按 UTC 会把日期整体早一天，与 Yahoo 序列配对时
+    /// 日期标签和相关性都会被系统性带偏（Python 侧同一根因已修）。
+    static let cnTimeZone = "Asia/Shanghai"
+
     public init() {
         let config = URLSessionConfiguration.default
         config.httpAdditionalHeaders = ["User-Agent": "Mozilla/5.0"]
@@ -197,7 +202,7 @@ public final class EastmoneySource: DataSource, Sendable {
             } else {
                 continue
             }
-            out.append((DateUtil.dateString(fromTimestampMillis: ts), val))
+            out.append((DateUtil.dateString(fromTimestampMillis: ts, timeZone: Self.cnTimeZone), val))
         }
         return out
     }
