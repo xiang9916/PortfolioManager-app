@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 81 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
+swift test  --disable-sandbox          # 87 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -150,7 +150,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **81 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **87 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）
@@ -366,7 +366,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 30 文件 / 167 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 33 文件 / 209 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
@@ -418,6 +418,34 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ✅ **`prices_cache` 残留已自愈（2026-10-18）**：缓存目录带取数口径版本标记（`PRICES_CACHE_SCHEMA`），
   标记缺失/不一致/损坏时整体清空重建 —— 崩溃 / 强制退出 / 跨版本升级都不会再把旧日期喂回调用方；
   回归：`test_prices_cache.py`（6 项，祖先树 0/6）。
+
+- **持仓纳入候选（2026-10-18，修「实盘持有但不在候选目录的标的永远选不出」）**：主优化候选池过去只有静态目录
+  （`US_INTERNAL`/`BROAD_ASSETS`/境内开放基金池）；`us_equity.holdings` 只收 `asset_class=="us_equity"` 的持仓，
+  且 `us_core_params` / stage-2 都只认目录内 key → 目录外持仓被**三重静默丢弃**，只有「新标的测试」能把它注入。
+  现在 App 在 extract 写 `held_assets`（全部 value>0 持仓）+ `include_unmodeled_holdings`，装配层
+  （`Optimizer/scripts/held_assets.py`，主流程与敏感性共用）把「未建模」持仓按**新标的测试同一套估计器**注入为
+  顶层 what-if 腿（`H_` 前缀、`test_class=active` → 10% 上限；目录外持仓不进袖内模型、不计入 O_US_CORE 袖）。
+  modeled 判定 = 内部池 key ∪ `market_data.SOURCES` 执行符号 ∪ 本次开放池选中代表基金 6 位代码 ∪ 当前顶层资产 key/fund_code。
+  加法式输出：detail `held{included,skipped,counts}`、summary `held_assets` + `assets[].is_held`（注入行必须进清单，
+  否则 `summary.missing_weights` 自检会误报）、告警 code `held.skipped` / `held.us_equity_outside_catalog`。
+  单只数据不可用只 skipped + 告警、不中断；无 `held_assets` 字段时输出逐字节不变。回归：`test_held_assets.py`（12 项）。
+- **敏感性锚定主结果 + 显式多初值（2026-10-18，修「曲线夏普低于主结果」）**：扫描逐点用上一点袖参数热启动，
+  会收敛到另一个**自洽但更差**的固定点（1–2 轮即判 converged）；旧 `sleeve_restarts` 只在「目标播种分叉」触发，
+  扫描路径从不触发、也不与主结果对照。现在 summary 在 `emit_sensitivity_anchor` 为真时输出 `sleeve_params`
+  （App 总开；CLI/旧提取文件不多键），`sensitivity_analysis.py` 增 `--anchor-target/--anchor-sleeve/--anchor-ret/--anchor-vol`：
+  锚点目标并入网格且该点**直接用主结果袖参数求解**（与结果页同一固定点，`anchor.matched` 逐位比较、容差 1e-6）；
+  其余点（**仅锚定模式**；无锚点路径逐字节不变）：首个点直接 canonical 起跑（有主结果袖参数 → anchor，否则 λ=0.20 种子）；
+  约束松弛点（target ≤ 切点估计）**直接复用上一 slack 点的交付结果、不求解**（同一组切点组合、不同目标下限）；
+  绷紧点（切点 < target ≤ 锚点目标）用主结果袖参数单次求解（失败才一次独立 prev 重试）；
+  高于锚点目标的点用主结果袖参数单次求解、fallback/未收敛即判停（不重试）。
+  任何重试都是独立单次求解，不再出现“canonical 当 alt → 引擎把 base 重跑一遍”的重复求解。
+  点级加法键 `fallback` 与 `chosen_start`；顺序扫描**遇到首个回退点即停**（不再补高价角点、不再补 max-feasible 点）；
+  `--step-max` 真正约束补点。实测（真实数据 34 个目标点）：旧实现 838.97s → 中间版 702.33s → 本版 **156.18s（≈2.6 分钟，目标 ≤180s）**；29 次完整求解 / 34 点 = 0.853 次/点（松弛点复用不求解，其余每点 1 次）。
+  **gating**：`sleeve_history[*].zero_weight_sleeves` 只在外部热启动/alt 路径写、`sleeve_restarts.reason` 只在 alt 路径写
+  → 主运行与 canned 等价门严格 5/5 不变。回归：`test_engine_alt_starts.py`（11 项）、`test_sensitivity_anchor.py`（19 项）；
+  `test_warning_codes.py` 4/4（`sensitivity.anchor_mismatch` 从 `callers/sensitivity_runner.py` 用字面量 code 发出）。
+- **已知残留（2026-10-18）**：主运行仍是单路径冷启动（若冷启动本身落在较差固定点，本轮不额外探索，留待全局多初值 A/B）；
+  零权重袖的假设参数仍不参与验证，只在外加热启动/alt 路径的审计键里可见。
   ⚠️ 修正日期后校准矩阵仍非 PSD（内部池 eigmin ≈ −0.20）：收缩/稳健估计（Ledoit-Wolf 等）属 P2，默认关，需 walk-forward A/B 后再定。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
