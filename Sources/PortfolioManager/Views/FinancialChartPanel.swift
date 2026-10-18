@@ -207,16 +207,7 @@ struct FinancialChartPanel: View {
             hoverRule
         }
         .chartYScale(domain: 0...(maxV * 1.2))
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine()
-                AxisValueLabel {
-                    if let d = value.as(Double.self) {
-                        Text("\(Int(d * 100))%")
-                    }
-                }
-            }
-        }
+        .chartYAxis { leadingYAxis { "\(Int($0 * 100))%" } }
     }
 
     // MARK: - 图 2 · 现金流 (暖色境内 / 冷色境外, 类别内由深到浅)
@@ -277,16 +268,7 @@ struct FinancialChartPanel: View {
             range: Self.cashSeries.map(\.color)
         )
         .chartLegend(.hidden)
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine()
-                AxisValueLabel {
-                    if let d = value.as(Double.self) {
-                        Text(amount(d))
-                    }
-                }
-            }
-        }
+        .chartYAxis { leadingYAxis { amount($0) } }
     }
 
     private var cashLegend: some View {
@@ -405,16 +387,7 @@ struct FinancialChartPanel: View {
                     hoverRule
                 }
                 .chartYScale(domain: 0...(maxV * 1.2))
-                .chartYAxis {
-                    AxisMarks(position: .leading) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let d = value.as(Double.self) {
-                                Text(amount(d))
-                            }
-                        }
-                    }
-                }
+                .chartYAxis { leadingYAxis { amount($0) } }
                 .chartLegend(.hidden)
             }
         }
@@ -488,16 +461,7 @@ struct FinancialChartPanel: View {
                     hoverRule
                 }
                 .chartYScale(domain: .automatic(includesZero: true))
-                .chartYAxis {
-                    AxisMarks(position: .leading) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let d = value.as(Double.self) {
-                                Text("\(Int(d * 100))%")
-                            }
-                        }
-                    }
-                }
+                .chartYAxis { leadingYAxis { "\(Int($0 * 100))%" } }
             }
         }
     }
@@ -692,16 +656,7 @@ struct FinancialChartPanel: View {
                         }
                     }
                 }
-                .chartYAxis {
-                    AxisMarks(position: .leading) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let d = value.as(Double.self) {
-                                Text(amount(d))
-                            }
-                        }
-                    }
-                }
+                .chartYAxis { leadingYAxis { amount($0) } }
                 .chartLegend(.hidden)
                 .chartOverlay(alignment: .topTrailing) { _ in
                     if let readout = capitalReadout {
@@ -847,6 +802,19 @@ struct FinancialChartPanel: View {
     }
 
     // MARK: - 格式化
+
+    /// 财务图表统一的 Y 轴骨架：只画刻度文字 + 网格线（5 张图共用，避免逐图复制）。
+    @AxisContentBuilder
+    private func leadingYAxis(_ label: @escaping (Double) -> String) -> some AxisContent {
+        AxisMarks(position: .leading) { value in
+            AxisGridLine()
+            AxisValueLabel {
+                if let d = value.as(Double.self) {
+                    Text(label(d))
+                }
+            }
+        }
+    }
 
     /// 金额自适应: ≥1亿 → x.xx亿; ≥1万 → x.x万; 否则取整 (CNY).
     private func amount(_ v: Double?) -> String {
