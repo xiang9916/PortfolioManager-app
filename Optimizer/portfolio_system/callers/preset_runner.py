@@ -38,7 +38,8 @@ class PresetRunner(Runner):
         return self._outcome(result)
 
     # ── 编排模式（P4 收尾）：取数 → 装配 → 求解 → 结果汇总 ──────────────────────
-    def _inject_test_assets(self, request, assets, work_dir, warnings):
+    def _inject_test_assets(self, request, assets, work_dir, warnings,
+                            held_keys=(), held_tickers=()):
         """新标的注入（实现仍在 NewAssetRunner；经 deps 注入，避免调用器互相 import）。"""
         deps = request.deps
         log = request.log
@@ -53,7 +54,29 @@ class PresetRunner(Runner):
             class_rules=deps.class_rules,
             skip_warning=deps.test_skip_warning,
             warnings=warnings,
+            held_keys=held_keys,
+            held_tickers=held_tickers,
             log=(lambda message, level="info": log("test_tickers", message, level=level))
+            if log is not None else None,
+        )
+
+    def _inject_held_assets(self, request, assets, work_dir, hsbc_pool):
+        """持仓纳入：把候选池里没有的持仓注入为顶层 what-if 腿（契约 §1.4）。
+
+        实现留在脚本层的 scripts/held_assets.py（它要读 params/market_data 的候选池表），
+        callers 不得 import 上层 → 经 deps.inject_held_assets 注入。
+        返回 (assets, corr_pairs, estimates, skipped)；不抛异常（单只失败只进 skipped）。
+        """
+        deps = request.deps
+        log = request.log
+        return deps.inject_held_assets(
+            request.extract, assets,
+            work_dir=work_dir,
+            hsbc_pool=hsbc_pool,
+            existing_keys={a["key"] for a in assets},
+            corr_keys=deps.corr_keys,
+            resolve=deps.resolve_test_assets,
+            log=(lambda message, level="info": log("held_assets", message, level=level))
             if log is not None else None,
         )
 
@@ -114,9 +137,50 @@ class PresetRunner(Runner):
             warnings.append(CodedWarning("没有可申购的境内基金", "fund.available_none"))
             raise NoDomesticAssets(warnings)
 
+        # ---- 持仓纳入（Q1，契约 §1.4）：在可投大类装配之后、新标的测试之前 ----
+        # 候选池里没有的持仓（例如某只实盘持有、但目录里没有的 ETF）过去被静默丢弃；
+        # 现在按顶层 what-if 腿注入。
+        # 全部依赖经 deps 注入（scripts/held_assets.py 属上层，callers 不得 import）。
+        held_block = None
+        held_corr_pairs, held_estimates = {}, []
+        held_keys, held_tickers = set(), set()
+        held_input = list(extract.get("held_assets") or [])
+        held_wiring = (deps.inject_held_assets is not None
+                       and deps.classify_held_assets is not None
+                       and deps.held_skip_warning is not None
+                       and deps.us_equity_outside_catalog_warning is not None)
+        if held_wiring and held_input and extract.get("include_unmodeled_holdings"):
+            modeled, _unmodeled = deps.classify_held_assets(extract, assets, hsbc_pool)
+            assets, held_corr_pairs, held_estimates, held_skipped = self._inject_held_assets(
+                request, assets, work_dir, hsbc_pool)
+            for ticker, reason in held_skipped:
+                warnings.append(deps.held_skip_warning(ticker, reason))
+            us_outside = [str(e.get("ticker") or "") for e in held_estimates
+                          if (e.get("asset_class") or "") == "us_equity"]
+            if us_outside:
+                warnings.append(deps.us_equity_outside_catalog_warning(us_outside))
+            if held_estimates or held_skipped:
+                held_block = {
+                    "included": held_estimates,
+                    "skipped": [{"ticker": t, "reason": r} for t, r in held_skipped],
+                    # 恒等式：held = modeled + injected + skipped（未建模的每只都有归宿）
+                    "counts": {"held": len(held_input), "modeled": len(modeled),
+                               "injected": len(held_estimates),
+                               "skipped": len(held_skipped)},
+                    # 加法式：与 test 块同格式的相关性行，供 build_benchmark 把持仓腿
+                    # 并入基准协方差（否则 Beta/Alpha 会把这些腿当空仓而失真）。
+                    "corr": [[i, j, float(v)] for (i, j), v in (held_corr_pairs or {}).items()],
+                }
+                held_keys = {str(e.get("key") or "") for e in held_estimates}
+                held_tickers = {str(e.get("ticker") or "").upper() for e in held_estimates}
+            log("held_assets",
+                f"持仓纳入：候选池内 {len(modeled)} 只 / 注入 {len(held_estimates)} 只 / "
+                f"跳过 {len(held_skipped)} 只")
+
         # ---- 新标的测试: 临时标的作为新增资产注入第一阶段 (在可投性过滤之后, 不受其约束) ----
         assets, test_corr_pairs, test_skipped, test_estimates = self._inject_test_assets(
-            request, assets, work_dir, warnings)
+            request, assets, work_dir, warnings,
+            held_keys=held_keys, held_tickers=held_tickers)
 
         # 缺 μ/σ 的标的（校准文件里没有它、也没有写死值可用）不能进优化：显式剔除并报警，
         # 不静默用 0 顶上（0 波动会直接霸占权重）。σ 已无人工下限，所以这类标的只能缺席。
@@ -127,11 +191,17 @@ class PresetRunner(Runner):
                 + "、".join(unusable))
             assets = [a for a in assets if a.get("mu") is not None and a.get("vol") is not None]
 
+        # 相关性表：宽基基础表 + 持仓纳入（**始终**合并）+ 新标的测试（有测试时合并）。
+        solve_corr = dict(deps.broad_corr)
+        solve_corr.update(held_corr_pairs or {})
+        if request.test_tickers and test_corr_pairs:
+            solve_corr.update(test_corr_pairs)
+
         # ---- 完整求解：阶段一（大类）+ 袖内固定点迭代（2026-10-14）----
         total_assets = request.total_assets or float(extract["total_value"])
         solved = deps.solve_portfolio(
             assets,
-            {**deps.broad_corr, **(test_corr_pairs if request.test_tickers else {})},
+            solve_corr,
             dom_w=dom_w, ov_w=ov_w, target=request.target_return, rf=request.rf,
             extract=extract, total_assets=total_assets, warnings=warnings, log=log)
         if solved is None:
@@ -187,7 +257,7 @@ class PresetRunner(Runner):
             internal_tickers=internal_tickers, stage2_error=stage2_error,
             japan_selection=japan_selection, gc_selection=gc_selection, final=final,
             target=target, target_gap=target_gap, warnings=warnings,
-            test_block=test_block, cap_hits=deps.cap_hits,
+            test_block=test_block, held_block=held_block, cap_hits=deps.cap_hits,
             cap_hit_warning=deps.cap_hit_warning,
             warning_items_fn=deps.warning_items_fn, log=log)
         return RunOutcome(result=None, payload=payload, context={"hsbc_pool": hsbc_pool})
@@ -225,11 +295,17 @@ def build_benchmark(output, final, *, tables, rf=0.0):
         for key, m in test_meta.items():
             broad.append({"key": key, "name": key, "mu": m["mu"], "vol": m["vol"],
                           "pool": m.get("pool")})
+        # 持仓纳入的 what-if 腿同理：不进这张表就等于把它们当空仓（Q1，加法式）。
+        held_block = output.get("held") or {}
+        held_meta = {t["key"]: t for t in held_block.get("included", [])}
+        for key, m in held_meta.items():
+            broad.append({"key": key, "name": key, "mu": m["mu"], "vol": m["vol"],
+                          "pool": m.get("pool")})
         keys = [a["key"] for a in broad]
         mu = np.array([a["mu"] if a["mu"] is not None else 0.0 for a in broad])
         vols = np.array([a["vol"] if a["vol"] is not None else 0.0 for a in broad])
         corr_pairs = dict(tables.broad_corr)
-        for i, j, v in test_block.get("corr", []) or []:
+        for i, j, v in (test_block.get("corr", []) or []) + (held_block.get("corr", []) or []):
             corr_pairs[(i, j)] = float(v)
         cov = tables.build_cov([{"key": k, "vol": v} for k, v in zip(keys, vols)], corr_pairs)
 
@@ -426,6 +502,30 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
             "sharpe": (mu - rf) / vol if vol else 0.0,
             "is_test": True,
         })
+    # 持仓纳入（Q1）：H_ 前缀的顶层 what-if 腿。与测试标的同理，必须进清单 ——
+    # 否则 summary.missing_weights 自检会把它们当成映射漏项（权重合计 ≠ 1）。
+    held_meta = {t["key"]: t for t in ((output.get("held") or {}).get("included") or [])}
+    listed = {a["key"] for a in assets}
+    for key, w in output.get("stage1", {}).get("weights", {}).items():
+        if key in listed:
+            continue
+        m = held_meta.get(key)
+        if m is None:
+            continue
+        mu = float(m["mu"])
+        vol = float(m["vol"])
+        src = "天天基金" if m.get("source") == "eastmoney" else "Yahoo"
+        pool = "境内池" if m.get("pool") == "domestic" else "境外池"
+        name = m.get("name") or f"[持仓] {m['ticker']}"
+        assets.append({
+            "key": key,
+            "name": f"{name}（{src} · {pool} · what-if，不进执行清单）",
+            "weight": w,
+            "expected_return": mu,
+            "volatility": vol,
+            "sharpe": (mu - rf) / vol if vol else 0.0,
+            "is_held": True,
+        })
     assets.sort(key=lambda x: -x["weight"])
     for a in assets:
         a["weight"] = round(float(a["weight"]), 6)
@@ -457,6 +557,7 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
         summary_warnings.append(CodedWarning(
             f"自检: 结果清单权重合计为 {total_w:.4f}，不等于 1 —— 请对照第一阶段权重核对映射是否漏项。",
             "summary.weight_sum_mismatch"))
+    held_block = output.get("held")
     summary = {
         "generated_at": output.get("availability", {}).get("checked_at"),
         "portfolio": {
@@ -468,11 +569,20 @@ def build_summary(output, *, tables, rf=0.0, hsbc_pool=None):
         "assets": assets,
         "benchmark": build_benchmark(output, final, tables=tables, rf=rf),
         "test_assets": (output.get("test") or {}).get("assets"),
+        # 持仓纳入（Q1，加法式；只在确有未建模持仓时出现 → 旧结果缺该键 → nil）
+        **({"held_assets": {"included": held_block.get("included", []),
+                            "skipped": held_block.get("skipped", [])}}
+           if held_block is not None else {}),
         "target_return": output.get("target_return"),
         "target_gap": output.get("target_gap"),
         "objective": output.get("objective"),
         "deliverable": bool(output.get("deliverable", True)),
         "final_source": output.get("final_source", "delivered"),
+        # 袖内参数 {袖 key: [μ, σ]}（Q2 敏感性锚定要用）。门控在 build_output_payload：
+        # extract 没带 emit_sensitivity_anchor 时 output 里没有这个键 → summary 也不加，
+        # 旧提取文件的结果与改造前逐字节一致。
+        **({"sleeve_params": output["sleeve_params"]}
+           if "sleeve_params" in output else {}),
         "warnings": summary_warnings,
         # 加法式告警明细（code + message）：Swift 只认 code，不再匹配文案。
         # 必须用**最终** summary_warnings 生成 —— 它包含本函数内追加的自检类告警，
@@ -585,6 +695,13 @@ class PresetDeps:
     cap_hits: list
     cap_hit_warning: Callable[..., Any]
     warning_items_fn: Callable[..., Any]
+    # 持仓纳入（Q1，契约 §1.4）：实现留在 scripts/held_assets.py，经装配层注入。
+    # 缺省 None = 未接线 → 该功能不启用（旧调用方/既有测试的 PresetDeps 构造保持可用，
+    # 输出与之前逐字节一致）。
+    inject_held_assets: Optional[Callable[..., Any]] = None
+    classify_held_assets: Optional[Callable[..., Any]] = None
+    held_skip_warning: Optional[Callable[[str, str], Any]] = None
+    us_equity_outside_catalog_warning: Optional[Callable[[list], Any]] = None
 
 
 def build_output_payload(*, solved, keys, stage1_weights, stage1_stats, extract, dom_w, ov_w,
@@ -593,7 +710,7 @@ def build_output_payload(*, solved, keys, stage1_weights, stage1_stats, extract,
                          domestic_selection, internal, internal_tickers, stage2_error,
                          japan_selection, gc_selection, final, target, target_gap,
                          warnings, test_block, cap_hits, cap_hit_warning,
-                         warning_items_fn, log=None):
+                         warning_items_fn, log=None, held_block=None):
     """结果页 JSON 的**唯一装配点**（原 main() 的 output 字典逐句搬迁，键序/键名不变）。"""
     ret1, vol1, sharpe1 = stage1_stats
     stage1_detail = {
@@ -674,11 +791,22 @@ def build_output_payload(*, solved, keys, stage1_weights, stage1_stats, extract,
         if _extra_val is not None:
             output[_extra_key] = _extra_val
 
+    # Q2 敏感性锚定要用主结果的袖内参数。**门控**：只有 extract 显式带
+    # emit_sensitivity_anchor=true（App 侧写入）时才出这个加法键 →
+    # 旧提取文件 / CLI / canned 回放输出不多任何键（逐字节兼容）。
+    if extract.get("emit_sensitivity_anchor"):
+        output["sleeve_params"] = (output.get("sleeve") or {}).get("params")
+
     if cap_hits:
         warnings.append(cap_hit_warning(cap_hits))
 
     if test_block is not None:
         output["test"] = test_block
+
+    # 持仓纳入（Q1，加法式）：只在真的存在未建模持仓（注入或跳过）时出现 →
+    # 没有 held_assets / 全部已建模的旧提取文件输出与之前逐字节一致。
+    if held_block is not None:
+        output["held"] = held_block
 
     if internal is not None:
         x_internal, ret2, vol2, sharpe2, w2, internal_tickers = internal

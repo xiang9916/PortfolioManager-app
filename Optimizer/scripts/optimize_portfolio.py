@@ -68,6 +68,8 @@ from portfolio_system.callers.preset_runner import (  # noqa: F401
 from portfolio_system.callers.base_runner import RunRequest
 from portfolio_system.services.portfolio_source import load_extract
 from test_tickers import parse_test_tickers, resolve_test_assets
+# 持仓纳入（Q1）：classify/inject 实现（读 params / market_data 候选池表）在 scripts 层。
+import held_assets as _held_assets
 import asset_classes as AC
 
 # D2：active 上限表与告警载体已搬进 core（portfolio_system.core.constraints / core.warnings）。
@@ -444,6 +446,9 @@ WARNING_CODES = {
     "summary.weight_sum_mismatch": "自检：结果清单权重合计 ≠ 1",
     "fund.available_none": "境内没有可申购基金候选",
     "test.ticker_skipped": "测试标的被跳过 / 不可用",
+    "held.skipped": "持仓不在候选池且无法纳入优化（逐只，原因见明细）",
+    "held.us_equity_outside_catalog": "美股权益持仓不在内部标的目录：按其顶层 what-if 腿纳入、不计入 O_US_CORE 袖",
+    "sensitivity.anchor_mismatch": "敏感性锚点目标点的结果被主结果支配（Q2 锚定）",
     "other": "未分类告警（新增文案时请补 code）",
 }
 
@@ -459,6 +464,24 @@ WARNING_CODES = {
 def _test_ticker_skip_warning(ticker, reason):
     """「新标的测试」里某只标的被跳过时的告警（消息与旧文案逐字一致，只补 code）。"""
     return _Warn(f"测试标的 {ticker} 已跳过: {reason}", "test.ticker_skipped")
+
+
+def _held_skip_warning(ticker, reason):
+    """持仓纳入（Q1）：某只不在候选池的持仓无法纳入优化（契约 §1.4 的消息格式）。"""
+    return _Warn(f"持仓标的 {ticker} 未纳入优化: {reason}", "held.skipped")
+
+
+def _us_equity_outside_catalog_warning(tickers):
+    """us_equity 类持仓不在内部标的目录时的提示（契约 §1.4）。
+
+    这类持仓不会进 O_US_CORE 袖（袖内候选只来自 US_INTERNAL 目录），而是按各自的顶层
+    what-if 腿纳入组合模型 —— 必须显式说明，否则用户会以为它仍被袖内优化考虑。
+    """
+    names = "、".join(str(t) for t in tickers)
+    return _Warn(
+        f"美股权益持仓 {names} 不在内部标的目录中：已按各自的顶层 what-if 腿纳入优化"
+        f"（test_class=active，受 {AC.ACTIVE_CAP:.0%} 单标的上限），不计入 O_US_CORE 袖。",
+        "held.us_equity_outside_catalog")
 
 
 def _cap_hit_warning(cap_hits):
@@ -635,6 +658,12 @@ def _preset_deps():
         cap_hits=CAP_HITS,
         cap_hit_warning=_cap_hit_warning,
         warning_items_fn=_warning_items,
+        # 持仓纳入（Q1）：实现是 scripts/held_assets.py 的两个函数；告警工厂在这里，
+        # callers 只经 PresetDeps 调用（不得 import 上层脚本）。
+        inject_held_assets=_held_assets.inject_held_assets,
+        classify_held_assets=_held_assets.classify_held_assets,
+        held_skip_warning=_held_skip_warning,
+        us_equity_outside_catalog_warning=_us_equity_outside_catalog_warning,
     )
 
 

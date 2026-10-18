@@ -12,6 +12,7 @@ Outputs JSON array of points, each with:
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 # Add scripts dir to path so params can be imported
@@ -26,8 +27,10 @@ import math
 import numpy as np
 
 from portfolio_system.core.constants import (  # noqa: E402
+    DELIVERY_EPS,
     SCAN_LOOP_EPS as _SCAN_LOOP_EPS,
-    SCAN_TARGET_MARGIN_EPS as _SCAN_MARGIN)
+    SCAN_TARGET_MARGIN_EPS as _SCAN_MARGIN,
+    TARGET_REACH_EPS)
 try:
     from scipy import integrate, stats
 except ImportError:
@@ -50,8 +53,11 @@ from optimize_common import (
 # 完整求解（阶段一 + 袖内固定点 + 阶段二）：与结果页同源，否则敏感性只扫了阶段一。
 # P3-b3（步骤④）：改经 callers.SensitivityRunner 直连 core/engine —— 本脚本不再依赖
 # optimize_portfolio（模块级与调用期都不 import；P3 的正式门）。
-from portfolio_system.callers.sensitivity_runner import SensitivityRunner
-from portfolio_system.core.sleeve_params import SleeveUniverse, build_pool_specs
+from portfolio_system.callers.sensitivity_runner import (  # noqa: E402
+    SensitivityRunner, anchor_mismatch_warning)
+from portfolio_system.core.fixpoint import restart_seed_params  # noqa: E402
+from portfolio_system.core.sleeve_params import (  # noqa: E402
+    SLEEVE_KEYS, SleeveUniverse, build_pool_specs)
 from portfolio_system.core.stage2 import (  # SP500 内部相关性：pure data，唯一来源在 core
     SP500_INTERNAL_CORR, SP500_INTERNAL_CORR_DEFAULT)
 # P3-b3：基金状态流水线改走 services（唯一子进程入口）；脚本层不再直接 import fund_pipeline。
@@ -63,6 +69,20 @@ from portfolio_system.services.pipeline import (
     load_pipeline,
 )
 from portfolio_system.services.portfolio_source import load_extract
+
+# ── 敏感性锚定（契约 §2.2，2026-10-18 Q2）──────────────────────────────────────
+#: 锚点目标在网格里的判定容差（网格目标四舍五入到 4 位 → 5e-5 足以覆盖半格）。
+_ANCHOR_TARGET_EQ_EPS = 5e-5
+#: 锚点一致性的判定值（Lead 2026-10-18 收口）：锚点目标点必须与主结果**逐位一致**。
+#: 点上统计先 round 到 6 位，主结果的 ret/vol 是原始浮点 → 取 1e-6 覆盖「六位小数相同」
+#: 的舍入误差（比 1e-9 稳健，又仍远小于任何有意义的收益/波动差）。
+_ANCHOR_MATCH_TOL = 1e-6
+#: 低目标档的确定性候选 λ（契约 §2.2 固定值 0.20）。
+_ANCHOR_SEED_LAMBDA = 0.20
+#: 边界带宽度（Lead 2026-10-18 v5）：切点估计以上 2pp 内、且 ≤ anchor_target 的点
+#: 改用 **prev 起跑**（anchor 起跑在该带每点打满 10 轮未收敛 ~30s；D4 实测 3 点 105s；
+#: prev 起跑 ~4s）。失败才做一次独立 anchor（无袖参数则 seed）重试。
+_ANCHOR_BOUNDARY_BAND = 0.02
 
 
 def _sleeve_universe():
@@ -90,7 +110,13 @@ def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
                         request_timeout=12.0, check_total_timeout=300.0, log=None):
     """复用/重建联网管线, 按优化同一口径构建 assets 与开放基金池。
 
-    返回 (assets, hsbc_pool, warnings, pipeline_info)。
+    返回 (assets, hsbc_pool, warnings, pipeline_info, held_meta)。
+
+    第 5 元 held_meta 是**持仓纳入**（契约 §1.3/§1.4，2026-10-18 Q1）的加法产物：
+    `None`（没有 held_assets / 全部已建模 / helper 不可用）或
+    `{"corr": {(held_key, broad_key): r}, "block": {included/skipped/counts}}`。
+    求解的相关性表 = BROAD_CORR + held corr（见 run_sensitivity）；estimates/skipped
+    透传进敏感性输出的加法块 `"held"`。
     """
     log = log or _stderr_log
     warnings = list(extract.get("warnings", []))
@@ -128,6 +154,46 @@ def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
         hsbc_pool, pool_meta, avail_funds, hsbc_status, warnings,
         core_mu=core_mu, core_vol=core_vol, drop_note="已剔除")
 
+    # ---- 持仓纳入（Q1，契约 §1.4 末）：在可投大类装配之后、求解之前 ----
+    # 实现是 scripts/held_assets.py（依赖 params/market_data 的候选池表）的 helper；
+    # 本脚本只调用、不复制逻辑。helper 未就绪 → 跳过（旧行为，输出不加 held 块）。
+    held_meta = None
+    held_input = list(extract.get("held_assets") or [])
+    if held_input and extract.get("include_unmodeled_holdings"):
+        try:
+            from held_assets import classify_held_assets, inject_held_assets
+        except ImportError:
+            log("held_assets", "held_assets.py 不可用，跳过持仓纳入")
+            classify_held_assets = inject_held_assets = None
+        if inject_held_assets is not None:
+            from test_tickers import resolve_test_assets
+            modeled, _unmodeled = classify_held_assets(extract, assets, hsbc_pool)
+            assets, held_corr, held_estimates, held_skipped = inject_held_assets(
+                extract, assets,
+                work_dir=work,
+                hsbc_pool=hsbc_pool,
+                existing_keys={a["key"] for a in assets},
+                corr_keys=[a["key"] for a in assets],
+                resolve=resolve_test_assets,
+                log=(lambda message, level="info":
+                     log("held_assets", message, level=level)),
+            )
+            if held_estimates or held_skipped:
+                held_meta = {
+                    "corr": dict(held_corr or {}),
+                    "block": {
+                        "included": held_estimates,
+                        "skipped": [{"ticker": t, "reason": r} for t, r in held_skipped],
+                        # 恒等式：held = modeled + injected + skipped（未建模的每只都有归宿）
+                        "counts": {"held": len(held_input), "modeled": len(modeled),
+                                   "injected": len(held_estimates),
+                                   "skipped": len(held_skipped)},
+                    },
+                }
+                log("held_assets",
+                    f"持仓纳入：候选池内 {len(modeled)} 只 / 注入 {len(held_estimates)} 只 / "
+                    f"跳过 {len(held_skipped)} 只")
+
     pipeline_info = {
         "work_dir": str(work),
         "reused_cache": cached is not None,
@@ -136,7 +202,7 @@ def load_extract_assets(extract, work_dir, hsbc_request_timeout=60.0,
         "checked_codes": len(avail_funds),
         "open_pool_categories": len(hsbc_pool),
     }
-    return assets, hsbc_pool, warnings, pipeline_info
+    return assets, hsbc_pool, warnings, pipeline_info, held_meta
 
 
 def lognormal_cagr(mu, sigma):
@@ -205,33 +271,168 @@ def fattail_cagr(mu, sigma, nu=3.0, floor=-0.999):
     return math.exp(g) - 1.0
 
 
+def _anchor_ignore(message):
+    """锚点参数不合法时的**唯一**提示出口（契约 §2.2：忽略锚点 + stderr 一条提示，不失败）。"""
+    print(f"[anchor] {message}，已忽略锚点参数（按无锚点模式继续）", file=sys.stderr)
+
+
+def _parse_anchor(anchor_target, anchor_sleeve, anchor_ret, anchor_vol, assets):
+    """校验/规范化锚点参数；任何一项不合法 → stderr 一条提示并**整体**忽略锚点。
+
+    契约 §2.2：anchor 解析失败 / 袖 key 与资产不匹配 → 忽略锚点（不失败）。
+    `anchor_target` 是锚定模式的开关：None = 无锚点（与旧版逐字节一致）。
+    返回 None 或 {"target", "sleeve", "ret", "vol"}；sleeve 规范化为 {key: (mu, sigma)}。
+    """
+    if anchor_target is None:
+        return None
+    try:
+        target = float(anchor_target)
+    except (TypeError, ValueError):
+        _anchor_ignore(f"锚点目标 {anchor_target!r} 不是数值")
+        return None
+    if not math.isfinite(target):
+        _anchor_ignore(f"锚点目标 {anchor_target!r} 不是有限数值")
+        return None
+
+    sleeve = None
+    if anchor_sleeve is not None:
+        raw = anchor_sleeve
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError as exc:
+                _anchor_ignore(f"锚点袖参数不是合法 JSON（{exc}）")
+                return None
+        if not isinstance(raw, Mapping):
+            _anchor_ignore("锚点袖参数不是 {袖 key: [μ, σ]} 结构")
+            return None
+        sleeve = {}
+        for key, value in raw.items():
+            try:
+                mu, vol = float(value[0]), float(value[1])
+            except (TypeError, ValueError, IndexError):
+                _anchor_ignore(f"锚点袖 {key!r} 的参数不是 [μ, σ] 数值对")
+                return None
+            if not (math.isfinite(mu) and math.isfinite(vol) and vol > 0):
+                _anchor_ignore(f"锚点袖 {key!r} 的参数非法（μ/σ 必须有限且 σ>0）")
+                return None
+            sleeve[str(key)] = (mu, vol)
+        asset_sleeve_keys = {str(a.get("key")) for a in assets
+                             if str(a.get("key")) in SLEEVE_KEYS}
+        unknown = sorted(set(sleeve) - asset_sleeve_keys)
+        if unknown:
+            _anchor_ignore("锚点袖 key 与本轮资产不匹配：" + "、".join(unknown))
+            return None
+
+    extras = {}
+    for name, value in (("anchor_ret", anchor_ret), ("anchor_vol", anchor_vol)):
+        if value is None:
+            extras[name] = None
+            continue
+        try:
+            fv = float(value)
+        except (TypeError, ValueError):
+            _anchor_ignore(f"{name} 不是数值")
+            return None
+        if not math.isfinite(fv):
+            _anchor_ignore(f"{name} 不是有限数值")
+            return None
+        extras[name] = fv
+    return {"target": target, "sleeve": sleeve,
+            "ret": extras["anchor_ret"], "vol": extras["anchor_vol"]}
+
+
+def _anchor_consistency(target, point, main_ret, main_vol, rf, warnings):
+    """锚点一致性检查（契约 §2.2 + Lead 2026-10-18 收口）：返回加法式 "anchor" 块。
+
+    判定 = **逐位一致**（不是「未被支配」）：锚点目标点的 ret/vol 与主结果的 ret/vol
+    相差都 ≤ `_ANCHOR_MATCH_TOL`（1e-6，见该常量的注释）才算 matched=True。
+    原因：锚点目标点改为**直接用主结果袖参数作初值**求解（见 `_add_point`），所以它
+    本来就应当与主运行同一固定点；任何可见差异都说明锚定口径不一致 → 发
+    `sensitivity.anchor_mismatch` 告警。
+
+    缺少主结果收益/波动（CLI 没传 --anchor-ret/--anchor-vol）时无法比较 → matched=True
+    （不误报）；锚点目标点不可行但主结果有统计 → matched=False（曲线缺了锚点）。
+    """
+    main_sharpe = None
+    if main_ret is not None and main_vol is not None and float(main_vol) > 0:
+        main_sharpe = (float(main_ret) - float(rf)) / float(main_vol)
+    main = {"ret": main_ret, "vol": main_vol, "sharpe": main_sharpe}
+    if point is None:
+        point = {"ret": None, "vol": None, "sharpe": None}
+    matched = True
+    if main_ret is not None and main_vol is not None:
+        if point.get("ret") is None or point.get("vol") is None:
+            matched = False
+        else:
+            matched = (abs(float(point["ret"]) - float(main_ret)) <= _ANCHOR_MATCH_TOL
+                       and abs(float(point["vol"]) - float(main_vol)) <= _ANCHOR_MATCH_TOL)
+    if not matched:
+        warnings.append(anchor_mismatch_warning(target, point, main))
+    return {"target": round(float(target), 4), "matched": bool(matched),
+            "point": point, "main": main}
+
+
 def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
                     request_timeout=12.0, check_total_timeout=300.0,
-                    step_min=0.05, step_max=None, tail_dof=3.0, log=None):
-    """Run sensitivity analysis from step_min to max feasible return, 1% increments."""
+                    step_min=0.05, step_max=None, tail_dof=3.0, log=None,
+                    anchor_target=None, anchor_sleeve=None,
+                    anchor_ret=None, anchor_vol=None):
+    """Run sensitivity analysis from step_min to max feasible return, 1% increments.
+
+    锚定模式（契约 §2.2，2026-10-18 Q2）：传 `anchor_target`（= 主结果的目标收益率）
+    即启用。锚点目标并入扫描网格，并对「约束绷紧」的点与锚点目标点额外传一个
+    canonical 候选（主结果的袖参数 / λ=0.20 种子）给引擎择优 —— 于是曲线上锚点目标
+    那一点就是「同锚定口径下实际会交付的组合」，可与主结果（绿点）重合。
+    无锚点调用（anchor_target=None）：求解次数、数值行为与旧版一致，只多加法字段
+    `fallback` / `chosen_start`（锚定模式才有的 `anchor` 块不出现）。
+    """
     global RF
 
     # RF override from extract
     rf = extract.get("rf")
     if rf is not None:
         RF = float(rf)
+    rf = float(RF)
 
     dom_w = float(extract["domestic_weight"])
     ov_w = float(extract["overseas_weight"])
 
     # 与 optimize_portfolio.py 同一资产口径 (联网管线复用/重建 + 暂停申购大类剔除)
-    assets, _hsbc_pool, warnings, pipeline_info = load_extract_assets(
+    loaded = load_extract_assets(
         extract, work_dir,
         hsbc_request_timeout=hsbc_request_timeout,
         request_timeout=request_timeout,
         check_total_timeout=check_total_timeout,
         log=log,
     )
+    if len(loaded) == 5:                       # 契约 §1.4：装配层返回 held_meta
+        assets, _hsbc_pool, warnings, pipeline_info, held_meta = loaded
+    else:                                      # 兼容旧 4 元组装配桩（既有离线测试）
+        assets, _hsbc_pool, warnings, pipeline_info = loaded
+        held_meta = None
+    held_corr = dict((held_meta or {}).get("corr") or {})
+
+    # 求解用的相关性表 = 宽基基础表 + 持仓纳入（与 optimize_portfolio 同口径；
+    # 没有 held 时内容与 BROAD_CORR 完全一致 → 旧行为逐字节不变）。
+    solve_corr = dict(BROAD_CORR)
+    solve_corr.update(held_corr)
+
+    # ---- 锚点参数校验（在拿到 assets 之后做袖 key 匹配检查）----
+    anchor = _parse_anchor(anchor_target, anchor_sleeve, anchor_ret, anchor_vol, assets)
+    anchor_mode = anchor is not None
+    anchor_target = anchor_ret = anchor_vol = None
+    anchor_sleeve = None
+    if anchor_mode:
+        anchor_target = anchor["target"]
+        anchor_sleeve = anchor["sleeve"]
+        anchor_ret = anchor["ret"]
+        anchor_vol = anchor["vol"]
 
     keys = [a["key"] for a in assets]
     mu = np.array([a["mu"] for a in assets])
     vols = np.array([a["vol"] for a in assets])
-    cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], BROAD_CORR)
+    cov = build_broad_cov([{"key": a["key"], "vol": a["vol"]} for a in assets], solve_corr)
     dom_idx = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
     ov_idx = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
 
@@ -256,47 +457,220 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         targets.append(round(t, 4))
         t += 0.005
 
+    # --step-max 是**上限**（契约 §2.2：第二阶段补点遵守它）：网格、尾部补点与
+    # 「最大可行收益」那一点都不得越过上限。锚点目标例外 —— 用户真正关心的点必须
+    # 出现在曲线上，即使它在 --step-max 之上。
+    cap = min(step_max, max_ret) if step_max is not None else max_ret
+    anchor_t = round(float(anchor_target), 4) if anchor_mode else None
+    if anchor_t is not None:
+        targets.append(anchor_t)
+
     # Always include the max feasible as last point
     if max_ret > 0 and (not targets or abs(targets[-1] - max_ret) > 0.005):
-        targets.append(round(max_ret, 4))
+        if max_ret <= cap + _SCAN_LOOP_EPS:
+            targets.append(round(max_ret, 4))
+    if anchor_t is not None:
+        # 锚点目标并入网格：去重、排序、四舍五入 4 位。
+        targets = sorted(set(targets))
 
     # 逐点跑**完整**流水线（阶段一 + 袖内固定点 + 阶段二）：图上每一点就是
     # 「把目标设成 T 时实际会交付的那个组合」，与结果页同源。
-    # 用上一点的袖参数热启动，避免每个点都从 live 篮子从头迭代。
+    #
+    # 初值选择 = **按点**（Lead 2026-10-18 v4；D3 实测 374.77s 的根因修复）：
+    #   · 锚定模式首点（切点估计未知）：直接 canonical 起跑 —— 有主结果袖参数 → anchor
+    #     （D2 证明该初值在低目标给到好盆地），否则 λ=0.20 种子，都无才冷启动；
+    #   · 锚定模式 slack 点（target ≤ 切点估计）：**不调 solve_point**，直接复制上一个
+    #     slack 点的 ret/vol/sharpe/worst/cagr（同一组切点组合、不同目标下限），
+    #     chosen_start="reuse"（D2 里 T≤9% 的 8 个 28s 级求解由此省掉）；
+    #   · 锚点目标点（非首点）：直接用主结果袖参数（与主运行同一固定点 → 绿点=蓝点）；
+    #   · 边界带（切点估计 + ε < target ≤ 切点估计 + 2pp 且 ≤ anchor_target、非锚点目标点）
+    #     → **prev 起跑单次**；仅失败时做一次独立 anchor（无袖参数则 seed）起跑重试
+    #     （D4 实测 anchor 起跑在该带每点打满 10 轮 ~30s，prev ~4s）；
+    #   · 其余切点估计 < target ≤ anchor_target → 主结果袖参数 canonical（"anchor"）；
+    #     无锚点袖参数 → 确定性 λ=0.20 种子（"seed"）；失败且有 prev → 一次独立 prev 重试；
+    #   · target > anchor_target → **anchor canonical 单次**（D2 该段 ~3.5s/点）；
+    #     结果 fallback/未收敛 → **直接判停，不做 prev 重试**（v3 的 0.215 双跑 82s 纯浪费）。
+    # 任何重试都是**独立的一次求解**（sleeve_start=另一初值、alt_starts=None），绝不把
+    # 引擎的 base 再跑一遍。每点默认 1 次求解（slack 0 次），最多 2 次；首个 fallback 点即停。
+    # ⚠️ 以上重排只作用于**锚定模式**；无锚点（anchor_target=None）路径保持逐字节不变。
     total_assets = float(extract["total_value"])
-    runner = SensitivityRunner(universe=_sleeve_universe())
+    universe = _sleeve_universe()
+    pool_specs = dict(universe.pool_specs or {})
+    runner = SensitivityRunner(universe=universe)
     points = []
-    sleeve_start = None
+    sleeve_start = None          # 上一点的交付袖参数（prev 热启动/重试的唯一来源）
     last_mu, last_cov = mu, cov
+    last_ok_mu = None            # 最后一个**非回退**点的模型（max_final 的诚实口径）
+    tangency_est = None          # 首个可行点的交付收益 = 切点（约束开始绷紧）估计
+    anchor_point = None          # 锚点目标点的 {ret, vol, sharpe}
+    _slack_ref = None            # 上一个 slack 点的交付字段（锚定模式复用来源）
+    _seed_cache = {"resolved": False, "vec": False}   # λ=0.20 种子惰性缓存（False=无种子）
+
+    def _seed_params():
+        """确定性 λ=0.20 种子（每扫描只算一次；无种子 → None）。"""
+        if not _seed_cache["resolved"]:
+            seeds = restart_seed_params(rf, pool_specs, (_ANCHOR_SEED_LAMBDA,))
+            _seed_cache["vec"] = dict(seeds[0][1]) if seeds else False
+            _seed_cache["resolved"] = True
+        if not _seed_cache["vec"]:
+            return None
+        return dict(_seed_cache["vec"])
+
+    def _is_fallback(solved, target_f):
+        """契约 §2.2 的 fallback 判定：引擎降级了目标，或交付收益没到目标。"""
+        return bool(
+            float(solved.get("target", target_f)) < target_f - TARGET_REACH_EPS
+            or float(solved["final"]["ret"]) < target_f - DELIVERY_EPS)
+
+    def _needs_retry(solved, target_f):
+        """该初值的结果「不可用」：不可行 / fallback / 未收敛 → 才值得另起一次求解。"""
+        return (solved is None or _is_fallback(solved, target_f)
+                or not bool(solved.get("sleeve_converged", True)))
+
+    def _quality(solved, target_f):
+        """重试「取可用者」的比较键：可用优先 → 交付缺口小 → 夏普高（确定性）。"""
+        if solved is None:
+            return (2, 0.0, 0.0)
+        fin = solved.get("final") or {}
+        ret = float(fin.get("ret") or 0.0)
+        sharpe = float(fin.get("sharpe") or 0.0)
+        bad = 0 if not _needs_retry(solved, target_f) else 1
+        return (bad, round(max(0.0, target_f - ret), 6), round(-sharpe, 6))
+
+    def _solve_at(target, start, point_warnings):
+        """独立单次求解（alt_starts 恒为 None —— 绝不让引擎双跑）。"""
+        return runner.solve_point(
+            assets, solve_corr, dom_w=dom_w, ov_w=ov_w, target=target, rf=rf,
+            extract=extract, total_assets=total_assets, warnings=point_warnings,
+            sleeve_start=start, alt_starts=None,
+        )
+
+    def _plan_start(target_f, is_anchor, prev_start):
+        """按点选择初值：返回 (start, label, retry)；retry = (start2, label2) 或 None。"""
+        # 首点（切点估计未知）：锚定模式直接 canonical 起跑（v4；有袖参数 → anchor，
+        # 否则 λ=0.20 种子，都无才冷启动）；无锚点模式保持旧行为 sleeve_start=None。
+        if tangency_est is None:
+            if anchor_mode:
+                if anchor_sleeve is not None:
+                    return dict(anchor_sleeve), "anchor", None
+                seed = _seed_params()
+                if seed is not None:
+                    return seed, "seed", None
+            return None, "prev", None
+        # 锚点目标点（非首点）：直接用主结果袖参数（逐位一致；不重试）。
+        if is_anchor and anchor_sleeve is not None:
+            return dict(anchor_sleeve), "anchor", None
+        # 约束松弛（target ≤ 切点估计）：上一点热启动（廉价）。
+        if target_f <= float(tangency_est) + _SCAN_LOOP_EPS:
+            return prev_start, "prev", None
+        # 锚点右半段（target > anchor_target）：anchor canonical **单次**；失败直接判停。
+        # （v3 的「先 prev、失败才 anchor」会让 0.215 这种点双跑 ~82s，纯浪费。）
+        if (anchor_mode and anchor_target is not None
+                and target_f > float(anchor_target) + _ANCHOR_TARGET_EQ_EPS):
+            if anchor_sleeve is not None:
+                return dict(anchor_sleeve), "anchor", None
+            seed = _seed_params()
+            if seed is not None:
+                return seed, "seed", None
+            return prev_start, "prev", None
+        # 边界带（v5，Lead 2026-10-18）：切点估计 + ε < target ≤ 切点估计 + 2pp、且
+        # target ≤ anchor_target、非锚点目标点 → **prev 起跑单次**；失败才做一次独立
+        # anchor（无袖参数则 seed）起跑重试。反过来的 anchor 起跑会每点白付 ~30s。
+        if (anchor_mode and not is_anchor and anchor_target is not None
+                and tangency_est is not None
+                and float(tangency_est) + _SCAN_LOOP_EPS < target_f
+                and target_f <= float(tangency_est) + _ANCHOR_BOUNDARY_BAND + _SCAN_LOOP_EPS
+                and target_f <= float(anchor_target) + _ANCHOR_TARGET_EQ_EPS):
+            retry = None
+            if anchor_sleeve is not None:
+                retry = (dict(anchor_sleeve), "anchor")
+            else:
+                seed = _seed_params()
+                if seed is not None:
+                    retry = (seed, "seed")
+            return prev_start, "prev", retry
+        # 切点 < target ≤ anchor_target：canonical 单次求解；失败 +1 次独立 prev 重试。
+        if anchor_sleeve is not None:
+            retry = (prev_start, "prev") if prev_start is not None else None
+            return dict(anchor_sleeve), "anchor", retry
+        seed = _seed_params()
+        if seed is not None:
+            retry = (prev_start, "prev") if prev_start is not None else None
+            return seed, "seed", retry
+        return prev_start, "prev", None
 
     def _add_point(target):
-        """求解一个目标点并追加到 points；返回是否可行。"""
-        nonlocal sleeve_start, last_mu, last_cov
+        """求解一个目标点并追加到 points；返回 (feasible, fallback)。
+
+        fallback=True（或 feasible=False）表示已到前沿回退段 → 调用方停止补点。
+        锚定模式的 slack 点**不求解**，直接复用上一个 slack 点的交付字段（v4）。
+        """
+        nonlocal sleeve_start, last_mu, last_cov, last_ok_mu, tangency_est
+        nonlocal anchor_point, _slack_ref
+        target_f = float(target)
+        is_anchor = bool(anchor_mode) and \
+            abs(target_f - float(anchor_target)) <= _ANCHOR_TARGET_EQ_EPS
+        # ── 锚定模式 slack 点：不调 solve_point，直接复制上一个 slack 点的字段 ──
+        # 「同一组切点组合、不同目标下限」：target_return 用新值，交付统计不变。
+        if (anchor_mode and not is_anchor and _slack_ref is not None
+                and tangency_est is not None
+                and target_f <= float(tangency_est) + _SCAN_LOOP_EPS):
+            ref = _slack_ref
+            reused = {
+                "target_return": round(target_f, 4),
+                "feasible": True,
+                "achieved_return": ref["achieved_return"],
+                "volatility": ref["volatility"],
+                "sharpe": ref["sharpe"],
+                "worst_year_95": ref["worst_year_95"],
+                "cagr_lognormal": ref["cagr_lognormal"],
+                "cagr_fat_tail": ref["cagr_fat_tail"],
+                "fallback": False,
+                "chosen_start": "reuse",
+            }
+            points.append(reused)
+            _slack_ref = reused       # 后续 slack 点复用同一组字段
+            return True, False
+        prev_start = sleeve_start
+        start, label, retry = _plan_start(target_f, is_anchor, prev_start)
         point_warnings = []
-        solved = runner.solve_point(
-            assets, BROAD_CORR, dom_w=dom_w, ov_w=ov_w, target=target, rf=RF,
-            extract=extract, total_assets=total_assets, warnings=point_warnings,
-            sleeve_start=sleeve_start,
-        )
+        solved = _solve_at(target, start, point_warnings)
+        chosen_start = label
+        # 最多一次重试：**独立**单次求解另一种初值，再取可用者（不含 base+alt 双跑）。
+        if retry is not None and retry[0] is not None and _needs_retry(solved, target_f):
+            alt_solved = _solve_at(target, retry[0], point_warnings)
+            if _quality(alt_solved, target_f) < _quality(solved, target_f):
+                solved, chosen_start = alt_solved, retry[1]
         if solved is None:
             points.append({
-                "target_return": round(float(target), 4),
+                "target_return": round(target_f, 4),
                 "feasible": False,
                 "achieved_return": None,
                 "volatility": None,
                 "sharpe": None,
                 "worst_year_95": None,
+                # 不可行点保留（UI 按 feasible 过滤），但扫描到此为止（前沿已到头）。
+                "fallback": False,
+                "chosen_start": "prev",
             })
-            return False
-        sleeve_start = {k: tuple(v) for k, v in solved["sleeve_params"].items()}
-        last_mu, last_cov = solved["mu"], solved["cov"]
+            if is_anchor:
+                anchor_point = {"ret": None, "vol": None, "sharpe": None}
+            return False, True
         for w in point_warnings:
             if w not in warnings:
                 warnings.append(w)
         fin = solved["final"]
         ret, vol, sharpe = float(fin["ret"]), float(fin["vol"]), float(fin["sharpe"])
-        points.append({
-            "target_return": round(float(target), 4),
+        fallback = _is_fallback(solved, target_f)
+        sleeve_start = {k: tuple(v) for k, v in solved["sleeve_params"].items()}
+        last_mu, last_cov = solved["mu"], solved["cov"]
+        if not fallback:
+            last_ok_mu = solved["mu"]
+        if tangency_est is None:
+            # 首个可行点（通常是 step_min，约束最松）的交付收益 = 切点收益估计。
+            tangency_est = ret
+        point = {
+            "target_return": round(target_f, 4),
             "feasible": True,
             "achieved_return": round(ret, 6),
             "volatility": round(vol, 6),
@@ -307,25 +681,53 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
             # cagr_fattail 会转成 cagrFattail，与 Swift 属性 cagrFatTail
             # 不匹配，可选字段静默解码为 nil → UI 回退旧近似。
             "cagr_fat_tail": round(fattail_cagr(ret, vol, nu=tail_dof), 6),
-        })
-        return True
+            # 加法式（契约 §2.2）：锚定/回退诊断字段。
+            "fallback": fallback,
+            "chosen_start": chosen_start,
+        }
+        points.append(point)
+        if anchor_mode and not fallback and target_f <= float(tangency_est) + _SCAN_LOOP_EPS:
+            # 该实解点也是「切点组合」（例如锚点目标落在切点以下）→ 作为后续 slack 复用来源
+            _slack_ref = point
+        if is_anchor:
+            anchor_point = {"ret": point["achieved_return"],
+                            "vol": point["volatility"],
+                            "sharpe": point["sharpe"]}
+        return True, fallback
 
+    # ── 顺序扫描：**到首个回退点即停**（Lead 2026-10-18）───────────────────────────
+    # 回退点及其之后的目标都只是回退角点（真实数据 T≥21.5% 有 7 个，每个都可能触发
+    # 30s 级 fallback 轮），不属于「把目标设成 T 时实际会交付的组合」→ 不再扫描。
+    # 首个回退点本身保留在 points 里（UI 按 fallback 过滤）。
+    stopped = False
     for target in targets:
-        _add_point(target)
+        ok, fallback = _add_point(target)
+        if not ok or fallback:
+            stopped = True
+            break
 
     # 上面那张目标清单是用"当前持仓篮子"的袖参数估的上限；收敛后再算一次真实的
-    # 最大可行收益率，并把中间缺的目标点补齐（否则曲线会在末端跳一段）。
+    # 最大可行收益率（诚实值：用最后一个**非回退**点的模型），并把中间缺的目标点补齐。
     dom_idx2 = [i for i, a in enumerate(assets) if a["pool"] == "domestic"]
     ov_idx2 = [i for i, a in enumerate(assets) if a["pool"] == "overseas"]
-    max_ret_final = float(max_feasible_return(last_mu, lower, upper, dom_idx2, ov_idx2, dom_w, ov_w))
-    t = (points[-1]["target_return"] if points else step_min) + 0.005
-    while t <= max_ret_final - 0.002 and len(points) < 200:
-        _add_point(t)
-        t += 0.005
-    if max_ret_final > 0 and (not points or abs(points[-1]["target_return"] - max_ret_final) > 0.002):
+    model_mu = last_ok_mu if last_ok_mu is not None else last_mu
+    max_ret_final = float(max_feasible_return(model_mu, lower, upper, dom_idx2, ov_idx2,
+                                              dom_w, ov_w))
+    # 第二阶段补点同样遵守 --step-max，且遇到 fallback 立即 break。
+    cap_final = min(step_max, max_ret_final) if step_max is not None else max_ret_final
+    if not stopped:
+        t = (points[-1]["target_return"] if points else step_min) + 0.005
+        while t <= cap_final - 0.002 and len(points) < 200:
+            ok, fallback = _add_point(t)
+            if not ok or fallback:
+                stopped = True
+                break
+            t += 0.005
+    if (not stopped and max_ret_final > 0 and max_ret_final <= cap_final + _SCAN_LOOP_EPS
+            and (not points or points[-1]["target_return"] < max_ret_final - 0.002)):
         _add_point(max_ret_final - _SCAN_MARGIN)
 
-    return {
+    result = {
         "max_feasible_return": round(max_ret_final, 6),
         "tail_dof": float(tail_dof),
         "rf": round(RF, 6),
@@ -336,6 +738,13 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         "warnings": warnings,
         "pipeline": pipeline_info,
     }
+    # 加法式块（契约 §1.4 / §2.2）：只在真的发生时出现 → 无锚点/无持仓纳入的旧调用不变。
+    if held_meta is not None and held_meta.get("block") is not None:
+        result["held"] = held_meta["block"]
+    if anchor_mode:
+        result["anchor"] = _anchor_consistency(
+            anchor_target, anchor_point, anchor_ret, anchor_vol, rf, warnings)
+    return result
 
 
 def main():
@@ -351,6 +760,15 @@ def main():
     parser.add_argument("--step-max", type=float, default=None, help="上限目标收益率（默认=最大可行）")
     parser.add_argument("--tail-dof", type=float, default=3.0,
                         help="肥尾模型 Student-t 自由度=尾部指数 α（默认 3）")
+    # ---- 敏感性锚定（契约 §2.2，2026-10-18 Q2）：传 --anchor-target 即启用锚定模式 ----
+    parser.add_argument("--anchor-target", type=float, default=None,
+                        help="主结果的目标收益率（锚点；提供即启用锚定模式）")
+    parser.add_argument("--anchor-sleeve", default=None,
+                        help='主结果的袖参数 JSON，如 {"O_US_CORE":[0.11,0.15]}')
+    parser.add_argument("--anchor-ret", type=float, default=None,
+                        help="主结果的组合收益（锚点一致性检查用；可选）")
+    parser.add_argument("--anchor-vol", type=float, default=None,
+                        help="主结果的组合波动（锚点一致性检查用；可选）")
     parser.add_argument("--out", dest="out_path", default=None, help="输出 JSON 路径")
     args = parser.parse_args()
 
@@ -365,6 +783,10 @@ def main():
         step_min=args.step_min,
         step_max=args.step_max,
         tail_dof=args.tail_dof,
+        anchor_target=args.anchor_target,
+        anchor_sleeve=args.anchor_sleeve,
+        anchor_ret=args.anchor_ret,
+        anchor_vol=args.anchor_vol,
     )
 
     output = json.dumps(result, ensure_ascii=False, indent=2)

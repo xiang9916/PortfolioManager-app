@@ -42,6 +42,9 @@ import asset_classes as AC
 _CORR_MIN_PERIODS = 180
 _CORR_DEFAULT = 0.30
 
+# 契约 §1.2 的默认 label（estimates 的 label 只在非默认值时才写 → 默认路径逐字节不变）。
+_DEFAULT_LABEL = "测试"
+
 # D_GREATER_CN (大中华权益) 是沪深+港股混合大类, 无单一代理;
 # 取 A股 与 恒指 两个代理相关的均值近似。
 _D_GREATER_CN_PROXIES = [("yahoo", "000001.SS"), ("yahoo", "^HSI")]
@@ -83,10 +86,11 @@ def classify_source(ticker):
 
 
 def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, corr_keys=None,
-                        test_class="active"):
+                        test_class="active",
+                        key_prefix="T_", name_prefix="[测试] ", label="测试"):
     """解析并估算测试标的, 返回 (assets, corr_pairs, skipped, estimates).
 
-    - assets: 追加进第一阶段 assets 的大类资产 dict (key 前缀 T_)
+    - assets: 追加进第一阶段 assets 的大类资产 dict (key = key_prefix + ticker)
     - corr_pairs: {("T_X", 宽基key): corr}, 合并进 build_broad_cov 的相关性表
     - skipped: [(代码, 原因)]
     - estimates: 写入结果 JSON 的估算元数据 (Swift 测试结果弹窗展示)
@@ -98,6 +102,11 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
 
     test_class: 标的类别 broad / strategy / active (见 asset_classes.py 与
     CLASS_PARAM_HELP 的中文说明), 缺省 active。
+
+    key_prefix / name_prefix / label: 注入前缀与日志用词（契约 §1.2 参数化）。
+    默认值（"T_"/"[测试] "/"测试"）下行为与输出**逐字节不变**；"持仓纳入"复用本函数时
+    传 ("H_", "[持仓] ", "持仓")。`label` 只在非默认值时作为**加法键**写进 estimates，
+    否则默认路径的结果 JSON 会多一个键（破坏逐字节兼容）。
     """
     test_class = normalize_test_class(test_class)
     def _log(msg, level="info"):
@@ -138,10 +147,10 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
             skipped.append((ticker, reason))
             continue
         pool = "domestic" if source == "fund" else "overseas"
-        key = "T_" + ticker
+        key = key_prefix + ticker
         assets.append({
             "key": key,
-            "name": "[测试] " + ticker,
+            "name": name_prefix + ticker,
             "fund_code": None,
             "pool": pool,
             "mu": round(mu, 4),
@@ -149,15 +158,19 @@ def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, c
             "test_class": test_class,   # 供单标的上限判定（active 才套 10%）
         })
         src_label = "eastmoney" if source == "fund" else "yahoo"
-        estimates.append({
+        estimate = {
             "key": key, "ticker": ticker, "source": src_label, "pool": pool,
             "mu": round(mu, 4), "vol": round(vol, 4), "n_days": len(prices),
             "test_class": test_class, "window_years": years,
             "mu_note": mu_note, "vol_note": vol_note,
             "mu_hist": round(mu_hist, 6), "vol_hist": round(vol_hist, 6),
-        })
+        }
+        if label != _DEFAULT_LABEL:
+            # 加法键：只有「持仓纳入」这类非测试调用才写，默认路径逐字节不变。
+            estimate["label"] = label
+        estimates.append(estimate)
         chosen.append((ticker, key, daily_return_map(prices)))
-        _log(f"测试标的 {ticker} [{test_class}]: n={len(prices)} "
+        _log(f"{label}标的 {ticker} [{test_class}]: n={len(prices)} "
              f"hist μ={mu_hist:.2%}/σ={vol_hist:.2%} → μ={mu:.2%}/σ={vol:.2%} pool={pool}")
 
     # 每个测试标的 vs 每个宽基 key 的相关性行
