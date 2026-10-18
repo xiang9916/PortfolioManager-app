@@ -1,6 +1,6 @@
 """优化器接口与本地凸求解实现（ADR 0003 §4.2）。
 
-单层问题（无袖）**真正走纯求解路径**：直接调 optimize_common 的 solve_max_sharpe/solve_min_var
+单层问题（无袖）**真正走纯求解路径**：直接调 core.solver 的 solve_max_sharpe/solve_min_var
 并自己算 stats —— 不整段转发 solve_portfolio。
 袖路径 P0 允许委托（见 core/sleeves.py），但入参必须显式收敛成 ProblemSpec。
 D2：active 上限表已搬进 core/constraints（本模块直接调用，不再延迟 import optimize_portfolio）；
@@ -34,10 +34,10 @@ class PortfolioOptimizer(ABC):
 
 
 class LocalConvexOptimizer(PortfolioOptimizer):
-    """SciPy SLSQP 多起点实现（委托 optimize_common 的既有内核）。"""
+    """SciPy SLSQP 多起点实现（单层问题走 core.solver；袖路径委托 core.sleeves）。
 
-    def __init__(self, rf_default: float = 0.025):
-        self.rf_default = float(rf_default)
+    当前仅等价门/架构预留使用；生产入口仍是 optimize_portfolio.py 的 legacy 路径。
+    """
 
     # ── 校验：内核不抛裸异常（ADR §6）─────────────────────────────────────────
     def _validate(self, problem: ProblemSpec) -> None:

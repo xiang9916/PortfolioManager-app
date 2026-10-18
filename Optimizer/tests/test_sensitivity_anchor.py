@@ -27,7 +27,6 @@ import contextlib
 import io
 import os
 import sys
-from contextlib import contextmanager
 
 import numpy as np
 

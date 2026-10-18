@@ -14,7 +14,8 @@ if _PKG_ROOT not in sys.path:
 from datetime import datetime, timezone
 
 try:
-    from scipy.optimize import minimize
+    # 未使用；唯一用途是启动时 fail-fast 给出可读错误（scipy 是求解器必需依赖）。
+    from scipy.optimize import minimize  # noqa: F401
 except ImportError:
     print("scipy is required.", file=sys.stderr)
     sys.exit(2)
@@ -23,9 +24,6 @@ from params import (
     BROAD_ASSETS,
     BROAD_CORR,
     CALIBRATION_WARNINGS,
-    CALIBRATION_PROVENANCE,
-    describe_param_source,
-    param_origin,
     RF,
     TARGET_RETURN,
     US_INTERNAL,
@@ -39,15 +37,7 @@ from params import (
     us_core_params,
 )
 from optimize_common import (
-    portfolio_stats,
-    solve_min_var,
-    solve_max_sharpe,
-    max_feasible_return,
-    stage1_bounds,
-    project_psd,
-    build_corr_matrix,
     upper_bounds_array as _upper_array,   # 名字保留 _upper_array：test_optimizer_caps 直接引用
-    _respects_bounds,
 )
 # P3-b3：基金状态流水线改走 services（唯一子进程入口）；脚本层不再直接 import fund_pipeline。
 from portfolio_system.services.pipeline import (
@@ -62,7 +52,7 @@ from portfolio_system.callers.new_asset_runner import (  # P3-b3 步骤③
 # P4 收尾：选基规则 / 结果载荷装配 / 完整编排也已搬进 callers（main 只剩 argparse→Runner→写文件）。
 from portfolio_system.callers.preset_runner import (  # noqa: F401
     InfeasibleOptimization, NoDomesticAssets, PipelineUnavailable, PresetDeps, PresetRunner,
-    SummaryTables, build_summary, select_domestic_funds)
+    SummaryTables, build_summary)
 from portfolio_system.callers.base_runner import RunRequest
 from portfolio_system.services.portfolio_source import load_extract
 from test_tickers import parse_test_tickers, resolve_test_assets
@@ -82,10 +72,7 @@ from portfolio_system.core.warnings import CodedWarning as _Warn   # noqa: F401
 # `_max_return_given_mu` 生产路径不调用，但既有测试（test_sleeve_no_room.py）直接使用 → 保留兼容别名。
 from portfolio_system.core.constraints import max_return_given_mu as _max_return_given_mu
 from portfolio_system.core.stage2 import (
-    internal_pool_optimize as _core_internal_pool_optimize,
-    optimize_within_pool as _optimize_within_pool,
-    pool_cap_norm as _pool_cap_norm,
-    pool_max_return as _pool_max_return,
+    optimize_within_pool as _optimize_within_pool,  # test_sleeve_target.py 直接使用
     stage2_covariance as _core_stage2_covariance,
     stage2_gc_optimize as _core_stage2_gc_optimize,
     stage2_japan_optimize as _core_stage2_japan_optimize,
@@ -93,26 +80,10 @@ from portfolio_system.core.stage2 import (
 )
 # P3-b2：固定点迭代/两层引擎已搬进 core；这里保留同名薄壳与再导出（公开名与私有名都保留）。
 from portfolio_system.core import engine as _core_engine
-from portfolio_system.core.engine import (
-    is_stage1_fallback_prompt as _is_stage1_fallback_prompt,
-    solve_stage1 as _solve_stage1,
-)
-from portfolio_system.core.engine import STAGE1_FALLBACK_MARK as _STAGE1_FALLBACK_MARK
 from portfolio_system.core.fixpoint import (
     compute_sleeve_floors as _core_compute_sleeve_floors,
-    floor_next_params as _core_floor_next_params,
     floor_seed as _core_floor_seed,
-    required_sleeve_mu as _core_required_sleeve_mu,
-    reseed_sleeves as _core_reseed_sleeves,
-    resolved_sleeves as _resolved_sleeves,
     seed_levels_for_target as _core_seed_levels_for_target,
-    sleeve_failure_reason as _core_sleeve_failure_reason,
-    sleeve_levels_for_feasibility as _core_sleeve_levels_for_feasibility,
-    sleeve_tangency_all as _core_sleeve_tangency_all,
-    stage1_weight as _stage1_weight,
-    undeliverable_warning as _core_undeliverable_warning,
-    unresolved_weighted_sleeves as _unresolved_weighted_sleeves,
-    validate_sleeve_params as _validate_sleeve_params,
 )
 from portfolio_system.core.sleeve_params import (  # noqa: F401
     build_pool_specs,
@@ -127,11 +98,7 @@ from portfolio_system.core.sleeve_params import (  # noqa: F401
 )
 from portfolio_system.core.warnings import warning_items as _warning_items
 from portfolio_system.core.sleeve_params import (
-    damp_sleeve_params as _damp_sleeve_params,
-    inject_sleeve_params as _inject_sleeve_params,
     sleeve_params_us as _core_sleeve_params_us,
-    sleeve_reseed_params as _core_sleeve_reseed_params,
-    sleeve_tangency as _core_sleeve_tangency,
 )
 
 
@@ -149,12 +116,7 @@ def _note_cap_hit(key, weight, cap):
     CAP_HITS.append((key, float(weight), float(cap)))
 
 
-#: 内部池清单（params 的 US/JP/GC_INTERNAL 的 key 全集）—— 上限表**必须**覆盖内部标的。
-#: D2 起 core 侧 active_cap_map 不再 import params，改由本模块（调用方）显式传入。
-_INTERNAL_POOL_KEYS = tuple(US_INTERNAL) + tuple(JP_INTERNAL) + tuple(GC_INTERNAL)
-
-
-#: P3-b2：内部池清单改为**调用时**计算（模块级 INTERNAL 表打桩仍兼容）。
+#: P3-b2：内部池清单在**调用时**计算（模块级 INTERNAL 表打桩仍兼容）。
 def _internal_pool_keys():
     return tuple(US_INTERNAL) + tuple(JP_INTERNAL) + tuple(GC_INTERNAL)
 
@@ -206,10 +168,6 @@ def log_step(step, message, level="info", log_path=None):
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-# portfolio_stats is imported from optimize_common; it accepts rf as a keyword arg.
-# Callers in this module pass rf=RF (module-level, dynamically overridden).
-
-
 # 基金申赎管线 (实时抓汇丰 + 天天基金校验 + 开放池构建) 统一在 fund_pipeline.py;
 # 可投大类构建 (build_investable_assets) 也在那里, 与 sensitivity_analysis.py 共用同一口径.
 
@@ -244,32 +202,10 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         cap_hits_out=CAP_HITS)
 
 
-# 袖内收益下限的绝对容差（P1）：SLSQP 末位噪声 + 离散选标。
 # ── 容差的唯一来源（2026-10-17 收口）────────────────────────────────────────────
-# P2（2026-10-17）：容差常量的唯一来源已搬进 portfolio_system/core/constants.py，
-# 这里只做再导出，保持既有 import 路径与名字不变（不许再出现字面量）。
-from portfolio_system.core.constants import (  # noqa: E402  P3-b3：容差唯一来源在 core
-    CHECK_SUM_EPS, DELIVERY_EPS, RESEED_TOL, SLEEVE_FLOOR_EPS, SLEEVE_ROOM_EPS,
-    TINY_WEIGHT_EPS, WEIGHT_ZERO_EPS)
-from portfolio_system.core.constants import SOLVER_EPS as _SOLVER_EPS  # noqa: E402
-
-
-
-
-
-
-
-
-def _internal_pool_optimize(stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
-                            seed=31, cap_map=None, rf=None, floor=None, warnings=None):
-    """Generic second-level optimization inside a broad equity bucket.
-
-    P3-b1：实现已搬进 core/stage2.py；本函数是薄壳（RF 兜底与 CAP_HITS 回写在调用方）。
-    """
-    return _core_internal_pool_optimize(
-        stage1_weights, assets, internal_pool, internal_corr, broad_key, total_assets,
-        RF if rf is None else rf, seed=seed, cap_map=cap_map, floor=floor, warnings=warnings,
-        cap_hits_out=CAP_HITS)
+# P2（2026-10-17）：容差常量的唯一来源已搬进 portfolio_system/core/constants.py；
+# 这里只保留测试直接访问的 SLEEVE_FLOOR_EPS 再导出（其余调用方直接从 core import）。
+from portfolio_system.core.constants import SLEEVE_FLOOR_EPS  # noqa: E402
 
 
 def stage2_japan_optimize(stage1_weights, assets, total_assets, cap_map=None, rf=None,
@@ -322,7 +258,7 @@ def build_result_summary(output, hsbc_pool=None):
 # 现在把袖内 μ/σ 迭代到固定点：**阶段一假设的袖内参数 = 阶段二实际交付的那一篮子**，
 # 于是"目标 ≥ T"这条约束对交付组合同样有效，敏感性扫描也与主结果同源。
 SLEEVE_KEYS = _SLEEVE_KEYS   # P3-b2：常量唯一来源在 core/sleeve_params.py
-# P1（2026-10-16）：只有这两只袖走 _internal_pool_optimize —— 需要下限传导的路径。
+# P1（2026-10-16）：日本/大中华两只袖走 core/stage2.py 的 stage2_japan/gc_optimize —— 需要下限传导。
 # O_US_CORE 的 stage2_optimize 本来就带组合级 ret>=target 约束，不接受也不该接受袖内下限。
 FLOOR_SLEEVE_KEYS = _FLOOR_SLEEVE_KEYS
 MAX_SLEEVE_ITER = _MAX_SLEEVE_ITER
@@ -364,11 +300,6 @@ _SLEEVE_POOL_SPECS = build_pool_specs(US_INTERNAL, US_INTERNAL_CORR, JP_INTERNAL
 _SLEEVE_RESOLVED_FIELD = _SLEEVE_RESOLVED_FIELD
 
 
-
-
-def _sleeve_reseed_params(key, rf):
-    """某只袖"自己能达到的最优篮子"参数（P3-b1 薄壳：池表在调用时读取）。"""
-    return _core_sleeve_reseed_params(key, rf, _SLEEVE_POOL_SPECS)
 
 
 def _floor_seed(key, t, rf):
@@ -453,13 +384,6 @@ def _cap_hit_warning(cap_hits):
         f"active（个股/主动）类单标的上限 {AC.ACTIVE_CAP:.0%} 生效，以下标的被压到上限: "
         + "、".join(f"{k} {w:.2%}" for k, w in sorted(merged.items(), key=lambda kv: -kv[1])),
         "active_cap.hit")
-
-
-_STAGE1_FALLBACK_MARK = _STAGE1_FALLBACK_MARK
-
-
-
-
 
 
 def _solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_assets,

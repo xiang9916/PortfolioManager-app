@@ -22,8 +22,6 @@ import os
 import subprocess
 import sys
 
-import numpy as np
-
 _SCRIPTS = os.environ.get("PM_OPT_SCRIPTS") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, _SCRIPTS)

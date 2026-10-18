@@ -79,10 +79,6 @@ SPECIAL_FIXED = {
     "D_HSBC_MMF": {"mu": 0.02, "vol": 0.01}
 }
 
-# 聚合项：由内部持仓动态合成（运行时用美股内部权重聚合，params.py 不会用校准值覆盖它）。
-# 仍然给它登记 broad 类别：一是相关性矩阵里需要它这一行，二是 SPY 取不到数据时用它兜底。
-AGGREGATES = {"O_US_CORE"}
-
 ACTIVE_CAP = 0.10          # active 类单标的的组合权重上限
 SIGMA_SANITY_MAX = 1.50    # σ 超过这个值按数据毛刺处理（丢弃 + 报警）
 

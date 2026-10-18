@@ -13,14 +13,13 @@ from .constants import (CAP_HIT_EPS, DELIVERY_EPS, FALLBACK_MARGIN_EPS, MODEL_GA
                         SLEEVE_RESTART_LAMBDAS, TARGET_REACH_EPS, WEIGHT_ZERO_EPS)
 from .constraints import apply_active_caps, active_cap_map, stage1_bounds
 from .fixpoint import (compute_sleeve_floors, floor_next_params, floor_seed,
-                       required_sleeve_mu, reseed_sleeves, resolved_sleeves,
-                       restart_seed_params, seed_levels_for_target,
+                       reseed_sleeves, resolved_sleeves, restart_seed_params, seed_levels_for_target,
                        sleeve_levels_for_feasibility, sleeve_tangency, sleeve_tangency_all,
-                       stage1_weight, undeliverable_warning, unresolved_weighted_sleeves,
+                       undeliverable_warning, unresolved_weighted_sleeves,
                        validate_sleeve_params)
 from .linalg import build_broad_cov
 from .sleeve_params import (MAX_SLEEVE_ITER, SLEEVE_DAMPING, SLEEVE_KEYS,
-                            SLEEVE_TOL, SleeveHooks, SleeveUniverse, damp_sleeve_params,
+                            SLEEVE_TOL, SleeveHooks, damp_sleeve_params,
                             inject_sleeve_params, sleeve_params_us)
 from .solver import max_feasible_return, solve_max_sharpe, solve_min_var
 from .stage2 import stage2_gc_optimize, stage2_japan_optimize, stage2_optimize
@@ -193,7 +192,7 @@ def solve_once(assets, corr_pairs, *, dom_w, ov_w, target, rf, extract, total_as
         cap_hits_out=cap_hits_out)
 
     if internal is not None:
-        x_internal, ret2, vol2, sharpe2, _w2, internal_tickers = internal
+        _, ret2, vol2, sharpe2, _w2, _ = internal
         final = {"ret": ret2, "vol": vol2, "sharpe": sharpe2, "floor": ret2 - 1.96 * vol2}
     else:
         # stage2 不可行时汇总回退第一阶段统计，否则结果文件会全成 0（Bug D2）

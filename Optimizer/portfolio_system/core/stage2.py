@@ -127,7 +127,7 @@ def stage2_optimize(stage1_weights, extract, total_assets, assets, broad_cov, br
         if a["key"] != "O_US_CORE"
     ]
 
-    mus, cov, keys = stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys,
+    mus, cov, _ = stage2_covariance(fixed_assets, internal_tickers, broad_cov, broad_keys,
                                        broad_vols, us_internal=us_internal,
                                        us_internal_corr=us_internal_corr,
                                        sp500_internal_corr=sp500_internal_corr,

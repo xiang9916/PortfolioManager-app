@@ -244,6 +244,22 @@ def compute_sleeve_floors(solved, assumed, target, rf, prev_floors, damping, dom
     return floors, audit
 
 
+def _ceiling_solver(solved, ref, idx, dom_w, ov_w):
+    """构造「给定各袖水平 → 组合可达最大收益」的求值函数。
+
+    两条"目标水平播种"路径（seed_levels_for_target / sleeve_levels_for_feasibility）
+    共用的纯数学，原先是两份逐字相同的局部闭包（2026-10-18 去重）。
+    """
+    def ceiling(levels):
+        vec = ref.copy()
+        for k, lv in levels.items():
+            vec[idx[k]] = float(lv)
+        return max_return_given_mu(vec, solved["upper"], solved["dom_idx"], solved["ov_idx"],
+                                    dom_w, ov_w)
+
+    return ceiling
+
+
 def seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w, pool_specs):
     """给"回退角点清零了权重、但前沿尚有余量"的袖求播种水平（2026-10-16 落库）。
 
@@ -273,12 +289,7 @@ def seed_levels_for_target(solved, tan_mu, target, dom_w, ov_w, pool_specs):
         if m is not None and float(m) > float(tan_mu[k]) + SLEEVE_ROOM_EPS:
             caps[k] = float(m)
 
-    def ceiling(levels):
-        vec = ref.copy()
-        for k, lv in levels.items():
-            vec[idx[k]] = float(lv)
-        return max_return_given_mu(vec, solved["upper"], solved["dom_idx"], solved["ov_idx"],
-                                    dom_w, ov_w)
+    ceiling = _ceiling_solver(solved, ref, idx, dom_w, ov_w)
 
     if not caps:
         return {}
@@ -353,12 +364,7 @@ def sleeve_levels_for_feasibility(solved, tan_mu, target, dom_w, ov_w, pool_spec
     if not caps:
         return {}
 
-    def ceiling(levels):
-        vec = ref.copy()
-        for k, lv in levels.items():
-            vec[idx[k]] = float(lv)
-        return max_return_given_mu(vec, solved["upper"], solved["dom_idx"], solved["ov_idx"],
-                                    dom_w, ov_w)
+    ceiling = _ceiling_solver(solved, ref, idx, dom_w, ov_w)
 
     # 基线水平：每只袖**至少**按"它自己切点篮子"的 μ 参与。偏低的是本轮**假设 μ**
     # （初值篮子 / 上一轮交付 / 阻尼中间值），不是袖的真实能力 —— 这正是"假不可行"的来源。

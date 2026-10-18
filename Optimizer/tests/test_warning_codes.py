@@ -94,13 +94,6 @@ def _emitted_codes():
     return codes
 
 
-def _table_and_rest():
-    src = _source()
-    start = src.index("WARNING_CODES = {")
-    end = src.index("\n}", start) + 2
-    return src[start:end], src[:start] + src[end:]
-
-
 def test_skipped_ticker_warning_has_code():
     """跳过场景：带 code，且消息与旧文案（普通 f-string）逐字一致。"""
     w = OP._test_ticker_skip_warning("ZZZ.FAKE", "行情不可用")
