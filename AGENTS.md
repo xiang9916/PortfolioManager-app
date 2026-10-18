@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 77 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
+swift test  --disable-sandbox          # 81 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -150,7 +150,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **77 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **81 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）
@@ -366,7 +366,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 29 文件 / 161 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 30 文件 / 167 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
@@ -412,8 +412,12 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ③ **P1 可观测性/硬化**：`build_broad_cov(missing_out=…)` + 结果 JSON 加法式 `corr_missing`；PSD 修复统计 `cov_psd`（eigmin 前后/改写对数/最大 Δ）；
   `bounds_arrays` 让 `AssetSpec.lower/upper` 生效；`active_cap_map(cap=…)` + `GoalSpec.active_cap` 生效（默认值不变）；`max_feasible_return` 校验 bounds/守恒。
   新测试：`test_cov_diagnostics.py`（4 项）+ `test_solver_hardening.py`（4 项）。
-  ⚠️ 已知残留：Swift 侧 `EastmoneySource` 的毫秒时间戳同样按 UTC 取日（影响 App 里基金 K 线/最新价的**日期标签**，不影响优化器计算路径）——
-  待单独修（改 Asia/Shanghai + Swift 用例）。`prices_cache` 命中即复用，升级后建议清一次优化器临时目录。
+  ✅ **Swift 侧同款时区 bug 已修（2026-10-18）**：`EastmoneySource` 增加 `cnTimeZone = "Asia/Shanghai"`，
+  `parseNav`（单位净值 / 累计净值两条路径）按北京时间取日 → App 里基金 K 线/最新价的日期标签与 Python 侧口径一致；
+  回归：`Tests/PortfolioCoreTests/EastmoneySourceTests.swift`（4 项，修复前 3/4 红）。
+  ✅ **`prices_cache` 残留已自愈（2026-10-18）**：缓存目录带取数口径版本标记（`PRICES_CACHE_SCHEMA`），
+  标记缺失/不一致/损坏时整体清空重建 —— 崩溃 / 强制退出 / 跨版本升级都不会再把旧日期喂回调用方；
+  回归：`test_prices_cache.py`（6 项，祖先树 0/6）。
   ⚠️ 修正日期后校准矩阵仍非 PSD（内部池 eigmin ≈ −0.20）：收缩/稳健估计（Ledoit-Wolf 等）属 P2，默认关，需 walk-forward A/B 后再定。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
