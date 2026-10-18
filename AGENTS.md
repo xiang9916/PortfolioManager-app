@@ -6,8 +6,8 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「手工表格维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.6-alpha.3**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
-- 线上仓库：`xiang9916/PortfolioManager-app`，25 个 pre-release + 26 个 tag 齐全。
+- 当前版本 **v0.6-beta.4**（版本号只存在于 `scripts/Info.plist`）；Schema **v8**；GPL-3.0；作者 xiang9916。
+- 线上仓库：`xiang9916/PortfolioManager-app`，26 个 pre-release + 27 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
 ## 1. 🔴 隐私红线（最高优先级）
@@ -97,9 +97,9 @@ bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别�
 ```bash
 bash scripts/build_app.sh --with-venv --dmg     # 必须 --with-venv，否则优化器没有 Python
 ```
-- **发布产物固定两件套**：`dist/PortfolioManager-<版本>.dmg`（内含 app + `/Applications` 快捷方式，拖拽安装）
-  与 `dist/PortfolioManager-<版本>.zip`（**顶层只有一个 `PortfolioManager.app`**，用 `ditto` 打包以保留符号链接、
-  可执行位与扩展属性）。`--dmg` 隐含 `--zip`；只想出 zip 就传 `--zip`。
+- **发布产物 = 仅 DMG**（自 **0.6-beta.4** 起不再提供 ZIP）：`dist/PortfolioManager-<版本>.dmg`
+  （内含 app + `/Applications` 快捷方式，拖拽安装）。`--dmg` 只产出 DMG；`--zip` 仅保留给本地调试，
+  **不再随发布上传**（release 只挂 DMG 一个 asset）。
 - **DMG 里不再放「一键安装.command」**（自 0.4-beta3 起）：它自身同样带隔离标记、双击第一次照样被 Gatekeeper
   拦住，收益为零却要多维护一个脚本。仓库里的 `scripts/install_dmg.sh` 保留，供有仓库的人从终端安装。
 - **内置隐私加固（勿删）**：① venv 拷完后清 `__pycache__` 并把 `/Users/<user>/` 重写成 `/build`；
@@ -111,11 +111,9 @@ bash scripts/build_app.sh --with-venv --dmg     # 必须 --with-venv，否则优
   副作用：DMG 体积 85MB → 48MB（少了 .pyc），首次跑优化器会重新编译缓存。
 - 版本 bump：只改 `scripts/Info.plist`（`CFBundleShortVersionString` + `CFBundleVersion` 同步）→
   commit `chore: bump version to X.Y` → annotated tag `vX.Y`（message `PortfolioManager X.Y`）
-  → `gh release create --prerelease`，notes 中文 + **两个附件各自的 SHA256 行** + 同时挂 DMG 与 zip 两个 asset。
+  → `gh release create --prerelease`，notes 中文 + **DMG 的 SHA256 行** + 只挂 DMG 一个 asset（不再传 zip）。
 - 上传后必须核对：`gh api repos/xiang9916/PortfolioManager-app/releases/tags/<tag> --jq '.assets[] | .name, .digest'`
   与本地 `shasum -a 256` 一致，且 notes 里的 SHA 行同步更新。
-- zip 上传前必须**解压回验**：`ditto -x -k <zip> <tmpdir>` → `codesign --verify <tmpdir>/PortfolioManager.app`
-  必须通过（zip 若丢了符号链接或可执行位，封条会碎）。
   ⚠️ 别加 `--deep --strict`：venv 里 `bin/python3` 是指向本机 conda 解释器的**绝对符号链接**，
   strict 模式必然报 `invalid destination for symbolic link in bundle` 并退 1 —— 这是既有现象（0.4-beta3 的产物同样如此），
   不是这次打包坏了；同理 DMG 挂载后做 strict 校验也会报 `file modified`（HFS+ 转换改写符号链接元数据）。
@@ -172,7 +170,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 ## 10. Gatekeeper / 隔离标记
 - app 只有 **ad-hoc 签名**（`codesign --sign -`），无开发者证书 → 从网络下载的 DMG 会触发「Apple 无法验证」；
   彻底消除只能靠 Apple Developer Program（$99/年）Developer ID 签名 + 公证。
-- **安装方式**：打开 DMG 把 app 拖进「应用程序」（或解压 zip 后拖过去），首次打开在
+- **安装方式**：打开 DMG 把 app 拖进「应用程序」，首次打开在
   「系统设置 → 隐私与安全性」放行一次即可，之后正常。**DMG 内不再有一键安装脚本**（见 §5）。
 - `scripts/install_dmg.sh`：给有仓库的人用的一键安装（拷到 /Applications + `xattr -dr com.apple.quarantine`）——
   终端 `bash scripts/install_dmg.sh [dmg]`，不带参数时自动挑 `dist/` 里最新的 DMG。
