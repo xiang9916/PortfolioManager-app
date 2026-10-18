@@ -6,7 +6,7 @@ import XCTest
 /// 所有 fixture 都是**虚构**的收益率/文案，不含任何真实持仓、权重、金额或标的代码。
 final class OptimizationWarningTests: XCTestCase {
 
-    /// 镜像 Optimizer/scripts/optimize_portfolio.py 的 WARNING_CODES（2026-10-17 快照，19 个）。
+    /// 镜像 Optimizer/scripts/optimize_portfolio.py 的 WARNING_CODES（2026-10-18 快照，22 个）。
     private let expectedCodes: [String] = [
         "target.stage1_fallback",
         "target.infeasible",
@@ -26,6 +26,9 @@ final class OptimizationWarningTests: XCTestCase {
         "summary.weight_sum_mismatch",
         "fund.available_none",
         "test.ticker_skipped",
+        "held.skipped",
+        "held.us_equity_outside_catalog",
+        "sensitivity.anchor_mismatch",
         "other",
     ]
 
@@ -54,6 +57,9 @@ final class OptimizationWarningTests: XCTestCase {
             "summary.missing_weights": .critical,
             "summary.weight_sum_mismatch": .critical,
             "fund.available_none": .warning,
+            "held.skipped": .warning,
+            "held.us_equity_outside_catalog": .warning,
+            "sensitivity.anchor_mismatch": .warning,
             "other": .warning,
             "sleeve.levels_lifted": .info,
             "test.ticker_skipped": .info,

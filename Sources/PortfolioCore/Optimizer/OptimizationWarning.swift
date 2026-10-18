@@ -22,7 +22,7 @@ public enum OptimizationWarningSeverity: String, Sendable, CaseIterable {
 /// 优化器告警的稳定分类。
 ///
 /// **事实来源**：Optimizer/scripts/optimize_portfolio.py 的 WARNING_CODES 表
-/// （2026-10-17 快照：19 个 code，含未分类码 other；与表逐项 diff 一致）。新增 code 必须先在那里登记，
+/// （2026-10-18 快照：22 个 code，含未分类码 other；与表逐项 diff 一致）。新增 code 必须先在那里登记，
 /// 再往这里加 case；文案改动不影响分类（新路径只认 code）。
 public enum OptimizationWarningKind: String, Sendable, CaseIterable {
     case targetStage1Fallback = "target.stage1_fallback"
@@ -43,6 +43,12 @@ public enum OptimizationWarningKind: String, Sendable, CaseIterable {
     case summaryWeightSumMismatch = "summary.weight_sum_mismatch"
     case fundAvailableNone = "fund.available_none"
     case testTickerSkipped = "test.ticker_skipped"
+    /// 持仓纳入：单只持仓未能纳入优化（数据不可用等），不中断整轮。
+    case heldSkipped = "held.skipped"
+    /// 持仓纳入：us_equity 类持仓不在内部目录，按其顶层 what-if 腿纳入、不计入 O_US_CORE 袖。
+    case heldUSEquityOutsideCatalog = "held.us_equity_outside_catalog"
+    /// 敏感性锚定：锚点目标点的结果被主结果支配（口径不一致）。
+    case sensitivityAnchorMismatch = "sensitivity.anchor_mismatch"
     case other = "other"
 
     /// 严重度映射（与旧视图关键词口径对齐；括号内为修正说明）。
@@ -53,7 +59,8 @@ public enum OptimizationWarningKind: String, Sendable, CaseIterable {
     ///   （旧关键词对 target.sleeve_unreachable 的文案漏报，code 路径修正：
     ///   它明确说"目标仍不可达、走了回退路径"，属 critical。）
     /// - warning：口径/约束被调整或结论有保留 —— 未完全收敛、袖被剔除后重解、
-    ///   阶段二诊断、active 上限放宽 / 触顶、无可申购基金、未分类码。
+    ///   阶段二诊断、active 上限放宽 / 触顶、无可申购基金、持仓未纳入 / 持仓口径说明、
+    ///   敏感性锚点与主结果口径不一致、未分类码。
     /// - info：纯说明 —— 袖水平被抬升后按请求目标重解（**不是**回退，交付未降级；
     ///   旧关键词因为它含"不可行"三字误报成 critical，code 路径修正）、测试标的跳过。
     public var severity: OptimizationWarningSeverity {
@@ -64,7 +71,9 @@ public enum OptimizationWarningKind: String, Sendable, CaseIterable {
              .summaryMissingWeights, .summaryWeightSumMismatch:
             return .critical
         case .sleeveNotConverged, .sleeveExcludedNoBasket, .sleeveStage2Error,
-             .activeCapPoolConflict, .activeCapHit, .fundAvailableNone, .other:
+             .activeCapPoolConflict, .activeCapHit, .fundAvailableNone,
+             .heldSkipped, .heldUSEquityOutsideCatalog, .sensitivityAnchorMismatch,
+             .other:
             return .warning
         case .sleeveLevelsLifted, .testTickerSkipped:
             return .info

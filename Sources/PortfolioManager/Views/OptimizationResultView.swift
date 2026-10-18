@@ -26,6 +26,7 @@ public struct OptimizationResultView: View {
     // 长列表可折叠（弹窗尺寸固定 + 内部滚动，折叠后不用滚）
     @State private var showTestAssets = true
     @State private var showWarnings = true
+    @State private var showHeldAssets = true
 
     /// 顶部固定栏（标题 + 入口按钮）：正文很长时它不参与滚动，关闭按钮始终可见
     private var headerRow: some View {
@@ -100,6 +101,10 @@ public struct OptimizationResultView: View {
                         testTickerConclusionSection
                     }
 
+                    // 持仓纳入（不在候选池）：候选目录外的持仓被注入为 what-if 资产后的结论。
+                    // 此前这类持仓被静默丢弃（结果里既不出现也不说明），用户无从判断。
+                    heldAssetsSection
+
                     // 目标收益率只是下限：优化目标是最大化夏普，实际收益可以高于目标。
                     // （主结果页：文案与阈值保持不变，本轮不动它）
                     if let target = result.targetReturn, !isTestResult {
@@ -124,8 +129,7 @@ public struct OptimizationResultView: View {
                             x: .value("权重", a.weight),
                             y: .value("标的", a.name)
                         )
-                        .foregroundStyle(a.isTest == true ? AnyShapeStyle(.orange.gradient)
-                                                          : AnyShapeStyle(.blue.gradient))
+                        .foregroundStyle(assetBarStyle(a))
                         .annotation(position: .trailing) {
                             Text(pct(a.weight)).font(.caption2).monospacedDigit()
                         }
@@ -254,7 +258,14 @@ public struct OptimizationResultView: View {
             let tempDB = try Database(path: AppPaths.databaseURL().path)
             let optimizer = OptimizationService(db: tempDB, sidecar: sidecar, logsDir: logsDir)
 
-            let sr = try optimizer.runSensitivityAnalysis(extractJSON: extractURL)
+            // 锚点参数：主结果的目标收益 / 袖内参数 / 实际落点一起带给敏感性分析，
+            // 这样锚点目标上的点与结果页同一口径（蓝点重合于绿点）。旧结果缺这些字段 → 不传。
+            let sr = try optimizer.runSensitivityAnalysis(
+                extractJSON: extractURL,
+                anchorTarget: result.targetReturn,
+                anchorSleeve: result.sleeveParams,
+                anchorRet: result.portfolio.expectedReturn,
+                anchorVol: result.portfolio.volatility)
             sensitivityResult = sr
             showSensitivity = true
         } catch {
@@ -364,6 +375,104 @@ public struct OptimizationResultView: View {
                 }
             }
         }
+    }
+
+    // MARK: 持仓纳入（不在候选池）
+
+    /// 「持仓纳入（不在候选池）」区：纳入项（ticker / 类别 / μ / σ / 权重）+ 跳过项原因。
+    /// 数据来自 summary 的 `held_assets`（Python 侧注入结果）；旧结果文件没有该键 → 整个区不显示。
+    @ViewBuilder
+    private var heldAssetsSection: some View {
+        let included = result.heldAssets?.included ?? []
+        let skipped = result.heldAssets?.skipped ?? []
+        if !included.isEmpty || !skipped.isEmpty {
+            Divider()
+            DisclosureGroup(isExpanded: $showHeldAssets) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("候选目录外的持仓已按 what-if 口径注入本次优化（图中紫色行）：μ 为纯历史年化（无人工先验）、σ 为历史波动，受个股 / 主动类单标的权重上限约束；它们不进执行清单。")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(included.enumerated()), id: \.offset) { _, e in
+                        let w = heldDeliveredWeight(for: e)
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: w > 0 ? "checkmark.circle.fill" : "circle.dashed")
+                                .foregroundStyle(w > 0 ? Color.green : Color.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 8) {
+                                    Text(e.ticker ?? "—").fontWeight(.medium)
+                                    if let cls = e.testClass {
+                                        Text(classLabel(cls)).font(.caption2).foregroundStyle(.purple)
+                                    }
+                                    Text(heldMetaText(e))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(w > 0 ? "权重 \(pct(w))" : "本轮未分配权重")
+                                        .font(.caption).monospacedDigit()
+                                        .foregroundStyle(w > 0 ? Color.secondary : Color.primary)
+                                }
+                                Text("μ \(pctOpt(e.mu))   σ \(pctOpt(e.vol))")
+                                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    ForEach(Array(skipped.enumerated()), id: \.offset) { _, s in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "questionmark.circle").foregroundStyle(.orange)
+                            Text("未纳入：\(s.ticker ?? "—") — \(s.reason ?? "原因未知")")
+                                .font(.caption).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            } label: {
+                Text("持仓纳入（不在候选池）（\(included.count) 只纳入 / \(skipped.count) 只跳过）")
+                    .font(.headline)
+            }
+        }
+    }
+
+    /// 纳入项在交付组合里的权重。结果清单里持仓注入行 key = `H_` + **归一后**的 ticker
+    /// （6 位境内代码不带 `.CN_Fund` 后缀，Python 侧注入约定）；这里先按精确 key 匹配，
+    /// 再退到 is_held 行里按归一代码匹配（名称 / 去掉 H_ 前缀的 key）。
+    /// 都没命中 → 0（本轮未分配权重，不代表数据缺失）。
+    private func heldDeliveredWeight(for e: HeldAssetEstimate) -> Double {
+        guard let raw = e.ticker, !raw.isEmpty else { return 0 }
+        let normalized = heldTickerKey(raw)
+        if let exact = result.assets.first(where: { $0.key == "H_" + normalized }) {
+            return exact.weight
+        }
+        return result.assets.first { a in
+            guard a.isHeld == true else { return false }
+            let stripped = a.key.hasPrefix("H_") ? String(a.key.dropFirst(2)) : a.key
+            if heldTickerKey(stripped) == normalized { return true }
+            return a.name.uppercased().contains(normalized)
+        }?.weight ?? 0
+    }
+
+    /// 匹配用的归一代码：6 位境内基金代码取裸代码（"123456.CN_Fund" / "123456.SZ" → "123456"），
+    /// 其余取大写。仅用于把 held_assets 的估算项对到结果清单行，不改变展示。
+    private func heldTickerKey(_ ticker: String) -> String {
+        let upper = ticker.uppercased()
+        if let r = upper.range(of: #"^\d{6}"#, options: .regularExpression) {
+            return String(upper[r])
+        }
+        return upper
+    }
+
+    private func heldMetaText(_ e: HeldAssetEstimate) -> String {
+        var parts: [String] = []
+        if let p = e.pool { parts.append(p == "domestic" ? "境内池" : "境外池") }
+        if let y = e.windowYears { parts.append("窗口近 \(y) 年") }
+        if let n = e.nDays { parts.append("\(n) 天") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func pctOpt(_ v: Double?) -> String { v.map(pct) ?? "—" }
+
+    /// 权重条着色：测试标的橙色、持仓纳入项紫色（两者都是 what-if，不进执行清单），其余蓝色。
+    private func assetBarStyle(_ a: OptimizedAsset) -> AnyShapeStyle {
+        if a.isHeld == true { return AnyShapeStyle(.purple.gradient) }
+        if a.isTest == true { return AnyShapeStyle(.orange.gradient) }
+        return AnyShapeStyle(.blue.gradient)
     }
 
     /// 「实际 − 目标」行（仅测试结果页）。判定与容差**全部来自 PortfolioCore 的

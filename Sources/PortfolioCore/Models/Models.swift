@@ -206,6 +206,9 @@ public struct OptimizedAsset: Codable, Hashable {
     /// 「新标的测试」临时注入的标的 (key 以 T_ 开头)。这类行是 what-if 口径,
     /// 不进执行清单, 界面上单独着色。普通优化结果为 nil/false。
     public let isTest: Bool?
+    /// 「持仓纳入」注入的持仓标的 (key 以 H_ 开头): 持仓里不在候选资产目录内的标的,
+    /// 按 what-if 口径加入候选池。与 isTest 一样不进执行清单; 旧结果文件没有该键 → nil。
+    public let isHeld: Bool?
 }
 
 public struct PortfolioSummary: Codable, Hashable {
@@ -248,6 +251,50 @@ public struct TestAssetEstimate: Codable, Hashable {
     public let volHist: Double?
 }
 
+/// 持仓纳入: 一只**不在候选资产目录内**的持仓被注入为 what-if 资产后的估算参数。
+///
+/// 对应结果 summary 的 `held_assets.included`（Python 侧由 `held_assets.py` 注入后透传）。
+/// 字段**全部 optional**: 旧结果文件没有这个块 → nil；Python 侧是加法式输出，
+/// 缺字段不应让整条结果解码失败。
+public struct HeldAssetEstimate: Codable, Hashable {
+    /// 标的代码（6 位境内基金代码会被归一到裸代码）。
+    public let ticker: String?
+    /// 展示名（Python 侧目前通常不带，界面回退到 ticker）。
+    public let name: String?
+    /// 预期收益 μ（what-if 口径：active 类 = 纯历史年化）。
+    public let mu: Double?
+    /// 历史年化波动 σ（无人工下限）。
+    public let vol: Double?
+    /// 历史样本天数。
+    public let nDays: Int?
+    /// 池归属：`domestic` / `overseas`。
+    public let pool: String?
+    /// 类别：broad / strategy / active（持仓注入固定 active）。
+    public let testClass: String?
+    /// μ 的历史窗口年数（nil = 全历史）。
+    public let windowYears: Int?
+    /// μ 的口径备注（history_only / prior_fallback / fixed）。
+    public let muNote: String?
+    /// σ 的口径备注（history）。
+    public let volNote: String?
+    /// 该估算来自持仓注入（Python 侧透传，正常为 true）。
+    public let isHeld: Bool?
+}
+
+/// 持仓纳入: 因数据不可用 / 已在候选池等原因未被注入的持仓。
+public struct HeldAssetSkip: Codable, Hashable {
+    public let ticker: String?
+    public let reason: String?
+}
+
+/// 结果 summary 的 `held_assets` 块（持仓纳入的结论）。
+///
+/// 旧结果文件没有该键 → `OptimizationResult.heldAssets` 为 nil，界面整个区不显示。
+public struct HeldAssetsInfo: Codable, Hashable {
+    public let included: [HeldAssetEstimate]?
+    public let skipped: [HeldAssetSkip]?
+}
+
 public struct OptimizationResult: Codable {
     public let generatedAt: String?
     public let portfolio: PortfolioSummary
@@ -265,6 +312,36 @@ public struct OptimizationResult: Codable {
     public let warningItems: [OptimizationWarningItem]?
     public let objective: String?
     public let sourceDetail: String?
+    /// 袖内参数 {袖 key: [μ, σ]}（summary 键 `sleeve_params`）。
+    /// 敏感性分析把它作为「锚定口径」的候选初值，让锚点目标上的点与主结果同源。
+    /// 旧结果文件没有该键 → nil。
+    public let sleeveParams: [String: [Double]]?
+    /// 持仓纳入结论（summary 键 `held_assets`）：纳入项 + 跳过原因。
+    /// 旧结果文件没有该键 → nil（界面整个区不显示）。
+    public let heldAssets: HeldAssetsInfo?
+
+    /// 显式 init：新增字段带默认值，保证既有调用点（单测构造结果）源码兼容。
+    public init(generatedAt: String?, portfolio: PortfolioSummary, assets: [OptimizedAsset],
+                benchmark: Benchmark?, testAssets: [TestAssetEstimate]?, warnings: [String]?,
+                targetReturn: Double?, targetGap: Double?,
+                warningItems: [OptimizationWarningItem]?, objective: String?,
+                sourceDetail: String?,
+                sleeveParams: [String: [Double]]? = nil,
+                heldAssets: HeldAssetsInfo? = nil) {
+        self.generatedAt = generatedAt
+        self.portfolio = portfolio
+        self.assets = assets
+        self.benchmark = benchmark
+        self.testAssets = testAssets
+        self.warnings = warnings
+        self.targetReturn = targetReturn
+        self.targetGap = targetGap
+        self.warningItems = warningItems
+        self.objective = objective
+        self.sourceDetail = sourceDetail
+        self.sleeveParams = sleeveParams
+        self.heldAssets = heldAssets
+    }
 }
 
 public struct OptimizationRun: Codable, Identifiable {
@@ -309,6 +386,30 @@ public struct SensitivityPoint: Codable, Hashable, Identifiable {
     public let cagrLognormal: Double?
     /// 肥尾混合 CAGR：亏损侧 Student-t(α=ν) 幂律尾（下限 −99.9%）+ 盈利侧对数正态拼接
     public let cagrFatTail: Double?
+    /// 该点是否为「回退点」：目标在当前约束下不可行，交付收益低于该点目标（或阶段一目标被下调）。
+    /// 这类点不是「目标设成它时能交付的组合」，不应画进蓝色前沿。旧输出没有该键 → nil。
+    public let fallback: Bool?
+}
+
+/// 敏感性锚点一致性检查里的一个落点（收益 / 波动 / 夏普）。
+public struct AnchorMetrics: Codable, Hashable {
+    public let ret: Double?
+    public let vol: Double?
+    public let sharpe: Double?
+}
+
+/// 敏感性分析的锚点一致性块（Python 侧 `--anchor-*` 的加法式输出）。
+///
+/// 主结果的目标收益率被并进扫描网格后，这里给出「锚点目标点」与「主结果」的落点对比，
+/// 用于说明曲线上锚点是否真的与结果页同源。字段全部 optional（加法式，旧输出没有该块）。
+public struct AnchorInfo: Codable, Hashable {
+    public let target: Double?
+    /// 锚点目标点与主结果是否一致（未被主结果支配）。
+    public let matched: Bool?
+    /// 锚点目标点的落点。
+    public let point: AnchorMetrics?
+    /// 主结果的落点。
+    public let main: AnchorMetrics?
 }
 
 public struct SensitivityAnalysisResult: Codable {
@@ -322,4 +423,7 @@ public struct SensitivityAnalysisResult: Codable {
     public let domesticWeight: Double
     public let overseasWeight: Double
     public let points: [SensitivityPoint]
+    /// 锚点一致性检查块（带 `--anchor-ret/--anchor-vol` 调用时才有）。
+    /// 旧输出 / 无锚点调用没有该键 → nil。
+    public let anchor: AnchorInfo?
 }

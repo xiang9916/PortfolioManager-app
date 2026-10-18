@@ -20,7 +20,12 @@ public struct SensitivityAnalysisView: View {
                 Spacer()
             }
             if let scope = result.scope {
-                Text("口径：\(scope)。每一点都是「把目标设成它、实际会交付的组合」。")
+                Text("口径：\(scope)。每一点都是「把目标设成它、实际会交付的组合」；蓝点 = 同一锚定口径下找到的最优可交付组合；绿点 = 主结果锚点。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                // 旧输出没有 scope：图注仍然要说明蓝点/绿点的口径。
+                Text("蓝点 = 同一锚定口径下找到的最优可交付组合；绿点 = 主结果锚点。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -50,8 +55,10 @@ public struct SensitivityAnalysisView: View {
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("夏普比率 vs 目标收益率").font(.headline)
+                    // 蓝线/蓝点只画「可交付」点：feasible 且未回退（fallback = 该目标下交付低于目标，
+                    // 是回退结果而非该目标下的最优交付组合）。回退点仍保留在下方明细表里（标「回退」）。
                     Chart {
-                        ForEach(feasiblePoints, id: \.targetReturn) { (p: SensitivityPoint) in
+                        ForEach(deliverablePoints, id: \.targetReturn) { (p: SensitivityPoint) in
                             LineMark(
                                 x: .value("目标收益率", p.targetReturn * 100),
                                 y: .value("夏普比率", p.sharpe ?? 0)
@@ -69,7 +76,7 @@ public struct SensitivityAnalysisView: View {
                                 .foregroundStyle(.green)
                                 .symbolSize(90)
                                 .annotation(position: .top) {
-                                    Text("当前交付").font(.caption2).foregroundStyle(.green)
+                                    Text("主结果锚点").font(.caption2).foregroundStyle(.green)
                                 }
                         }
                     }
@@ -148,9 +155,11 @@ public struct SensitivityAnalysisView: View {
                     Divider()
                     ForEach(result.points, id: \.id) { p in
                         HStack(spacing: 0) {
-                            Text(p.feasible ? pctShort(p.targetReturn) : "\(pctShort(p.targetReturn)) ✗")
+                            // 「目标」列：不可行加 ✗；回退点显式标「回退」（交付低于该点目标，
+                            // 不是该目标下能交付的组合），不再伪装成正常点。
+                            Text(targetCellText(p))
                                 .frame(maxWidth: .infinity)
-                                .foregroundStyle(p.feasible ? Color.primary : Color.red)
+                                .foregroundStyle(targetCellColor(p))
                             Text(p.feasible && p.achievedReturn != nil ? pctShort(p.achievedReturn!) : "—")
                                 .frame(maxWidth: .infinity)
                                 .foregroundStyle(.secondary)
@@ -187,6 +196,26 @@ public struct SensitivityAnalysisView: View {
 
     private var feasiblePoints: [SensitivityPoint] {
         result.points.filter { $0.feasible }
+    }
+
+    /// 蓝色前沿上的点：feasible 且**未回退**（fallback）。
+    /// 回退点（目标不可行 → 交付的是最大可行收益）不画进曲线，否则「目标 T 处的最优交付」
+    /// 会被一条低于主结果的假前沿覆盖；它们仍在表格里并标「回退」。
+    private var deliverablePoints: [SensitivityPoint] {
+        result.points.filter { $0.feasible && !($0.fallback ?? false) }
+    }
+
+    /// 「目标」列的文本：不可行加 ✗，回退点加「回退」。
+    private func targetCellText(_ p: SensitivityPoint) -> String {
+        var text = pctShort(p.targetReturn)
+        if !p.feasible { text += " ✗" }
+        if p.fallback == true { text += " 回退" }
+        return text
+    }
+
+    private func targetCellColor(_ p: SensitivityPoint) -> Color {
+        if !p.feasible { return .red }
+        return p.fallback == true ? .orange : .primary
     }
 
     /// X-axis domain: lower bound = first scanned target (= --step-min),

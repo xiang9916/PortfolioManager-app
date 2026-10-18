@@ -216,12 +216,31 @@ public final class OptimizationService {
     /// Run sensitivity analysis: step target return from 5% to max feasible, 1% increments.
     /// 复用优化运行留在共享临时目录的联网产物 (基金搜索易 + 天天基金状态),
     /// 不重新联网; 临时文件缺失/过期时由 Python 侧全量重跑管线。
-    public func runSensitivityAnalysis(extractJSON: URL) throws -> SensitivityAnalysisResult {
-        let args = [
+    ///
+    /// - Parameters:
+    ///   - anchorTarget: 主结果的目标收益率。并入扫描网格，保证「主结果锚点」在图上有点可落。
+    ///   - anchorSleeve: 主结果的袖内参数 {袖 key: [μ, σ]}（紧凑 JSON 传给 `--anchor-sleeve`）。
+    ///     锚定目标点用它当 canonical 候选初值，与主结果同一口径。
+    ///   - anchorRet / anchorVol: 主结果的实际收益 / 波动，供 Python 侧做锚点一致性检查。
+    ///   全部默认 nil → 不追加任何 CLI 参数，与旧行为一致。
+    public func runSensitivityAnalysis(extractJSON: URL,
+                                       anchorTarget: Double? = nil,
+                                       anchorSleeve: [String: [Double]]? = nil,
+                                       anchorRet: Double? = nil,
+                                       anchorVol: Double? = nil) throws -> SensitivityAnalysisResult {
+        var args = [
             extractJSON.path,
             "--work-dir", Self.workDirURL().path,
             "--step-min", "0.05",
         ]
+        // 锚点参数全部是加法式: 缺省不出现 → Python 侧走旧路径（求解次数/点字段不变）。
+        if let t = anchorTarget { args += ["--anchor-target", String(t)] }
+        if let sleeve = anchorSleeve, !sleeve.isEmpty,
+           let sleeveJSON = Self.compactJSON(sleeve) {
+            args += ["--anchor-sleeve", sleeveJSON]
+        }
+        if let r = anchorRet { args += ["--anchor-ret", String(r)] }
+        if let v = anchorVol { args += ["--anchor-vol", String(v)] }
 
         let stdout = try sidecar.run(script: "sensitivity_analysis.py", args: args)
 
@@ -233,6 +252,14 @@ public final class OptimizationService {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let result = try decoder.decode(SensitivityAnalysisResult.self, from: data)
         return result
+    }
+
+    /// 袖内参数 → 紧凑 JSON 字符串。键排序保证同一输入产生同一条命令行（可复现）。
+    private static func compactJSON(_ value: [String: [Double]]) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     private static func isoNow() -> String {

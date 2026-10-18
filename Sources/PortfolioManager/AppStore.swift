@@ -730,11 +730,12 @@ public final class AppStore {
 
     // MARK: 能力2 — optimizer
 
-    /// Copy of extract_app.json with pool stats + us_equity + domestic_holdings + rf
+    /// Copy of extract_app.json with pool stats + us_equity + domestic_holdings + held_assets + rf
     /// overwritten by LIVE 资产总览/资产明细 statistics — 优化器不再使用提取时的冻结快照.
     /// - 境内/境外权重 = 占总市值比例 (未归一化); 池由每个标的的市场派生, 只有两种, 必然归一.
     /// - us_equity.holdings = 实时美股持仓 (替代导入日冻结值 → O_US_CORE 聚合 mu/vol + stage2 优先级).
     /// - domestic_holdings = 实时境内基金持仓 (动态锚定, 替代 params.py 写死的 fund_code).
+    /// - held_assets = 全部 value>0 持仓 (候选目录外的持仓由 Python 侧决定是否注入为 what-if 资产).
     /// - rf = 池比例加权中美10年国债收益率 (params.py 里不写死利率，取不到就按 0 计).
     private func liveExtractURL() -> URL? {
         let src = AppPaths.extractJSONURL()
@@ -783,6 +784,30 @@ public final class AppStore {
                 return ["code": code, "name": row.name, "value_cny": row.valueCny]
             }
         if !domFunds.isEmpty { obj["domestic_holdings"] = domFunds }
+
+        // held_assets: **全部** value>0 的持仓（不只美股/境内基金）。Python 侧据此判断哪些持仓
+        // 不在候选目录内、需要按 what-if 口径注入候选池 —— 此前这类持仓被静默丢弃。
+        // ticker/market/asset_class 关联 assets 表；pool 用读路径派生值；weight = 占总持仓市值比例。
+        let heldRows = perspectives.filter { $0.valueCny > 0 }
+        let heldTotal = heldRows.reduce(0.0) { $0 + $1.valueCny }
+        let heldAssets: [[String: Any]] = heldRows.sorted { $0.valueCny > $1.valueCny }.map { row in
+            let a = byKey[row.assetKey]
+            return [
+                "ticker": a?.ticker ?? row.assetKey,
+                "name": row.name,
+                "market": a?.market?.rawValue ?? row.market?.rawValue ?? "",
+                "asset_class": a?.assetClass ?? row.assetClass,
+                "pool": row.pool.rawValue,
+                "value_cny": row.valueCny,
+                "weight": heldTotal > 0 ? row.valueCny / heldTotal : 0,
+            ]
+        }
+        obj["held_assets"] = heldAssets
+        // 开关: 允许 Python 侧把目录外持仓注入为 what-if 资产（缺键 = 旧行为）。
+        obj["include_unmodeled_holdings"] = true
+        // 开关: Q2 锚定所需的 sleeve_params 由 Python 侧按此开关决定是否写进 detail/summary。
+        // App 必须置 true；CLI / 旧提取文件不写 → 保持逐字节兼容。
+        obj["emit_sensitivity_anchor"] = true
 
         // RF: 池比例加权中美10年国债收益率 (替代 params.py 写死 0.025).
         if let cn = try? db.fetchMacroRate("cn_10y")?.value,
