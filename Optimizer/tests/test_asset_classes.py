@@ -219,14 +219,20 @@ def test_premium_and_fallback_are_half_point():
 
 
 def test_proxy_and_internal_pool_cleanup():
-    """HK 内部池（父大类已不存在）必须已清除；短样本标的要有长历史代理。"""
+    """HK 内部池（父大类已不存在）必须已清除；短样本标的要有长历史代理；指数代理一律总回报。"""
     for key in ("2800", "2828", "3031", "3067", "3110", "3070"):
         assert key not in AC.ASSET_CLASS, key
     import market_data as M
-    assert M.PROXY_MAP.get("HK_DIV") is not None      # 香港高股息桶的真实标的历史仅 129 天
+    assert M.PROXY_MAP.get("HK_DIV") == ("yahoo", "2800.HK")  # 该高股息 ETF 仅 129 天
     assert M.PROXY_MAP.get("DIVLOWVOL100") is not None  # 境内红利低波 100 桶仅 532 天
-    # 大中华权益一级大类没有自己的行情 → 用恒生指数长历史作代表（2026-10-14）
-    assert M.SOURCES.get("D_GREATER_CN") == ("yahoo", "^HSI")
+    # 大中华权益一级大类没有自己的行情 → 用 2800.HK 总回报 ETF 长历史作代表（2026-10-20）
+    assert M.SOURCES.get("D_GREATER_CN") == ("yahoo", "2800.HK")
+    # S&P 500 代理用总回报指数；HK/SG 用复权 ETF（Yahoo 无 ^HSITR/^STITR）
+    for key in ("SPY", "D_HSBC_SP500", "D_CN_QDII_STOCK", "O_US_CORE"):
+        assert M.PROXY_MAP.get(key) == ("yahoo", "^SP500TR"), key
+    assert M.PROXY_MAP.get("O_SG_EQ") is None
+    for pair in (("yahoo", "^GSPC"), ("yahoo", "^HSI"), ("yahoo", "^STI")):
+        assert pair not in M.PROXY_MAP.values(), pair
 
 
 def main():

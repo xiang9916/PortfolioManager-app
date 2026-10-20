@@ -105,7 +105,7 @@ ASSET_CLASS = {
     "D_CN_QDII_STOCK": "broad",       # QDII 全球股票（宽基股票大类）
     "D_CN_QDII_STABLE": "broad",      # QDII 稳健配置（债性）
     "D_CN_QDII_COMMODITY": "broad",   # QDII 商品/原油（商品）
-    "D_GREATER_CN": "broad",          # 大中华权益一级大类（沪深+港股混合，取恒生指数长历史作为代表）
+    "D_GREATER_CN": "broad",          # 大中华权益一级大类（沪深+港股混合，取 2800.HK 总回报长历史作为代表）
     "O_GOLD": "broad",                # 黄金
     "O_BTC": "broad",                 # 比特币（截断线特例）
     "O_US_CORE": "broad",             # 美国核心权益（聚合项，运行时用内部持仓动态合成）

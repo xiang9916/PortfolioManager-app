@@ -254,8 +254,8 @@ SOURCES = {
     "D_CN_QDII_STABLE": ("fund", "017970"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
     # 大中华权益一级大类（桶内＝沪深300/红利低波/主动/港股混合，没有自己的行情）
-    # → 用恒生指数长历史作为代表（2026-10-14 用户定稿）
-    "D_GREATER_CN": ("yahoo", "^HSI"),
+    # → 用 2800.HK（恒指 ETF，复权=总回报）长历史作为代表（2026-10-20 起含分红）
+    "D_GREATER_CN": ("yahoo", "2800.HK"),
     "O_US_CORE": ("yahoo", "SPY"),
     "O_BTC": ("yahoo", "BTC-USD"),
     "O_HYLB": ("yahoo", "HYLB"),
@@ -301,28 +301,30 @@ SOURCES = {
 
 # Long-history proxies: when the actual fund/ETF has short history, use a broad
 # index/futures proxy that covers a longer economic cycle.
+# 指数代理一律用**总回报**序列：S&P 500 用 ^SP500TR；Yahoo 没有 ^HSITR/^STITR，
+# HK/SG 改用 2800.HK / G3B.SI 的复权 ETF 序列（总回报）。
 PROXY_MAP = {
     # 短样本标的的长历史代理（真实标的历史太短会让 μ 每次校准都跳）
-    "HK_DIV": ("yahoo", "^HSI"),              # 3031.HK 仅 129 天 → 恒指长历史
+    "HK_DIV": ("yahoo", "2800.HK"),           # 3031.HK 仅 129 天 → 2800.HK 总回报长历史
     "DIVLOWVOL100": ("fund", "005051"),        # 021550 仅 532 天 → 同类红利低波策略长历史
-    "D_HSBC_SP500": ("yahoo", "^GSPC"),
+    "D_HSBC_SP500": ("yahoo", "^SP500TR"),
     "D_HSBC_CDB": None,
     "D_HSBC_MMF": None,
     "D_CN_CREDIT_BOND": None,
     "D_CN_DIVLOWVOL100": None,
-    "D_CN_QDII_STOCK": ("yahoo", "^GSPC"),
+    "D_CN_QDII_STOCK": ("yahoo", "^SP500TR"),
     "D_CN_QDII_STABLE": ("yahoo", "BND"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),
-    "D_GREATER_CN": None,                      # 代表序列本身就是恒指，无需再配代理
-    "O_US_CORE": ("yahoo", "^GSPC"),
+    "D_GREATER_CN": None,                      # 源 2800.HK 已是复权 ETF（总回报），无需再配代理
+    "O_US_CORE": ("yahoo", "^SP500TR"),
     "O_BTC": None,
     "O_HYLB": None,
     "O_JP_EQ": None,                         # 与执行标的 1698.T 同源，避免同敞口两套参数
-    "O_SG_EQ": ("yahoo", "^STI"),
+    "O_SG_EQ": None,                          # 源 G3B.SI 已是复权 ETF（总回报），^STI 是价格指数
     "O_US_TLT": None,
     "O_US_REIT": ("yahoo", "VNQ"),
     "O_US_ENERGY": ("yahoo", "CL=F"),
-    "SPY": ("yahoo", "^GSPC"),
+    "SPY": ("yahoo", "^SP500TR"),
     "VTV": None,
     "SPMO": None,
     "UNH": None,
