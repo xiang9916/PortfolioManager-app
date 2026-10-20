@@ -463,7 +463,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   （MMAX/MAXJ/SMAX/DMAX），历史取四只共同窗口、每季度初拉回各 25%；四只 ticker 都归并到 `BUFFER`
   （`us_core_params` 与 `held_assets` 的 modeled 判定），不要再把其中一只当成单只 ETF 或 what-if 腿。
   相关表宽基三格取实测，单名先验在 `_apply_calibration` 里回填（`_BUFFER_SINGLE_NAME_PRIORS`）。
-  先验动态 = min((0.5×μSPY先验 + 0.5×Rf_usd)/2, 10%)；μSPY先验 = SPY 先验（RF+4%），不可用回落 RF+2%。
+  先验动态 = max(0, min(μSPY, 2×Rf_usd))；μSPY = SPY 最终 μ；不可用回落 RF+2%。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。

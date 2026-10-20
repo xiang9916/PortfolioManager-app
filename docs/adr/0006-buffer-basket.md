@@ -23,7 +23,7 @@
 5. **相关表**：`US_INTERNAL_CORR` 与 `SP500_INTERNAL_CORR` 的 BUFFER 行只改宽基三格 —— SPY 0.60→0.93、VTV 0.55→0.80、SPMO 0.60→0.77；单名保留先验（390 天单名估计噪声大，UNH 实测 0.08）。
    注意：`_rebuild_corr` 会用校准文件**整表重建** `US_INTERNAL_CORR`，所以单名先验必须在 `_apply_calibration` 里回填（`_BUFFER_SINGLE_NAME_PRIORS`）；宽基三格不拦，取 JSON 实测。
 
-6. **先验动态化（2026-10-20 续）**：μ_prior(BUFFER) = min((0.5×μSPY先验 + 0.5×Rf_usd)/2, 10%)；μSPY先验 = SPY 的先验（RF_usd + 4.0%），不是 SPY 校准后的 μ；Rf_usd = 数据源美元 10 年期。由校准阶段算好写入 priors / provenance.prior_formula，运行时离线复现；SPY/Rf 缺失 → 回落 RF+2%。
+6. **先验动态化（2026-10-20 续）**：μ_prior(BUFFER) = max(0, min(μSPY, 2×Rf_usd))；μSPY = SPY 的**最终**（校准后）μ；Rf_usd = 数据源美元 10 年期。由校准阶段算好写入 priors / provenance.prior_formula，运行时离线复现；SPY 最终 μ/Rf 缺失 → 回落 RF+2%。SOURCES 里 SPY 必须先于 BUFFER。
 
 ## 兼容性
 
@@ -41,7 +41,7 @@
 
 ## 后果 / 已知残留
 
-- BUFFER 的 μ/σ 变为约 7.0% / 3.1%（总回报、0.67/0.33 混合、动态先验 3.58% 后），夏普约 0.60（原 0.41）；袖内权重会上升，需要在结果页核对。
+- BUFFER 的 μ/σ 变为约 9.2% / 3.1%（总回报、0.67/0.33 混合、动态先验 10.30% 后），夏普约 1.33（原 0.41）；袖内权重会显著上升，需要在结果页核对。
 - 相关表宽基行抬到 0.77–0.93，避免“低波 + 低相关”的双重高估；单名先验不动。
 - 单只持有者的模型风险被篮子摊薄（3.08% vs 单只 2.5–4.8%）；名字里的“等权”与季度再平衡规则是披露。
 - 若 App 内某资产的 key 恰为 `BUFFER`，取数仍走 `AssetCatalog` 的 `MAXJ`（代理）；真实持仓应以各自 ticker 建资产，避免取错一只。

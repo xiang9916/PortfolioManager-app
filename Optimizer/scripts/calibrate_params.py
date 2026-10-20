@@ -44,6 +44,7 @@ from market_data import (
 import asset_classes as AC
 
 PROVENANCE, WARNINGS, DROPPED = {}, [], []
+RESOLVED_MU = {}      # 已算出的 μ（BUFFER 的动态先验要读 SPY 的最终 μ）
 
 
 def _fetch(typ, sym, years, adjusted=False):
@@ -230,30 +231,31 @@ for key, (typ, sym) in sources.items():
                     f"{_label(key)}: 动态先验不可用（{detail.get('reason')}），"
                     f"回落到静态先验 {AC.PRIOR[key]:.2%}")
         if key == "BUFFER":
-            # ADR 0006：μSPY 指 SPY 的**先验**（RF+4%），不是校准后的 μ。
-            # 先验 = min((0.5×μSPY先验 + 0.5×Rf)/2, 10%)。
-            spy_prior = AC.prior_for("SPY")
+            # ADR 0006：μSPY 是 SPY 的**最终**（校准后）μ；先验 = max(0, min(μSPY, 2×Rf))。
+            # SOURCES 里 SPY 必须先于 BUFFER；顺序变了就回落静态先验并报警。
+            spy_mu = RESOLVED_MU.get("SPY")
             rf_usd = _PRIOR_RF.get("usd")
-            prior_val = AC.buffer_prior(spy_prior, rf_usd)
+            prior_val = AC.buffer_prior(spy_mu, rf_usd)
             if prior_val is not None:
                 AC.set_prior_overrides({**AC.PRIOR_OVERRIDE, key: prior_val})
                 PRIOR_DETAIL[key] = {
-                    "formula": "min((0.5*mu_SPY_prior + 0.5*rf_usd)/2, 10%)",
-                    "mu_spy_prior": spy_prior, "rf_usd": rf_usd,
-                    "cap": AC.BUFFER_PRIOR["cap"], "prior": prior_val,
+                    "formula": "max(0, min(mu_SPY, 2*rf_usd))",
+                    "mu_spy": spy_mu, "rf_usd": rf_usd,
+                    "cap_rf_multiple": AC.BUFFER_PRIOR["cap_rf_multiple"],
+                    "floor": AC.BUFFER_PRIOR["floor"], "prior": prior_val,
                 }
                 WARNINGS.append(
                     f"{_label(key)}: 先验走动态公式 {prior_val:.2%} = "
-                    f"min((0.5×μSPY先验 {spy_prior:.2%} + 0.5×Rf {rf_usd:.2%})/2, "
-                    f"{AC.BUFFER_PRIOR['cap']:.0%})")
+                    f"max(0, min(μSPY {spy_mu:.2%}, 2×Rf {rf_usd:.2%}))")
             else:
-                PRIOR_DETAIL[key] = {"reason": "missing_mu_spy_prior_or_rf",
-                                     "mu_spy_prior": spy_prior, "rf_usd": rf_usd}
+                PRIOR_DETAIL[key] = {"reason": "missing_mu_spy_or_rf",
+                                     "mu_spy": spy_mu, "rf_usd": rf_usd}
                 WARNINGS.append(
-                    f"{_label(key)}: 动态先验不可用（μSPY先验={spy_prior}、Rf={rf_usd}），"
+                    f"{_label(key)}: 动态先验不可用（μSPY={spy_mu}、Rf={rf_usd}），"
                     f"回落到静态先验 {AC.prior_for(key):.2%}")
 
         mu, note = AC.build_mu(key, ann_ret)
+        RESOLVED_MU[key] = mu
         vol, vol_note = AC.build_vol(key, ann_vol)
         if vol_note == "sigma_glitch":
             WARNINGS.append(f"{_label(key)}: σ={ann_vol:.0%} 超过 150%，按数据毛刺丢弃（不再参与优化）")

@@ -330,20 +330,18 @@ PRIOR = {
     "SPMO": 0.095, "VTV": 0.085,
 }
 
-# 缓冲期权先验（ADR 0006）：min((0.5×μSPY + 0.5×Rf_usd)/2, 10%)。
-# μSPY = 当次校准的 SPY 期望收益；Rf_usd = 美元 10 年期（数据源）。
+# 缓冲期权先验（ADR 0006）：max(0, min(μSPY, 2×Rf_usd))。
+# μSPY = 当次校准的 SPY 最终 μ；Rf_usd = 美元 10 年期（数据源）。
 # 不可用时回落 RF_PREMIUM / PRIOR 静态表（并报警）。
-BUFFER_PRIOR = {"equity_weight": 0.5, "rf_weight": 0.5, "scale": 0.5, "cap": 0.10}
+BUFFER_PRIOR = {"cap_rf_multiple": 2.0, "floor": 0.0}
 
 
-def buffer_prior(mu_equity, rf):
+def buffer_prior(mu_spy, rf):
     """动态先验；任一输入缺失返回 None（调用方回落静态先验）。"""
-    if mu_equity is None or rf is None:
+    if mu_spy is None or rf is None:
         return None
     spec = BUFFER_PRIOR
-    raw = (spec["equity_weight"] * float(mu_equity)
-           + spec["rf_weight"] * float(rf)) * spec["scale"]
-    return min(raw, spec["cap"])
+    return max(spec["floor"], min(float(mu_spy), spec["cap_rf_multiple"] * float(rf)))
 
 # 波动率：**没有人工下限表**（2026-10-14 用户定稿）。σ = 窗口内历史年化波动，
 # 只在超过 SIGMA_SANITY_MAX 时按数据毛刺丢弃。样本太短的问题靠长历史代理解决
