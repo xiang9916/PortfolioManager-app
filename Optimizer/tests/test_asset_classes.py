@@ -235,6 +235,14 @@ def test_proxy_and_internal_pool_cleanup():
         assert pair not in M.PROXY_MAP.values(), pair
 
 
+def test_buffer_prior_formula():
+    """ADR 0006：BUFFER 先验 = min((0.5×μSPY先验 + 0.5×Rf)/2, 10%)；缺输入返回 None。"""
+    assert abs(AC.buffer_prior(0.10, 0.05) - 0.0375) < 1e-12
+    assert abs(AC.buffer_prior(0.40, 0.05) - 0.10) < 1e-12
+    assert AC.buffer_prior(None, 0.05) is None
+    assert AC.buffer_prior(0.10, None) is None
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

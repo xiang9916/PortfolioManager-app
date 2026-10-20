@@ -42,6 +42,6 @@
 ## 验证入口
 
 - 重校准前后 `μ_hist` / `vol_hist` 差值表（写 `tmp/`，不入库）。
-- Python 34 文件 / 219 用例；--help 2842 B。等价门：本改动只改校准数据与 PROXY_MAP/SOURCES 数据表，运行时求解器未动；但 canned 的 US 袖包含 BUFFER 候选，其 μ/σ/相关变化会改变输出，inject 模式若用到 broad 代理序列也会体现，属有意行为变更（见 ADR 0006），不是重构回归。
+- Python 34 文件 / 220 用例；--help 2842 B。等价门：本改动只改校准数据与 PROXY_MAP/SOURCES 数据表，运行时求解器未动；但 canned 的 US 袖包含 BUFFER 候选，其 μ/σ/相关变化会改变输出，inject 模式若用到 broad 代理序列也会体现，属有意行为变更（见 ADR 0006），不是重构回归。
 - Swift 90 用例（87 + `YahooFinanceSourceTests` 3 项）；模拟历史图截图核对。
 - 隐私门（worktree/staged/message）。

@@ -364,7 +364,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 34 文件 / 219 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 34 文件 / 220 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
@@ -463,6 +463,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   （MMAX/MAXJ/SMAX/DMAX），历史取四只共同窗口、每季度初拉回各 25%；四只 ticker 都归并到 `BUFFER`
   （`us_core_params` 与 `held_assets` 的 modeled 判定），不要再把其中一只当成单只 ETF 或 what-if 腿。
   相关表宽基三格取实测，单名先验在 `_apply_calibration` 里回填（`_BUFFER_SINGLE_NAME_PRIORS`）。
+  先验动态 = min((0.5×μSPY先验 + 0.5×Rf_usd)/2, 10%)；μSPY先验 = SPY 先验（RF+4%），不可用回落 RF+2%。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。
