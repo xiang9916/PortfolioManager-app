@@ -119,7 +119,7 @@ ASSET_CLASS = {
     "SPY": "broad",                   # 标普500 宽基（SPDR S&P 500 ETF Trust）
     "VTV": "strategy",                # 价值因子
     "SPMO": "strategy",               # 动量因子
-    "BUFFER": "strategy",             # MAXJ/DMAX 缓冲期权（策略型产品）
+    "BUFFER": "strategy",             # 四只季度错峰 Max Buffer 的等权篮子（成员见 BUFFER_FAMILY）
     "UNH": "active", "GOOG": "active", "AAPL": "active", "MSFT": "active",
     "NVDA": "active", "AMZN": "active", "META": "active", "TSLA": "active",
     # ---- 日本内部（JP_INTERNAL）----
@@ -139,6 +139,10 @@ ASSET_CLASS = {
     "STOCK": "active",                # 主动股票/行业
     "MIXED": "active",                # 主动混合
 }
+
+# 缓冲期权篮子的成员（ADR 0006）：同一系列、按季度错峰的四只 Max Buffer ETF。
+# 顺序按 outcome period 起始月：3/6/9/12 月；篮子等权、每季度初再平衡。
+BUFFER_FAMILY = ("MMAX", "MAXJ", "SMAX", "DMAX")
 
 # ---------------------------------------------------------------- 写死的先验
 # 只保留 broad / strategy（active 类不用先验）。

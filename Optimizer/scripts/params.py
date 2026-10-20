@@ -37,7 +37,7 @@ US_INTERNAL = {
     "AMZN": {"name": "Amazon.com Inc."},
     "META": {"name": "Meta Platforms Inc."},
     "TSLA": {"name": "Tesla Inc."},
-    "BUFFER": {"name": "MAXJ/DMAX 缓冲期权"},
+    "BUFFER": {"name": "缓冲期权（DMAX/MMAX/MAXJ/SMAX 等权）"},
 }
 
 US_INTERNAL_CORR = {
@@ -96,9 +96,10 @@ US_INTERNAL_CORR = {
     ("AMZN", "META"): 0.65,
     ("AMZN", "TSLA"): 0.50,
     ("META", "TSLA"): 0.50,
-    ("BUFFER", "SPY"): 0.60,
-    ("BUFFER", "VTV"): 0.55,
-    ("BUFFER", "SPMO"): 0.60,
+    # ADR 0006：宽基三格取篮子实测（390 天）；单名保留先验（390 天单名估计噪声大）。
+    ("BUFFER", "SPY"): 0.93,
+    ("BUFFER", "VTV"): 0.80,
+    ("BUFFER", "SPMO"): 0.77,
     ("BUFFER", "UNH"): 0.50,
     ("BUFFER", "GOOG"): 0.50,
     ("BUFFER", "AAPL"): 0.50,
@@ -107,6 +108,16 @@ US_INTERNAL_CORR = {
     ("BUFFER", "AMZN"): 0.45,
     ("BUFFER", "META"): 0.45,
     ("BUFFER", "TSLA"): 0.40,
+}
+
+# ADR 0006：BUFFER 与**单名个股**的相关性保留手工先验 —— 校准文件里的实测值
+# （390 天）噪声太大（UNH 实测 0.08 是 2025 年个股事件的产物），不该被当成长期结构。
+# 宽基三格（SPY/VTV/SPMO）不在此列，由校准文件覆盖为实测值。
+# _rebuild_corr 会整表清空重建，所以要在它之后回填（见 _apply_calibration）。
+_BUFFER_SINGLE_NAME_PRIORS = {
+    ("BUFFER", "UNH"): 0.50, ("BUFFER", "GOOG"): 0.50, ("BUFFER", "AAPL"): 0.50,
+    ("BUFFER", "MSFT"): 0.50, ("BUFFER", "NVDA"): 0.45, ("BUFFER", "AMZN"): 0.45,
+    ("BUFFER", "META"): 0.45, ("BUFFER", "TSLA"): 0.40,
 }
 
 # 日本权益大类内部：策略/因子二级候选池
@@ -586,10 +597,21 @@ def higham_psd(matrix, max_iter=200):
     from portfolio_system.core.linalg import higham_psd as _impl
     return _impl(matrix, max_iter=max_iter)
 
+def fold_internal_weights(internal_weights, family=None):
+    """把袖内成员 ticker 归并到各自的内部池 key（ADR 0006：四只缓冲期权 → BUFFER）。"""
+    family = tuple(family or _AC.BUFFER_FAMILY)
+    merged = {}
+    for ticker, weight in (internal_weights or {}).items():
+        key = "BUFFER" if ticker in family else ticker
+        merged[key] = merged.get(key, 0.0) + float(weight)
+    return merged
+
+
 def us_core_params(internal_weights):
     """Aggregate US core equity mu/vol from current internal weights."""
-    keys = [k for k in US_INTERNAL if k in internal_weights and internal_weights[k] > 0]
-    weights = np.array([internal_weights[k] for k in keys])
+    by_key = fold_internal_weights(internal_weights)
+    keys = [k for k in US_INTERNAL if k in by_key and by_key[k] > 0]
+    weights = np.array([by_key[k] for k in keys])
     weights = weights / weights.sum()
     mus = np.array([US_INTERNAL[k]["mu"] for k in keys])
     vols = np.array([US_INTERNAL[k]["vol"] for k in keys])
@@ -920,6 +942,10 @@ def _apply_calibration():
     _rebuild_corr(US_INTERNAL_CORR, internal_keys)
     _rebuild_corr(JP_INTERNAL_CORR, jp_keys)
     _rebuild_corr(GC_INTERNAL_CORR, gc_keys)
+
+    # ADR 0006：整表重建后回填 BUFFER 的单名先验（宽基三格仍用校准实测）。
+    for _pair, _value in _BUFFER_SINGLE_NAME_PRIORS.items():
+        US_INTERNAL_CORR[_pair] = _value
 
     # 5) 报告写死值兜底了哪些标的（这些标的的口径弱于有行情的标的）
     # 说明：前瞻微调（forward_adjusted.json / aistockresearcher）已于 2026-10-14 整体退役，

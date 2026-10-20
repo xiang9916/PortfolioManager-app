@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 87 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
+swift test  --disable-sandbox          # 90 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -148,7 +148,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **87 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **90 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）
@@ -364,7 +364,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 33 文件 / 209 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 34 文件 / 219 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
@@ -455,6 +455,13 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - **已知残留（2026-10-18）**：主运行仍是单路径冷启动（若冷启动本身落在较差固定点，本轮不额外探索，留待全局多初值 A/B）；
   零权重袖的假设参数仍不参与验证，只在外加热启动/alt 路径的审计键里可见。
   ⚠️ 修正日期后校准矩阵仍非 PSD（内部池 eigmin ≈ −0.20）：收缩/稳健估计（Ledoit-Wolf 等）属 P2，默认关，需 walk-forward A/B 后再定。
+
+- **校准序列统一总回报（ADR 0005，2026-10-20）**：所有 Yahoo 序列取 `adjclose`（含分红/派息；缺失回落 `close` + 告警），
+  中国基金走累计净值；App 的 `prices` 同样存 `adjclose`，`quotes` 仍存最新价。价格口径会系统性低估分红型资产的 μ。
+- **缓冲期权 = 四只季度错峰等权篮子（ADR 0006，2026-10-20）**：成员单一来源 `asset_classes.BUFFER_FAMILY`
+  （MMAX/MAXJ/SMAX/DMAX），历史取四只共同窗口、每季度初拉回各 25%；四只 ticker 都归并到 `BUFFER`
+  （`us_core_params` 与 `held_assets` 的 modeled 判定），不要再把其中一只当成单只 ETF 或 what-if 腿。
+  相关表宽基三格取实测，单名先验在 `_apply_calibration` 里回填（`_BUFFER_SINGLE_NAME_PRIORS`）。
 
 ## 13. Swift Charts 踩坑速查（财务分析统计图，2026-09-08 实战记录）
 - **同一图里多组 LineMark 若不加 `series:`，会被按数据顺序连成一条线**——上界/下界、正负段分开给点时，末端点会直插首点画出一条斜跨全图的长弦（v0.2 堆积图"蓝色斜线"bug）。每组线单独标 `series: .value(...)`，或干脆别画。

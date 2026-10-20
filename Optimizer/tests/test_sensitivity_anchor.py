@@ -570,9 +570,11 @@ def test_anchor_point_matches_main_result_with_real_engine():
         SENS._sleeve_universe = saved_universe
     point = out["points"][0]
     assert point["target_return"] == target, point
-    assert abs(point["achieved_return"] - round(main["final"]["ret"], 6)) < 1e-9, \
+    # achieved_return / volatility 是 6 位小数的展示值；与主结果的**全精度**比较，
+    # 容差用展示精度 1e-6（与 anchor.matched 同口径），避免两次独立求解的末位舍入差。
+    assert abs(point["achieved_return"] - main["final"]["ret"]) <= 1e-6, \
         (point, main["final"])
-    assert abs(point["volatility"] - round(main["final"]["vol"], 6)) < 1e-9, \
+    assert abs(point["volatility"] - main["final"]["vol"]) <= 1e-6, \
         (point, main["final"])
     assert out["anchor"]["matched"] is True, out["anchor"]
     assert abs(out["anchor"]["point"]["ret"] - point["achieved_return"]) < 1e-12, out["anchor"]

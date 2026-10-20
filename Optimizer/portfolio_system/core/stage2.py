@@ -23,7 +23,7 @@ from .warnings import CodedWarning as _Warn
 # 其余固定大类与内部标的之间没有直接的历史序列可算，用「该大类 vs O_US_CORE」的
 # 大类级相关性做代理（见 stage2_covariance）——这是近似，不是估计。
 SP500_INTERNAL_CORR = {
-    "SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.60,
+    "SPY": 0.95, "VTV": 0.85, "SPMO": 0.85, "UNH": 0.75, "GOOG": 0.75, "BUFFER": 0.93,
 }
 SP500_INTERNAL_CORR_DEFAULT = 0.75
 

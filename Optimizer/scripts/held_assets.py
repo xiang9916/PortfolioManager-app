@@ -17,6 +17,7 @@
 
 import re
 
+import asset_classes as AC
 from market_data import SOURCES
 from params import GC_INTERNAL, JP_INTERNAL, US_INTERNAL
 
@@ -57,6 +58,8 @@ def _internal_pool_keys():
 def _modeled_identifiers(assets, hsbc_pool):
     """当前模型已经覆盖的标识集合（契约 §1.3 的 modeled 判定口径）。"""
     modeled = {str(key).strip().upper() for key in _internal_pool_keys() if str(key).strip()}
+    # ADR 0006：四只缓冲期权成员都归 BUFFER，不能再被当成未建模持仓注入。
+    modeled.update(str(sym).strip().upper() for sym in AC.BUFFER_FAMILY)
 
     # market_data.SOURCES 的**执行符号**（第二个元素：ETF/指数代码或境内基金代码）。
     for source in SOURCES.values():

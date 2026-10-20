@@ -53,9 +53,19 @@ public final class YahooFinanceSource: DataSource, Sendable {
         let end = Int(Date().timeIntervalSince1970)
         let start = 0  // earliest available daily history
         let decoded = try await fetchChart(symbol: symbol, start: start, end: end)
+        return Self.historyPoints(from: decoded, symbol: symbol)
+    }
+
+    /// 历史序列 → PricePoint（总回报口径，ADR 0005）。
+    ///
+    /// 优先 adjclose（含分红/派息）；缺失时回落 close。adjclose 的最后一点等于
+    /// 当前收盘价（Yahoo 把复权因子归一化到序列末日），所以 prices.last 仍可作最新价兜底。
+    static func historyPoints(from decoded: YahooChartResponse, symbol: String) -> [PricePoint] {
         guard let r = decoded.chart.result?.first else { return [] }
         let currency = r.meta?.currency ?? "USD"
-        let closes = r.indicators.quote.first?.close ?? []
+        let closes = r.indicators.adjclose?.first?.adjclose
+            ?? r.indicators.quote.first?.close
+            ?? []
         var out: [PricePoint] = []
         for (i, ts) in r.timestamp.enumerated() {
             guard i < closes.count, let c = closes[i] else { continue }
@@ -183,9 +193,13 @@ struct YahooChartResponse: Decodable {
         }
         struct Indicators: Decodable {
             let quote: [Quote]
+            let adjclose: [AdjClose]?
         }
         struct Quote: Decodable {
             let close: [Double?]
+        }
+        struct AdjClose: Decodable {
+            let adjclose: [Double?]
         }
         let result: [Result]?
     }

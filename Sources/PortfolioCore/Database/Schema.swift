@@ -176,8 +176,9 @@ public enum Schema {
         "COMMIT;",
         ]),
         (4, [
-        // 能力1: quotes 表存储最新报价 (单位净值/最新价), 与 prices (历史K线/累计净值) 分离.
+        // 能力1: quotes 表存储最新报价 (单位净值/最新价), 与 prices (历史序列) 分离.
         // 基金: quotes = 单位净值 (用于市值计算), prices = 累计净值 (用于模拟历史财务表现图表).
+        // 权益: quotes = 最新价, prices = 复权收盘价 (总回报，含分红；ADR 0005).
         """
         CREATE TABLE IF NOT EXISTS quotes (
             asset_key TEXT PRIMARY KEY,

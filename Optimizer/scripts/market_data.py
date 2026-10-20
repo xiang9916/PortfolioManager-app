@@ -47,11 +47,12 @@ def _eastmoney_date(ts_ms):
     return datetime.datetime.fromtimestamp(ts_ms / 1000, _CN_TZ).date()
 
 
-def yahoo_history(ticker, years=None, adjusted=False):
+def yahoo_history(ticker, years=None, adjusted=False, on_fallback=None):
     """日线收盘序列 [(date, close)]。
 
-    adjusted=True 时取复权收盘价（adjclose，含分红/派息）。做**远期收益/收益率回归**必须用它：
-    债券 ETF 的价格序列把票息丢掉了，用未复权价会系统性低估甚至把斜率符号弄反。
+    adjusted=True 时取复权收盘价（adjclose，含分红/派息）。做**远期收益/收益率回归**
+    与总回报校准必须用它：价格序列把分红/票息丢掉了，会系统性低估收益（ADR 0005）。
+    adjclose 缺失时回落 close；传了 on_fallback 就通知调用方（校准侧据此报警）。
     """
     end = int(time.time())
     if years is None:
@@ -71,6 +72,8 @@ def yahoo_history(ticker, years=None, adjusted=False):
         adj = (res["indicators"].get("adjclose") or [{}])[0].get("adjclose")
         if adj:
             closes = adj
+        elif on_fallback is not None:
+            on_fallback(ticker)
     out = []
     for t, c in zip(ts, closes):
         if c is not None:
@@ -351,3 +354,84 @@ def series_for_broad_key(work_dir, key, log=None):
         except Exception:
             pass
     return prices if len(prices) >= _MIN_SERIES else []
+
+
+# ---------------------------------------------------------------- 缓冲期权篮子（ADR 0006）
+# 成员是同一系列、按季度错峰的四只 Max Buffer ETF。篮子 = 等权、每季度初再平衡；
+# 历史只取四只**同时存续**后的共同窗口（不向前拼接），单日缺口取交集。
+# 本函数是纯函数：取数经 fetch 注入，便于离线单测（不联网、不读真实持仓）。
+
+def _quarter_key(day):
+    """日期的日历季度标识 (year, 0..3)。"""
+    return (day.year, (day.month - 1) // 3)
+
+
+def build_buffer_basket(members, fetch, min_days=30):
+    """四只等权、季度再平衡的合成净值序列。
+
+    参数
+    ----
+    members : 有序 symbol 序列（等权；顺序只影响输出，不影响数值）
+    fetch   : callable(symbol) -> [(date, close)]；取数失败可抛异常
+    min_days: 共同窗口的最小交易日数（不足视为不可用）
+
+    返回 (series, meta)：
+      - 可用：series = [(date, level)]，level 在共同窗口首日归一为 1.0；
+        meta = {members, window, n_days, rebalance, rebalance_days}
+      - 不可用：series = None，meta 带 reason（missing_member / short_window / no_members）
+        以及 missing / errors / n_days 等诊断字段。
+    """
+    members = [str(m).strip() for m in (members or []) if str(m).strip()]
+    if not members:
+        return None, {"reason": "no_members", "members": []}
+
+    prices, missing, errors = {}, [], {}
+    for sym in members:
+        try:
+            rows = fetch(sym) or []
+        except Exception as exc:  # noqa: BLE001 — 单只失败由调用方决定丢弃整条篮子
+            rows = []
+            errors[sym] = f"{type(exc).__name__}: {exc}"
+        if len(rows) < 2:
+            missing.append(sym)
+            continue
+        prices[sym] = dict(rows)
+
+    if missing:
+        return None, {"reason": "missing_member", "members": members,
+                      "missing": missing, "errors": errors}
+
+    common = sorted(set.intersection(*(set(prices[s]) for s in members)))
+    if len(common) < min_days:
+        return None, {"reason": "short_window", "members": members,
+                      "n_days": len(common), "errors": errors}
+
+    # 每个日历季度的第一个共同交易日 = 再平衡日；首日已经是等权，不再重复调仓。
+    first_in_quarter = {}
+    for day in common:
+        first_in_quarter.setdefault(_quarter_key(day), day)
+    rebalance_days = {d for d in first_in_quarter.values() if d != common[0]}
+
+    weight = 1.0 / len(members)
+    units = {sym: weight / prices[sym][common[0]] for sym in members}
+    series = []
+    for day in common:
+        if day in rebalance_days:
+            value = sum(units[sym] * prices[sym][day] for sym in members)
+            units = {sym: (value * weight) / prices[sym][day] for sym in members}
+        series.append((day, sum(units[sym] * prices[sym][day] for sym in members)))
+
+    base = series[0][1]
+    if base <= 0:
+        return None, {"reason": "bad_level", "members": members, "n_days": len(common)}
+    series = [(day, value / base) for day, value in series]
+    meta = {
+        "members": members,
+        "window": [common[0].isoformat(), common[-1].isoformat()],
+        "n_days": len(common),
+        "rebalance": "quarterly",
+        "rebalance_days": [d.isoformat() for d in sorted(rebalance_days)],
+    }
+    if errors:
+        meta["errors"] = errors
+    return series, meta

@@ -5,10 +5,12 @@
 `asset_classes.py` —— 本文件只负责取数、算历史年化收益/波动、按规则组装。
 
 Data sources:
-- Yahoo Finance: US/HK/JP/SG ETFs, stocks, BTC, buffer ETF proxy
+- Yahoo Finance: US/HK/JP/SG ETFs, stocks, BTC；缓冲期权 = 四只 Max Buffer 的等权篮子
 - Eastmoney: China open-end fund NAV history (LJJZ/cumulative NAV)
 
 Method:
+- 序列口径：Yahoo 一律取复权收盘价（adjclose，含分红/派息；缺失回落 close 并报警），
+  中国基金走累计净值 —— 统一为总回报（ADR 0005）。
 - 历史窗口按类别：宽基/大类 = 全历史；策略指数 = 20 年；个股/主动 = 10 年（不足则用可得全历史）。
 - σ = 日收益标准差 × √252（窗口内），**无人工下限**（2026-10-14 取消）。
 - 相关性 = 窗口内日收益的皮尔逊相关（共同日期 ≥180 天），不足填 0.30。
@@ -34,6 +36,7 @@ import pandas as pd
 from market_data import (
     SOURCES as sources,
     PROXY_MAP as proxy_map,
+    build_buffer_basket,
     eastmoney_nav,
     to_series,
     yahoo_history,
@@ -44,9 +47,15 @@ PROVENANCE, WARNINGS, DROPPED = {}, [], []
 
 
 def _fetch(typ, sym, years, adjusted=False):
-    """adjusted=True → Yahoo 取复权价（含分红/票息）。中国基金走累计净值，天然是全收益。"""
+    """adjusted=True → Yahoo 取复权价（含分红/票息）。中国基金走累计净值，天然是全收益。
+
+    adjclose 缺失时 yahoo_history 回落 close；这里把回落记进 WARNINGS（ADR 0005）。
+    """
     if typ == "yahoo":
-        return yahoo_history(sym, years=years, adjusted=adjusted)
+        def _fallback(symbol):
+            WARNINGS.append(f"{symbol}: adjclose 不可用，已回落 close（总回报口径不完整）")
+        return yahoo_history(sym, years=years, adjusted=adjusted,
+                             on_fallback=_fallback if adjusted else None)
     return eastmoney_nav(sym, years=years)
 
 
@@ -140,16 +149,41 @@ for key, (typ, sym) in sources.items():
         continue
     years = AC.window_years(key)
     try:
-        fetched = {}
-        for _typ, _sym in ((typ, sym),) + (((proxy_map[key]),) if proxy_map.get(key) else ()):
-            try:
-                fetched[_sym] = _fetch(_typ, _sym, years)
-            except Exception as exc:  # 单个源失败不该丢掉整个标的（源站偶尔 404/限流）
-                fetched[_sym] = []
-                if _sym == sym:
-                    WARNINGS.append(f"{_label(key)}: {_sym} 取数失败 "
-                                    f"{type(exc).__name__}: {exc}，尝试代理源")
-        best_prices, best_sym = _pick_series(key, sym, fetched, years)
+        basket_meta = None
+        if key == "BUFFER":
+            # ADR 0006：四只 Max Buffer 的等权篮子，历史取共同窗口、每季度初再平衡。
+            best_prices, basket_meta = build_buffer_basket(
+                AC.BUFFER_FAMILY,
+                lambda symbol: _fetch("yahoo", symbol, years, adjusted=True),
+            )
+            best_sym, best_typ = "SYN:4", "yahoo"
+            if not best_prices:
+                missing = basket_meta.get("missing") or []
+                reason = (f"缺 {'、'.join(missing)}" if missing
+                          else str(basket_meta.get("reason")))
+                WARNINGS.append(f"{_label(key)}: 四只篮子序列不可用（{reason}）"
+                                f" → 丢弃（不再参与优化）")
+                DROPPED.append(key)
+                PROVENANCE[key] = {"class": cls, "window_years": years,
+                                   "n_days": basket_meta.get("n_days", 0),
+                                   "source": None, "note": "no_history",
+                                   "adjusted": True, "series": "synthetic_basket",
+                                   **basket_meta}
+                continue
+        else:
+            fetched = {}
+            for _typ, _sym in ((typ, sym),) + (((proxy_map[key]),) if proxy_map.get(key) else ()):
+                try:
+                    fetched[_sym] = _fetch(_typ, _sym, years, adjusted=True)
+                except Exception as exc:  # 单个源失败不该丢掉整个标的（源站偶尔 404/限流）
+                    fetched[_sym] = []
+                    if _sym == sym:
+                        WARNINGS.append(f"{_label(key)}: {_sym} 取数失败 "
+                                        f"{type(exc).__name__}: {exc}，尝试代理源")
+            best_prices, best_sym = _pick_series(key, sym, fetched, years)
+            best_typ = typ
+            if best_sym != sym and proxy_map.get(key):
+                best_typ = proxy_map[key][0]
         if not best_prices:
             if key in AC.SPECIAL_FIXED:
                 WARNINGS.append(f"{_label(key)}: 所有数据源都取不到行情，该标的另有写死值，用写死值兜底")
@@ -157,7 +191,8 @@ for key, (typ, sym) in sources.items():
                 WARNINGS.append(f"{_label(key)}: 所有数据源都取不到行情，且没有写死值可用 → 丢弃（不再参与优化）")
                 DROPPED.append(key)
             PROVENANCE[key] = {"class": cls, "window_years": years, "n_days": 0,
-                               "source": None, "note": "no_history"}
+                               "source": None, "note": "no_history",
+                               "adjusted": None, "series": None}
             continue
         # 窗口裁剪：取不到那么长就用可得全历史
         windowed = AC.slice_window(best_prices, years)
@@ -169,7 +204,9 @@ for key, (typ, sym) in sources.items():
                 WARNINGS.append(f"{_label(key)}: 行情历史不足 30 天（{best_sym}）→ 丢弃（不再参与优化）")
                 DROPPED.append(key)
             PROVENANCE[key] = {"class": cls, "window_years": years, "n_days": len(windowed or []),
-                               "source": best_sym, "note": "no_history"}
+                               "source": best_sym, "note": "no_history",
+                               "adjusted": best_typ == "yahoo",
+                               "series": "adjclose" if best_typ == "yahoo" else "cumulative_nav"}
             continue
         series[key] = df
         n = len(df)
@@ -177,14 +214,8 @@ for key, (typ, sym) in sources.items():
         ann_vol = float(df["ret"].std(ddof=1) * math.sqrt(252.0))
 
         if key in AC.BOND_PRIOR_FORMULA:
-            # 债券回归要用全收益（复权）序列；Yahoo 走 adjclose，中国基金本身就是累计净值
-            adj = None
-            if typ == "yahoo":
-                try:
-                    adj = _fetch(typ, sym, years, adjusted=True)
-                except Exception as exc:  # noqa: BLE001
-                    WARNINGS.append(f"{_label(key)}: 复权序列取数失败（{type(exc).__name__}），"
-                                    f"动态先验改用未复权序列拟合，结果会偏低")
+            # 主序列已是复权（ADR 0005），不再重复取数；基金侧本身就是累计净值。
+            adj = windowed if best_typ == "yahoo" else None
             prior_val, detail = _resolve_bond_prior(key, windowed, adj)
             BOND_DETAIL[key] = detail
             if prior_val is not None:
@@ -220,12 +251,17 @@ for key, (typ, sym) in sources.items():
         meta[key] = {"symbol": best_sym, "ret": ann_ret, "vol": ann_vol, "n": n}
         PROVENANCE[key] = {
             "class": cls, "window_years": years, "n_days": n, "source": best_sym,
+            "adjusted": best_typ == "yahoo",
+            "series": ("synthetic_basket" if basket_meta
+                       else ("adjclose" if best_typ == "yahoo" else "cumulative_nav")),
             "mu_hist": round(ann_ret, 6), "vol_hist": round(ann_vol, 6),
             "mu": round(mu, 6), "vol": round(vol, 6),
             "note": note or "blend", "vol_note": vol_note or "history",
             "prior": AC.prior_for(key),
             "prior_formula": BOND_DETAIL.get(key),
         }
+        if basket_meta:
+            PROVENANCE[key].update(basket_meta)
         print(f"{key:22} {best_sym:12} {AC.CLASS_RULES[cls]['label']:<6} n={n:>6} "
               f"hist={ann_ret:>7.2%} → μ={mu:>7.2%}  vol {ann_vol:>6.2%} → {vol:>6.2%}")
     except Exception as e:
@@ -253,7 +289,8 @@ if "SPY" not in series and "O_US_CORE" in series:
 
 calib = {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    "rules": "asset_classes.py（2026-10-13 定稿：按类别混合/截断/窗口 + 兜底矩阵）",
+    "rules": "asset_classes.py（2026-10-13 定稿：按类别混合/截断/窗口 + 兜底矩阵；ADR 0005 起统一总回报序列）",
+    "series_basis": "total_return",
     "assets": {},
     "us_internal": {},
     "jp_internal": {},

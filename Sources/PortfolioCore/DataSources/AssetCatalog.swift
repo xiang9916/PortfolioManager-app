@@ -49,6 +49,8 @@ public enum AssetCatalog {
         AssetRef("AAPL", .yahoo, "AAPL"), AssetRef("MSFT", .yahoo, "MSFT"),
         AssetRef("NVDA", .yahoo, "NVDA"), AssetRef("AMZN", .yahoo, "AMZN"),
         AssetRef("META", .yahoo, "META"), AssetRef("TSLA", .yahoo, "TSLA"),
+        // BUFFER 是四只 Max Buffer 的等权篮子（ADR 0006）；这里保留 MAXJ 作为取数代理，
+        // 模型序列不是它，而是四只共同窗口的合成序列。
         AssetRef("BUFFER", .yahoo, "MAXJ", name: "缓冲期权"),
         AssetRef("1364", .yahoo, "1364.T"), AssetRef("1698", .yahoo, "1698.T"),
         AssetRef("2516", .yahoo, "2516.T"), AssetRef("1477", .yahoo, "1477.T"),
