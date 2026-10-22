@@ -232,6 +232,8 @@ BROAD_ASSETS = [
     {"key": "O_US_TLT", "name": "美国长久期国债TLH", "pool": "overseas"},
     {"key": "O_US_REIT", "name": "美国住宅REIT ETF REZ", "pool": "overseas"},
     {"key": "O_US_ENERGY", "name": "能源生产商XOM", "pool": "overseas"},
+    # 系统化另类多策略 ETF（strategy）：短历史 → 校准走置信区间保守口径（ADR 0007）
+    {"key": "O_IALT", "name": "系统化另类多策略 ETF IALT", "pool": "overseas"},
 ]
 
 BROAD_CORR = {
@@ -987,6 +989,10 @@ def describe_param_source(key):
             return "无行情历史，用人工先验 μ"
         if note == "fixed":
             return "写死值（货币基金）"
+        ci = p.get("ci_bounds")
+        if ci:
+            return (f"短样本保守口径（{float(ci.get('level') or 0):.0%} 置信区间：μ 取下界 / σ 取上界，"
+                    f"n={ci.get('n')}）；{_AC.describe_class(cls) if cls else '未登记类别'}")
         base = _AC.describe_class(cls) if cls else "未登记类别"
         return base
     if origin == "written_fallback":

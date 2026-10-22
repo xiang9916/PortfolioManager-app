@@ -231,6 +231,8 @@ def test_proxy_and_internal_pool_cleanup():
     for key in ("SPY", "D_HSBC_SP500", "D_CN_QDII_STOCK", "O_US_CORE"):
         assert M.PROXY_MAP.get(key) == ("yahoo", "^SP500TR"), key
     assert M.PROXY_MAP.get("O_SG_EQ") is None
+    # IALT 没有同质长历史代理：短样本靠置信区间保守口径，而不是挂一个不同策略的代理（ADR 0007）
+    assert M.PROXY_MAP.get("O_IALT") is None
     for pair in (("yahoo", "^GSPC"), ("yahoo", "^HSI"), ("yahoo", "^STI")):
         assert pair not in M.PROXY_MAP.values(), pair
 

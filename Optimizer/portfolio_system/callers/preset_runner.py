@@ -354,6 +354,7 @@ _EXEC_CODE = {
     "O_US_TLT": "TLH",
     "O_US_REIT": "REZ",
     "O_US_ENERGY": "XOM",
+    "O_IALT": "IALT",
 }
 
 # 大中华二级风格桶 → 境内基金池类别（风格桶本身无单一成交代码，

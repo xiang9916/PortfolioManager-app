@@ -115,6 +115,7 @@ ASSET_CLASS = {
     "O_US_TLT": "broad",              # 美国长久期国债
     "O_US_REIT": "strategy",          # 住宅 REIT（被动但行业/策略属性）
     "O_US_ENERGY": "active",          # 能源生产商 XOM —— 名字像大类，实际是个股
+    "O_IALT": "strategy",             # 系统化另类多策略 ETF IALT（2025-12 上市，样本短 → 置信区间保守口径）
     # ---- 美股内部（US_INTERNAL）----
     "SPY": "broad",                   # 标普500 宽基（SPDR S&P 500 ETF Trust）
     "VTV": "strategy",                # 价值因子
@@ -312,6 +313,7 @@ RF_PREMIUM = {
     "O_BTC": (+0.100, "usd"), "O_GOLD": (-0.010, "usd"), "O_HYLB": (+0.025, "usd"),
     "O_JP_EQ": (+0.020, "usd"), "O_SG_EQ": (+0.015, "usd"), "O_US_CORE": (+0.040, "usd"),
     "O_US_REIT": (+0.015, "usd"), "O_US_TLT": (-0.010, "usd"), "SPY": (+0.040, "usd"),
+    "O_IALT": (+0.020, "usd"),        # 另类/绝对收益：RF + 2.0%（与 BUFFER / O_JP_EQ 同档）
     "SPMO": (+0.045, "usd"), "VTV": (+0.035, "usd"),
 }
 
@@ -327,6 +329,7 @@ PRIOR = {
     "HK_BROAD": 0.070, "HK_DIV": 0.070, "HK_TECH": 0.080, "O_BTC": 0.150,
     "O_GOLD": 0.040, "O_HYLB": 0.075, "O_JP_EQ": 0.070, "O_SG_EQ": 0.065,
     "O_US_CORE": 0.090, "O_US_REIT": 0.065, "O_US_TLT": 0.040, "SPY": 0.090,
+    "O_IALT": 0.070,
     "SPMO": 0.095, "VTV": 0.085,
 }
 
@@ -342,6 +345,47 @@ def buffer_prior(mu_spy, rf):
         return None
     spec = BUFFER_PRIOR
     return max(spec["floor"], min(float(mu_spy), spec["cap_rf_multiple"] * float(rf)))
+
+
+# 短样本保守口径（2026-10-22 用户定稿）：样本太短时，μ 取 95% 置信区间**下界**、σ 取**上界**。
+# 这是"谨慎口径"，**不是无偏估计**（单边 95% 各取一次，联合含义约 90%）：目的不是预测收益，
+# 而是防止把上市初期的强势行情当成可持续的预期收益。按 key 登记；历史足够长（约 2–3 年）后
+# 应移除对应条目，让标的回到类别默认的混合口径。
+CONSERVATIVE_CI = {
+    "O_IALT": {"level": 0.95},   # 2025-12-11 上市，样本仅约 215 个交易日
+}
+CONSERVATIVE_CI_MIN_OBS = 2      # 少于 2 个观测时 CI 无意义 → 不套用
+
+
+def ci_bounds(mu_hist, vol_hist, n, level=0.95):
+    """把历史统计收缩到"谨慎"的置信边界，返回 (mu_low, vol_high, info)。
+
+    μ：mu_hist + t(α/2, n−1) · SE(μ)，其中 SE(μ) = vol_hist / √(n/252)
+        （年化均值估计的标准误；对 CAGR 是 σ 小时的一阶近似）
+    σ：vol_hist · √((n−1) / χ²(α/2, n−1))（正态下方差上界，精确）
+
+    info 记录 level / n / dof / t / chi2 / se_mu，写进校准 provenance 供审计。
+    n 太小、输入缺失或非有限 → 返回 (None, None, {"reason": …})，由调用方回落原始值并报警。
+    """
+    import math
+    from scipy import stats
+
+    if n is None or int(n) < CONSERVATIVE_CI_MIN_OBS:
+        return None, None, {"reason": f"n<{CONSERVATIVE_CI_MIN_OBS}"}
+    if mu_hist is None or vol_hist is None:
+        return None, None, {"reason": "missing_input"}
+    if not (math.isfinite(float(mu_hist)) and math.isfinite(float(vol_hist))) or float(vol_hist) <= 0:
+        return None, None, {"reason": "invalid_input"}
+    alpha = 1.0 - float(level)
+    dof = int(n) - 1
+    se_mu = float(vol_hist) / math.sqrt(float(n) / 252.0)
+    t_q = float(stats.t.ppf(alpha / 2.0, dof))
+    chi2_q = float(stats.chi2.ppf(alpha / 2.0, dof))
+    mu_low = float(mu_hist) + t_q * se_mu
+    vol_high = float(vol_hist) * math.sqrt(dof / chi2_q)
+    info = {"level": float(level), "n": int(n), "dof": dof, "t": round(t_q, 6),
+            "chi2": round(chi2_q, 6), "se_mu": round(se_mu, 6)}
+    return mu_low, vol_high, info
 
 # 波动率：**没有人工下限表**（2026-10-14 用户定稿）。σ = 窗口内历史年化波动，
 # 只在超过 SIGMA_SANITY_MAX 时按数据毛刺丢弃。样本太短的问题靠长历史代理解决

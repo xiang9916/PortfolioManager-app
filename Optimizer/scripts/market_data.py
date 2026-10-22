@@ -264,6 +264,7 @@ SOURCES = {
     "O_US_TLT": ("yahoo", "TLH"),
     "O_US_REIT": ("yahoo", "REZ"),
     "O_US_ENERGY": ("yahoo", "XOM"),
+    "O_IALT": ("yahoo", "IALT"),
     "O_GOLD": ("yahoo", "GC=F"),
     # 标普500 宽基档用 SPY（SPDR S&P 500 ETF Trust，1993 年成立、数据最稳）。
     # 历史坑：这一档原写 SPLG（SPDR Portfolio S&P 500 ETF）——发行方后来把代码改成 SPYM，
@@ -324,6 +325,10 @@ PROXY_MAP = {
     "O_US_TLT": None,
     "O_US_REIT": ("yahoo", "VNQ"),
     "O_US_ENERGY": ("yahoo", "CL=F"),
+    # IALT 无需长历史代理：它是主动多策略另类（股票市场中性 / 债券 / 管理期货），
+    # 没有同质且可比的长期序列（QAI/DBMF 是不同策略）；按 BUFFER 先例保留短样本，
+    # 用 asset_classes.CONSERVATIVE_CI 的置信区间口径抑制短样本噪声（ADR 0007）。
+    "O_IALT": None,
     "SPY": ("yahoo", "^SP500TR"),
     "VTV": None,
     "SPMO": None,

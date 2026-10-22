@@ -45,6 +45,7 @@ import asset_classes as AC
 
 PROVENANCE, WARNINGS, DROPPED = {}, [], []
 RESOLVED_MU = {}      # 已算出的 μ（BUFFER 的动态先验要读 SPY 的最终 μ）
+CI_DETAIL = {}        # 短样本保守口径的原始/收缩值（写进 provenance，ADR 0007）
 
 
 def _fetch(typ, sym, years, adjusted=False):
@@ -215,6 +216,27 @@ for key, (typ, sym) in sources.items():
         ann_ret = (float(df["close"].iloc[-1]) / float(df["close"].iloc[0])) ** (252.0 / n) - 1.0
         ann_vol = float(df["ret"].std(ddof=1) * math.sqrt(252.0))
 
+        # 短样本保守口径（ADR 0007）：只对 asset_classes.CONSERVATIVE_CI 登记的 key 生效。
+        # μ 取置信区间下界、σ 取上界后再走类别混合；**原始**历史统计仍写进 provenance。
+        mu_input, vol_input = ann_ret, ann_vol
+        ci_spec = AC.CONSERVATIVE_CI.get(key)
+        if ci_spec:
+            mu_low, vol_high, ci_info = AC.ci_bounds(ann_ret, ann_vol, n, ci_spec["level"])
+            if mu_low is not None and vol_high is not None:
+                mu_input, vol_input = mu_low, vol_high
+                CI_DETAIL[key] = dict(ci_info,
+                                      mu_hist_raw=round(ann_ret, 6),
+                                      vol_hist_raw=round(ann_vol, 6),
+                                      mu_low=round(mu_low, 6),
+                                      vol_high=round(vol_high, 6))
+                WARNINGS.append(
+                    f"{_label(key)}: 短样本保守口径 —— μ 取 {ci_info['level']:.0%} 置信下界 "
+                    f"{mu_low:.2%}（历史 {ann_ret:.2%}）、σ 取上界 {vol_high:.2%}"
+                    f"（历史 {ann_vol:.2%}），n={n}")
+            else:
+                WARNINGS.append(
+                    f"{_label(key)}: 短样本保守口径不可用（{ci_info.get('reason')}）→ 沿用原始历史统计")
+
         if key in AC.BOND_PRIOR_FORMULA:
             # 主序列已是复权（ADR 0005），不再重复取数；基金侧本身就是累计净值。
             adj = windowed if best_typ == "yahoo" else None
@@ -254,11 +276,11 @@ for key, (typ, sym) in sources.items():
                     f"{_label(key)}: 动态先验不可用（μSPY={spy_mu}、Rf={rf_usd}），"
                     f"回落到静态先验 {AC.prior_for(key):.2%}")
 
-        mu, note = AC.build_mu(key, ann_ret)
+        mu, note = AC.build_mu(key, mu_input)
         RESOLVED_MU[key] = mu
-        vol, vol_note = AC.build_vol(key, ann_vol)
+        vol, vol_note = AC.build_vol(key, vol_input)
         if vol_note == "sigma_glitch":
-            WARNINGS.append(f"{_label(key)}: σ={ann_vol:.0%} 超过 150%，按数据毛刺丢弃（不再参与优化）")
+            WARNINGS.append(f"{_label(key)}: σ={vol_input:.0%} 超过 150%，按数据毛刺丢弃（不再参与优化）")
             DROPPED.append(key)
             series.pop(key, None)
             continue
@@ -287,6 +309,10 @@ for key, (typ, sym) in sources.items():
             "prior": AC.prior_for(key),
             "prior_formula": BOND_DETAIL.get(key) or PRIOR_DETAIL.get(key),
         }
+        if key in CI_DETAIL:
+            PROVENANCE[key].update({"mu_input": round(mu_input, 6),
+                                    "vol_input": round(vol_input, 6),
+                                    "ci_bounds": CI_DETAIL[key]})
         if basket_meta:
             PROVENANCE[key].update(basket_meta)
         print(f"{key:22} {best_sym:12} {AC.CLASS_RULES[cls]['label']:<6} n={n:>6} "
