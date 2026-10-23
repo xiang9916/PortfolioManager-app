@@ -342,6 +342,28 @@ public final class Repository {
                                            maxDrawdown: maxDrawdown, pointCount: points.count))
     }
 
+    // MARK: 特别关注 — 合成日 K（第 4 个模块）
+
+    /// 组装「特别关注」页所需的数据：组合合成日 K（20 根）+ 当日涨幅/跌幅最高两只。
+    ///
+    /// 只做取数与装配；口径（归一化、逐项加权、无日内价的降级）全部在 FocusComposer 里，
+    /// 与视图层无关、可脱离数据库单测。没有历史价格时返回 .empty，由视图给出引导文案。
+    public func fetchFocusBoard(candleCount: Int = FocusComposer.defaultCandleCount) throws -> FocusBoard {
+        let ctx = try loadContext()
+        var series: [FocusSeries] = []
+        for h in ctx.holdings {
+            let value = valueCny(h, ctx: ctx)
+            guard value > 0 else { continue }
+            let bars = (try? db.fetchPrices(assetKey: h.assetKey)) ?? []
+            guard !bars.isEmpty else { continue }
+            series.append(FocusSeries(assetKey: h.assetKey,
+                                      name: ctx.byKey[h.assetKey]?.name ?? h.assetKey,
+                                      weight: value,
+                                      bars: bars))
+        }
+        return FocusComposer.compose(series: series, candleCount: candleCount)
+    }
+
     // MARK: 模块2 — asset perspective
 
     public func fetchAssetPerspectives() throws -> [AssetPerspectiveRow] {

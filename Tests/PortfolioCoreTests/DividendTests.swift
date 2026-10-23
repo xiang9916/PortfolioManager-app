@@ -243,17 +243,21 @@ final class DividendTests: XCTestCase {
 
     // MARK: - 迁移与备份
 
-    /// v7 旧库 → v8: 迁移必须重建两张表并推进版本号.
+    /// v7 旧库 → 最新版本: 迁移必须重建两张表并把版本推到 Schema.version.
     func testMigrationFromV7CreatesDividendTables() throws {
         let db = try makeDB("migrate.db")
         XCTAssertEqual(db.currentSchemaVersion(), Schema.version)
-        // 模拟一个 v7 库: 丢掉 v8 的表, 版本回退.
+        // 模拟一个 v7 库: 丢掉 v8 的表 + v9 加的 prices 三列, 版本回退.
+        // (v9 的 ALTER 是加列, 不先删掉就会 duplicate column.)
         try db.exec("DROP TABLE dividends")
         try db.exec("DROP TABLE dividend_fetch_meta")
+        try db.exec("ALTER TABLE prices DROP COLUMN open;")
+        try db.exec("ALTER TABLE prices DROP COLUMN high;")
+        try db.exec("ALTER TABLE prices DROP COLUMN low;")
         try db.exec("UPDATE schema_meta SET value = '7' WHERE key = 'version'")
         XCTAssertEqual(db.currentSchemaVersion(), 7)
         try db.migrate()
-        XCTAssertEqual(db.currentSchemaVersion(), 8)
+        XCTAssertEqual(db.currentSchemaVersion(), Schema.version)
         try db.upsertAssets([Asset(key: "A", name: "a", pool: .domestic, currency: "CNY")])
         try db.replaceDividends(assetKey: "A",
                                 records: [rec("A", "2025-01-01", 1.0, "CNY")],

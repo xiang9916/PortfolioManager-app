@@ -98,6 +98,13 @@ public final class AppStore {
     /// 全资产股息聚合 (今年预计股息税后折人民币 + 覆盖率).
     public var dividendSummary: DividendSummary?
 
+    // 特别关注（第 4 个模块）
+    /// 合成日 K（20 根）+ 当日涨幅/跌幅最高两只；口径见 FocusComposer / ADR 0008。
+    public var focusBoard: FocusBoard = .empty
+    /// 「特别关注」点小图 → 跳到「资产明细」并选中该标的的单向通道。
+    /// 资产明细消费后立刻清空（它不是持久状态，只是跨模块的一次性意图）。
+    public var pendingAssetSelection: String?
+
     // 模块2
     public var perspectives: [AssetPerspectiveRow] = []
     /// Editing drafts (assetKey -> draft). Populated on load; saved via savePerspectives().
@@ -198,6 +205,7 @@ public final class AppStore {
             let perf = try repository.fetchPerformance()
             performancePoints = perf.points
             performanceSummary = perf.summary
+            focusBoard = try repository.fetchFocusBoard()
             dividendSummary = try repository.fetchDividendSummary()
             perspectives = try repository.fetchAssetPerspectives()
             holdingDrafts = Dictionary(uniqueKeysWithValues: perspectives.map {
@@ -1010,8 +1018,10 @@ private func runRefreshJob(_ job: RefreshJob, years: [Int]) async -> RefreshOutc
     var priceFailed = false
     do {
         let hist = try await job.source.fetchHistory(symbol: job.symbol)
+        // 必须带上 开/高/低：只重建 close 会把日内价丢掉，「特别关注」的影线就永远补不上。
         points = hist.map { PricePoint(assetKey: job.assetKey, date: $0.date,
-                                       close: $0.close, currency: $0.currency) }
+                                       close: $0.close, currency: $0.currency,
+                                       open: $0.open, high: $0.high, low: $0.low) }
         if let q = try? await job.source.fetchQuote(symbol: job.symbol) {
             quote = Quote(symbol: job.assetKey, price: q.price, currency: q.currency,
                           date: q.date, source: q.source)

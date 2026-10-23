@@ -60,20 +60,36 @@ public final class YahooFinanceSource: DataSource, Sendable {
     ///
     /// 优先 adjclose（含分红/派息）；缺失时回落 close。adjclose 的最后一点等于
     /// 当前收盘价（Yahoo 把复权因子归一化到序列末日），所以 prices.last 仍可作最新价兜底。
+    ///
+    /// 开/高/低：Yahoo 的 `quote[0].open/high/low` 是**原始价**，而 `close` 存的是 `adjclose`（ADR 0005）。
+    /// 直接混存会让影线失真，所以按当日 `adjclose/close` 因子把 O/H/L 换算到**同一复权口径**；
+    /// `close` 的取值口径逐字节不变。某日任一 O/H/L 缺失 → 该字段留 nil（下游按「无日内价」降级）。
     static func historyPoints(from decoded: YahooChartResponse, symbol: String) -> [PricePoint] {
         guard let r = decoded.chart.result?.first else { return [] }
         let currency = r.meta?.currency ?? "USD"
-        let closes = r.indicators.adjclose?.first?.adjclose
-            ?? r.indicators.quote.first?.close
-            ?? []
+        let quote = r.indicators.quote.first
+        let rawCloses = quote?.close ?? []
+        let adjusted = r.indicators.adjclose?.first?.adjclose
         var out: [PricePoint] = []
         for (i, ts) in r.timestamp.enumerated() {
-            guard i < closes.count, let c = closes[i] else { continue }
+            guard i < rawCloses.count, let rawClose = rawCloses[i] else { continue }
+            // adjclose 存在但当天为 null 时回落原始收盘（与改造前的取值口径一致）。
+            let close = adjusted.map { i < $0.count ? ($0[i] ?? rawClose) : rawClose } ?? rawClose
+            let factor = rawClose > 0 ? close / rawClose : 1
             out.append(PricePoint(assetKey: symbol,
                                   date: DateUtil.dateString(fromTimestampSeconds: ts),
-                                  close: c, currency: currency))
+                                  close: close, currency: currency,
+                                  open: Self.value(quote?.open, at: i).map { $0 * factor },
+                                  high: Self.value(quote?.high, at: i).map { $0 * factor },
+                                  low: Self.value(quote?.low, at: i).map { $0 * factor }))
         }
         return out
+    }
+
+    /// 逐日数组越界安全的取值（Yahoo 各数组长度可能不一致）。
+    private static func value(_ series: [Double?]?, at index: Int) -> Double? {
+        guard let series, index < series.count else { return nil }
+        return series[index]
     }
 
     // MARK: - 股息 (events=div)
@@ -197,6 +213,10 @@ struct YahooChartResponse: Decodable {
         }
         struct Quote: Decodable {
             let close: [Double?]
+            // 原始价（未复权）；老响应/缺字段时为空 → 下游按「无日内价」降级。
+            let open: [Double?]?
+            let high: [Double?]?
+            let low: [Double?]?
         }
         struct AdjClose: Decodable {
             let adjclose: [Double?]

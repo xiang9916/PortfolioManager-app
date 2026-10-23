@@ -127,7 +127,9 @@ if args.count >= 2 && args[1] == "refresh" {
             guard let ref = AssetCatalog.ref(for: key) else { print("  未知标的: \(key)"); continue }
             let source: any DataSource = ref.source == .fund ? EastmoneySource() : YahooFinanceSource()
             let hist = try await source.fetchHistory(symbol: ref.symbol)
-            let points = hist.map { PricePoint(assetKey: ref.key, date: $0.date, close: $0.close, currency: $0.currency) }
+            let points = hist.map { PricePoint(assetKey: ref.key, date: $0.date, close: $0.close,
+                                               currency: $0.currency,
+                                               open: $0.open, high: $0.high, low: $0.low) }
             try db.upsertPrices(points)
             total += points.count
             print("  \(ref.key) (\(ref.symbol)): \(points.count) 点")

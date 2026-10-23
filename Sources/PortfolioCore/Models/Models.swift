@@ -86,11 +86,20 @@ public struct PricePoint: Codable, Identifiable, Hashable, Sendable {
     public let date: String
     public let close: Double
     public let currency: String
+    /// 当日开 / 高 / 低 —— **与 close 同口径（复权）**。nil = 数据源没有日内价。
+    ///
+    /// 基金（东财净值）永远为 nil；v9 之前抓的权益历史也为 nil（下次「更新行情」回补）。
+    /// 两种缺失都按同一规则降级：开 = 高 = 低 = 昨收、收 = 今收（见 ADR 0008）。
+    public let open: Double?
+    public let high: Double?
+    public let low: Double?
 
     public init(id: Int64? = nil, assetKey: String, date: String,
-                close: Double, currency: String = "USD") {
+                close: Double, currency: String = "USD",
+                open: Double? = nil, high: Double? = nil, low: Double? = nil) {
         self.id = id; self.assetKey = assetKey; self.date = date
         self.close = close; self.currency = currency
+        self.open = open; self.high = high; self.low = low
     }
 }
 

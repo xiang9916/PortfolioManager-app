@@ -1,6 +1,6 @@
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 8
+    public static let version: Int = 9
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -252,6 +252,15 @@ public enum Schema {
             fetched_at TEXT NOT NULL
         );
         """,
+        ]),
+        (9, [
+        // 特别关注（第 4 个模块）：合成日 K 线需要日内开/高/低。
+        // 三列可空 —— 基金只有净值（无日内价），历史行在下次「更新行情」前也为 NULL，
+        // 两种缺失都按同一规则降级（开=高=低=昨收），不猜测、不编造。
+        // 只加列、不搬数据；不要把这些列并进 v1 的 CREATE TABLE，否则新库跑到 v9 会 duplicate column。
+        "ALTER TABLE prices ADD COLUMN open REAL;",
+        "ALTER TABLE prices ADD COLUMN high REAL;",
+        "ALTER TABLE prices ADD COLUMN low REAL;",
         ]),
     ]
 }

@@ -43,6 +43,18 @@ public struct AssetPerspectiveView: View {
         }
         .sheet(isPresented: $showAddAsset) { AddAssetSheet(store: store) }
         .sheet(isPresented: $showFxRates) { FxRatesSheet(store: store) }
+        // 「特别关注」的小图点击 → 选中对应标的（一次性意图，消费后清空）。
+        .onAppear { consumePendingSelection() }
+        .onChange(of: store.pendingAssetSelection) { _, _ in consumePendingSelection() }
+    }
+
+    private func consumePendingSelection() {
+        guard let key = store.pendingAssetSelection else { return }
+        // 标的可能已被删除：仍清空意图，但不改当前选中，避免选中一个不存在的行。
+        if store.perspectives.contains(where: { $0.assetKey == key }) {
+            selectedKey = key
+        }
+        store.pendingAssetSelection = nil
     }
 
     private func rowCell(_ row: AssetPerspectiveRow) -> some View {

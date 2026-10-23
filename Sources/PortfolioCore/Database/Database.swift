@@ -108,13 +108,19 @@ public final class Database {
 
     public func upsertPrices(_ points: [PricePoint]) throws {
         try inTransaction {
-            let stmt = try prepared("INSERT OR REPLACE INTO prices(asset_key, date, close, currency) VALUES(?,?,?,?)")
+            let stmt = try prepared("""
+                INSERT OR REPLACE INTO prices(asset_key, date, close, currency, open, high, low)
+                VALUES(?,?,?,?,?,?,?)
+                """)
             defer { sqlite3_finalize(stmt) }
             for p in points {
                 bindText(stmt, 1, p.assetKey)
                 bindText(stmt, 2, p.date)
                 sqlite3_bind_double(stmt, 3, p.close)
                 bindText(stmt, 4, p.currency)
+                bindDouble(stmt, 5, p.open)
+                bindDouble(stmt, 6, p.high)
+                bindDouble(stmt, 7, p.low)
                 try stepAndReset(stmt)
             }
         }
@@ -136,6 +142,12 @@ public final class Database {
 
     private func bindDouble(_ stmt: OpaquePointer?, _ idx: Int32, _ v: Double?) {
         if let v = v { sqlite3_bind_double(stmt, idx, v) } else { sqlite3_bind_null(stmt, idx) }
+    }
+
+    /// 读可空 REAL 列: NULL 保持 nil (不能读成 0 — 那会把「没有日内价」伪装成 0 元).
+    private func nullableDouble(_ stmt: OpaquePointer?, _ idx: Int32) -> Double? {
+        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(stmt, idx)
     }
 
     public func upsertAssets(_ assets: [Asset]) throws {
@@ -430,7 +442,7 @@ public final class Database {
     }
 
     public func fetchPrices(assetKey: String) throws -> [PricePoint] {
-        let sql = "SELECT asset_key, date, close, currency FROM prices WHERE asset_key = ? ORDER BY date"
+        let sql = "SELECT asset_key, date, close, currency, open, high, low FROM prices WHERE asset_key = ? ORDER BY date"
         let stmt = try prepared(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, assetKey)
@@ -440,7 +452,10 @@ public final class Database {
             let date = String(cString: sqlite3_column_text(stmt, 1))
             let close = sqlite3_column_double(stmt, 2)
             let cur = String(cString: sqlite3_column_text(stmt, 3))
-            out.append(PricePoint(assetKey: key, date: date, close: close, currency: cur))
+            out.append(PricePoint(assetKey: key, date: date, close: close, currency: cur,
+                                  open: nullableDouble(stmt, 4),
+                                  high: nullableDouble(stmt, 5),
+                                  low: nullableDouble(stmt, 6)))
         }
         return out
     }
