@@ -28,6 +28,21 @@ public struct FocusCandle: Hashable, Identifiable, Sendable {
     }
 }
 
+/// 一只标的的**真实现价**序列（窗口内每根都有原始价时才存在）。
+///
+/// 与合成 K 完全不同口径：这里不归一化 —— 坐标就是现实世界的价格
+/// （权益 = 交易所收盘价，基金 = 份额净值），用于极值卡的"真实价格"显示。
+public struct FocusPrice: Hashable, Sendable {
+    /// 报价币种（卡上显示货币符号）。
+    public let currency: String
+    public let candles: [FocusCandle]
+
+    public init(currency: String, candles: [FocusCandle]) {
+        self.currency = currency
+        self.candles = candles
+    }
+}
+
 /// 当日涨幅最高 / 跌幅最高的那只标的（角标 + 自己的 20 根日 K）。
 public struct FocusPick: Hashable, Sendable {
     public let assetKey: String
@@ -38,16 +53,20 @@ public struct FocusPick: Hashable, Sendable {
     public let dayChange: Double
     /// 该标的自己最后一根 bar 的日期（T+1 的基金会早于组合最新日期）。
     public let lastDate: String
+    /// 归一化蜡烛（今收 = 1.00）—— 未回补真实现价时视图仍画这一组。
     public let candles: [FocusCandle]
+    /// 真实现价蜡烛；nil = 窗口内至少一根没有原始价（视图退回百分比，不显示假价格）。
+    public let price: FocusPrice?
 
     public init(assetKey: String, name: String, weight: Double, dayChange: Double,
-                lastDate: String, candles: [FocusCandle]) {
+                lastDate: String, candles: [FocusCandle], price: FocusPrice? = nil) {
         self.assetKey = assetKey
         self.name = name
         self.weight = weight
         self.dayChange = dayChange
         self.lastDate = lastDate
         self.candles = candles
+        self.price = price
     }
 }
 
@@ -157,7 +176,40 @@ public enum FocusComposer {
         let dates = series.bars.suffix(count).map { $0.date }
         return FocusPick(assetKey: series.assetKey, name: series.name, weight: series.weight,
                          dayChange: change, lastDate: last.date,
-                         candles: makeCandles([entry], dates: dates))
+                         candles: makeCandles([entry], dates: dates),
+                         price: priceSeries(for: series, count: count))
+    }
+
+    /// 真实现价序列（**全有或全无**）：窗口内任一根缺原始价就整体返回 nil。
+    ///
+    /// 混着画会让一根累计净值夹在单位净值中间，出现假尖峰 —— 宁可退回百分比。
+    /// 每根按当日 `rawClose / close` 因子缩放：入库的 O/H/L 与 close 同一复权口径，
+    /// 乘同一个因子就精确还原成原始 O/H/L（权益）；没有日内价（基金）时按 ADR 0008 第 4 条降级。
+    private static func priceSeries(for series: FocusSeries, count: Int) -> FocusPrice? {
+        let bars = series.bars
+        guard !bars.isEmpty else { return nil }
+        let start = max(0, bars.count - max(1, count))
+        let window = Array(bars[start...])
+        guard window.allSatisfy({ ($0.rawClose ?? 0) > 0 }) else { return nil }
+
+        // 首根的「昨收」取窗口外那一根（存在且有原始价时），否则用自己的收盘。
+        var previous: Double? = start > 0 ? bars[start - 1].rawClose : nil
+        var out: [FocusCandle] = []
+        out.reserveCapacity(window.count)
+        for bar in window {
+            let close = bar.rawClose ?? bar.close
+            let scale = bar.close > 0 ? close / bar.close : 1
+            let open: Double, high: Double, low: Double
+            if let o = bar.open, let h = bar.high, let l = bar.low {
+                open = o * scale; high = h * scale; low = l * scale
+            } else {
+                let o = previous ?? close
+                open = o; high = max(o, close); low = min(o, close)
+            }
+            out.append(FocusCandle(date: bar.date, open: open, high: high, low: low, close: close))
+            previous = close
+        }
+        return FocusPrice(currency: window.last?.currency ?? "CNY", candles: out)
     }
 
     /// 逐日合成：每个日期上，把各资产的开/高/低/收除以各自今收后按权重加权。

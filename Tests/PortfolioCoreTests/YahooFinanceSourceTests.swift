@@ -17,12 +17,16 @@ final class YahooFinanceSourceTests: XCTestCase {
         let rows = YahooFinanceSource.historyPoints(from: try decode(json), symbol: "FICT")
         XCTAssertEqual(rows.map { $0.close }, [99.0, 109.0])
         XCTAssertEqual(rows.map { $0.currency }, ["USD", "USD"])
+        // 真实现价 = 原始收盘价（与复权收盘相差一个因子）。
+        XCTAssertEqual(rows.map { $0.rawClose ?? 0 }, [100.0, 110.0])
     }
 
     func testHistoryFallsBackToCloseWhenAdjustedMissing() throws {
         let json = header + #"}}]}}"#
         let rows = YahooFinanceSource.historyPoints(from: try decode(json), symbol: "FICT")
         XCTAssertEqual(rows.map { $0.close }, [100.0, 110.0])
+        // 没有复权信息时两者相同（价格指数/期货/加密本来就没有分红）。
+        XCTAssertEqual(rows.map { $0.rawClose ?? 0 }, [100.0, 110.0])
     }
 
     /// 开/高/低 是原始价，close 是复权价 → 必须按当日 adjclose/close 因子换算到同一口径。
@@ -33,6 +37,8 @@ final class YahooFinanceSourceTests: XCTestCase {
         XCTAssertEqual(rows.map { $0.open ?? 0 }, [49.5, 54.5])
         XCTAssertEqual(rows.map { $0.high ?? 0 }, [50.5, 55.5])
         XCTAssertEqual(rows.map { $0.low ?? 0 }, [49.0, 54.0])
+        // 复权因子 0.5 → 真实现价（未复权）是复权价的两倍。
+        XCTAssertEqual(rows.map { $0.rawClose ?? 0 }, [100.0, 110.0])
     }
 
     /// 响应里没有开/高/低（或某天缺失）→ 保持 nil，交给下游按「无日内价」降级。

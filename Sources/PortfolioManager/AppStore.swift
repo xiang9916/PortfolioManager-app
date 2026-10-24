@@ -1018,9 +1018,11 @@ private func runRefreshJob(_ job: RefreshJob, years: [Int]) async -> RefreshOutc
     var priceFailed = false
     do {
         let hist = try await job.source.fetchHistory(symbol: job.symbol)
-        // 必须带上 开/高/低：只重建 close 会把日内价丢掉，「特别关注」的影线就永远补不上。
+        // 必须带上 开/高/低 与原始价：只重建 close 会把日内价/真实现价丢掉，
+        // 「特别关注」的影线与极值卡的真实价格就永远补不上。
         points = hist.map { PricePoint(assetKey: job.assetKey, date: $0.date,
-                                       close: $0.close, currency: $0.currency,
+                                       close: $0.close, rawClose: $0.rawClose,
+                                       currency: $0.currency,
                                        open: $0.open, high: $0.high, low: $0.low) }
         if let q = try? await job.source.fetchQuote(symbol: job.symbol) {
             quote = Quote(symbol: job.assetKey, price: q.price, currency: q.currency,

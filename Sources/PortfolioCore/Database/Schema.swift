@@ -1,6 +1,6 @@
 /// Central schema version. Bump on every breaking change; migrations bring old DBs forward.
 public enum Schema {
-    public static let version: Int = 9
+    public static let version: Int = 10
 
     /// Ordered migrations: apply each version's statements in sequence to bring an
     /// existing DB forward (capability 3: forward compatibility). Version 1 = initial schema.
@@ -261,6 +261,13 @@ public enum Schema {
         "ALTER TABLE prices ADD COLUMN open REAL;",
         "ALTER TABLE prices ADD COLUMN high REAL;",
         "ALTER TABLE prices ADD COLUMN low REAL;",
+        ]),
+        (10, [
+        // 特别关注 · 当日极值两张卡要显示**现实世界的真实价格**：close 存的是复权价（Yahoo adjclose）
+        // 与累计净值（东财），都不是实际成交价/份额净值。raw_close = 权益的未复权收盘价、基金的单位净值。
+        // 可空：v10 之前的历史行在下次「更新行情」前为 NULL（视图诚实退回百分比，不编造价格）。
+        // 只加列、不搬数据；同样不要并进 v1 的 CREATE TABLE（否则新库跑到 v10 会 duplicate column）。
+        "ALTER TABLE prices ADD COLUMN raw_close REAL;",
         ]),
     ]
 }

@@ -6,7 +6,7 @@
 
 ## 0. 现状速览
 - 原生 macOS (SwiftUI) 个人投资组合 App，替代「手工表格维护 + 终端跑 Python 优化器」。
-- 当前版本 **v0.6-beta.5**（版本号只存在于 `scripts/Info.plist`）；Schema **v9**；GPL-3.0；作者 xiang9916。
+- 当前版本 **v0.7-alpha.2**（版本号只存在于 `scripts/Info.plist`）；Schema **v10**；GPL-3.0；作者 xiang9916。
 - 线上仓库：`xiang9916/PortfolioManager-app`，27 个 pre-release + 28 个 tag 齐全。
 - git 仓库根 = 本文件所在目录；父目录本身不是 git 仓库（勿在父目录里跑 git 命令）。
 
@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 104 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
+swift test  --disable-sandbox          # 113 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -120,11 +120,11 @@ bash scripts/build_app.sh --with-venv --dmg     # 必须 --with-venv，否则优
   想根治只能把 venv 建成 `--copies` 的自包含形态（会显著变大），目前不做。
 - `hdiutil create` 在沙箱下会失败 → `build_app.sh` 内置 `makehybrid` + `convert` 回退；镜像固定 HFS+（APFS 会大约 50%）。
 
-## 6. 架构与数据模型（Schema v9 现状）
+## 6. 架构与数据模型（Schema v10 现状）
 ```
 PortfolioManager (SwiftUI)  ──依赖──▶  PortfolioCore (纯逻辑, 无UI)  ──▶  Optimizer/ (Python venv 子进程)
   ContentView: 4 Tab               ├ Models (Asset/Holding/Snapshot/QuarterlyReport/AssetMarket…)
-  Focus/AssetOverview/Asset-       ├ Database (SQLite + Schema v9 迁移 + 幂等数据归一)
+  Focus/AssetOverview/Asset-       ├ Database (SQLite + Schema v10 迁移 + 幂等数据归一)
   Perspective/FinancialAnalysis    ├ Query (Repository 聚合 + QuarterlyMetrics 公式链 + QuarterlyFill)
   AppStore = @MainActor 状态中枢    ├ DataSources (Yahoo/Eastmoney + AssetCatalog)
    持有 db / repository / optimizer ├ Backup (每日 .db 快照 + JSON 导入导出)
@@ -133,8 +133,9 @@ PortfolioManager (SwiftUI)  ──依赖──▶  PortfolioCore (纯逻辑, 无
 pm-cli (headless CLI) 复用 PortfolioCore
 ```
 红线：**`PortfolioCore` 永不 import `PortfolioManager`**；Views 只经 AppStore 取数。
-- 市值 = 份额 × 最新价（派生不落库）；`quotes` = 最新价，`prices` = 历史 K 线（v9 起含复权 开/高/低，基金为 NULL）。
-- **特别关注（第 4 个模块）**：20 根合成日 K + 当日涨幅/跌幅最高两只。口径唯一来源 = ADR 0008 / `FocusComposer`（归一化基准 = 各标的最新收盘 1.00、逐项加权、无日内价按昨收降级）；视图只做展示。
+- 市值 = 份额 × 最新价（派生不落库）；`quotes` = 最新价，`prices` = 历史 K 线（v9 起含**复权** 开/高/低，基金为 NULL；v10 起另有 `raw_close` = **真实现价**：权益未复权收盘、基金单位净值，未回补时为 NULL）。
+- **特别关注（第 4 个模块）**：20 根合成日 K（归一化百分比轴）+ 当日涨幅/跌幅最高两只。口径唯一来源 = ADR 0008 / `FocusComposer`（归一化基准 = 各标的最新收盘 1.00、逐项加权、无日内价按昨收降级）；视图只做展示。
+  两张极值卡画**真实现价**（Schema v10 `prices.raw_close`：权益 = 未复权收盘价、基金 = 单位净值），**全有或全无** —— 窗口内缺任何一根原始价就整条退回归一化百分比（不混口径、不编造价格）；顶部涨跌幅仍是总回报口径。
 - 财务分析 = `quarterly_reports`（一列一季，9 个手动字段，其余由 `QuarterlyMetrics.compute` 派生）。
 - **市场**是闭集 `AssetMarket {US, HK, CN, JP, SG}`：按 ticker 推断（`.HK`→香港、`.T`→日本、`.SI`→新加坡、
   6 位数字/`.CN_FUND`→中国内地、纯字母→美国），也可手选；旧自由文本（`NASDAQ`/`HKEX`…）归一到这五个，认不出的置空。
@@ -149,7 +150,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **104 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **113 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）

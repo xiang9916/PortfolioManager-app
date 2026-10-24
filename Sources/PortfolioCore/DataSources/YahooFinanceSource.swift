@@ -78,7 +78,10 @@ public final class YahooFinanceSource: DataSource, Sendable {
             let factor = rawClose > 0 ? close / rawClose : 1
             out.append(PricePoint(assetKey: symbol,
                                   date: DateUtil.dateString(fromTimestampSeconds: ts),
-                                  close: close, currency: currency,
+                                  close: close,
+                                  // 真实现价 = 原始收盘价（未复权）；close 仍是 adjclose（ADR 0005）。
+                                  rawClose: rawClose,
+                                  currency: currency,
                                   open: Self.value(quote?.open, at: i).map { $0 * factor },
                                   high: Self.value(quote?.high, at: i).map { $0 * factor },
                                   low: Self.value(quote?.low, at: i).map { $0 * factor }))

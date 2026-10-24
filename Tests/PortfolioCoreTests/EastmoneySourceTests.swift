@@ -51,4 +51,33 @@ final class EastmoneySourceTests: XCTestCase {
         XCTAssertEqual(rows.first?.value, 1.5)
         XCTAssertEqual(nextBeijingMidnight - beijingMidnight, 86_400_000)
     }
+
+    // MARK: - 历史序列的真实现价（单位净值）
+
+    /// close 仍是累计净值（总回报口径），rawClose 才是份额的真实现价。
+    func testHistoryPointsCarryUnitNavAsRawClose() {
+        let js = #"var Data_ACWorthTrend = [[1672675200000,2.5],[1672761600000,2.6]]; var Data_netWorthTrend = [{"x":1672675200000,"y":1.5},{"x":1672761600000,"y":1.6}];"#
+        let rows = EastmoneySource.historyPoints(from: js, symbol: "FICT")
+        XCTAssertEqual(rows.map { $0.close }, [2.5, 2.6])
+        XCTAssertEqual(rows.map { $0.rawClose ?? 0 }, [1.5, 1.6])
+        XCTAssertEqual(rows.map { $0.currency }, ["CNY", "CNY"])
+    }
+
+    /// 没有单位净值 → rawClose 留 nil，**不拿累计净值冒充真实现价**。
+    func testHistoryPointsLeaveRawCloseNilWhenUnitNavMissing() {
+        let js = #"var Data_ACWorthTrend = [[1672675200000,2.5]];"#
+        let rows = EastmoneySource.historyPoints(from: js, symbol: "FICT")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.close, 2.5)
+        XCTAssertNil(rows.first?.rawClose)
+    }
+
+    /// 单位净值缺某一天 → 只有那一行的 rawClose 为 nil，其余照常按日期配对。
+    func testHistoryPointsPairRawCloseByDate() {
+        let js = #"var Data_ACWorthTrend = [[1672675200000,2.5],[1672761600000,2.6]]; var Data_netWorthTrend = [{"x":1672761600000,"y":1.6}];"#
+        let rows = EastmoneySource.historyPoints(from: js, symbol: "FICT")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertNil(rows[0].rawClose)
+        XCTAssertEqual(rows[1].rawClose ?? 0, 1.6)
+    }
 }

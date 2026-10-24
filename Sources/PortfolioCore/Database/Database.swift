@@ -109,8 +109,8 @@ public final class Database {
     public func upsertPrices(_ points: [PricePoint]) throws {
         try inTransaction {
             let stmt = try prepared("""
-                INSERT OR REPLACE INTO prices(asset_key, date, close, currency, open, high, low)
-                VALUES(?,?,?,?,?,?,?)
+                INSERT OR REPLACE INTO prices(asset_key, date, close, currency, open, high, low, raw_close)
+                VALUES(?,?,?,?,?,?,?,?)
                 """)
             defer { sqlite3_finalize(stmt) }
             for p in points {
@@ -121,6 +121,7 @@ public final class Database {
                 bindDouble(stmt, 5, p.open)
                 bindDouble(stmt, 6, p.high)
                 bindDouble(stmt, 7, p.low)
+                bindDouble(stmt, 8, p.rawClose)
                 try stepAndReset(stmt)
             }
         }
@@ -442,7 +443,7 @@ public final class Database {
     }
 
     public func fetchPrices(assetKey: String) throws -> [PricePoint] {
-        let sql = "SELECT asset_key, date, close, currency, open, high, low FROM prices WHERE asset_key = ? ORDER BY date"
+        let sql = "SELECT asset_key, date, close, currency, open, high, low, raw_close FROM prices WHERE asset_key = ? ORDER BY date"
         let stmt = try prepared(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, assetKey)
@@ -452,7 +453,8 @@ public final class Database {
             let date = String(cString: sqlite3_column_text(stmt, 1))
             let close = sqlite3_column_double(stmt, 2)
             let cur = String(cString: sqlite3_column_text(stmt, 3))
-            out.append(PricePoint(assetKey: key, date: date, close: close, currency: cur,
+            out.append(PricePoint(assetKey: key, date: date, close: close,
+                                  rawClose: nullableDouble(stmt, 7), currency: cur,
                                   open: nullableDouble(stmt, 4),
                                   high: nullableDouble(stmt, 5),
                                   low: nullableDouble(stmt, 6)))

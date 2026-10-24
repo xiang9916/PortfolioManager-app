@@ -37,10 +37,24 @@ public final class EastmoneySource: DataSource, Sendable {
     }
 
     public func fetchHistory(symbol: String) async throws -> [PricePoint] {
-        // History = cumulative NAV (累计净值), for 模拟历史财务表现 chart.
         let text = try await fetchRaw(symbol: symbol)
-        let rows = Self.parseNav(text, cumulative: true)
-        return rows.map { PricePoint(assetKey: symbol, date: $0.date, close: $0.value, currency: "CNY") }
+        return Self.historyPoints(from: text, symbol: symbol)
+    }
+
+    /// 历史序列 → PricePoint。
+    ///
+    /// - `close` = 累计净值（总回报口径，ADR 0005，用于曲线与合成）；
+    /// - `rawClose` = **单位净值**（份额真实价格，按日期与累计净值配对；缺当天单位净值 → nil）。
+    ///
+    /// 两个数组来自同一份 pingzhongdata，解析两次即可（数千条，代价可忽略）。
+    /// 拆成纯函数是为了能脱离网络单测（与 Yahoo 的 `historyPoints(from:symbol:)` 同形态）。
+    static func historyPoints(from text: String, symbol: String) -> [PricePoint] {
+        var unitByDate: [String: Double] = [:]
+        for row in parseNav(text, cumulative: false) { unitByDate[row.date] = row.value }
+        return parseNav(text, cumulative: true).map { row in
+            PricePoint(assetKey: symbol, date: row.date, close: row.value,
+                       rawClose: unitByDate[row.date], currency: "CNY")
+        }
     }
 
     /// Latest quote = unit NAV (单位净值, 每份实际价格), for market-value calculation.

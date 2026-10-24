@@ -85,6 +85,12 @@ public struct PricePoint: Codable, Identifiable, Hashable, Sendable {
     public let assetKey: String
     public let date: String
     public let close: Double
+    /// **真实现价** —— 权益 = 未复权收盘价；基金 = 单位净值（份额净值）。
+    ///
+    /// `close` 是总回报口径（Yahoo `adjclose` / 东财累计净值，ADR 0005），不等于现实世界的价格：
+    /// 基金累计净值可能是份额净值的好几倍，权益在分红窗口里也被复权因子压低。
+    /// nil = 该行未回补（v10 之前抓的历史行；下次「更新行情」会补齐）。
+    public let rawClose: Double?
     public let currency: String
     /// 当日开 / 高 / 低 —— **与 close 同口径（复权）**。nil = 数据源没有日内价。
     ///
@@ -95,10 +101,10 @@ public struct PricePoint: Codable, Identifiable, Hashable, Sendable {
     public let low: Double?
 
     public init(id: Int64? = nil, assetKey: String, date: String,
-                close: Double, currency: String = "USD",
+                close: Double, rawClose: Double? = nil, currency: String = "USD",
                 open: Double? = nil, high: Double? = nil, low: Double? = nil) {
         self.id = id; self.assetKey = assetKey; self.date = date
-        self.close = close; self.currency = currency
+        self.close = close; self.rawClose = rawClose; self.currency = currency
         self.open = open; self.high = high; self.low = low
     }
 }

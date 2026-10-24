@@ -10,9 +10,10 @@ import XCTest
 /// 4. 当日无数据 → 平盘（开 = 高 = 低 = 收），不产生假影线。
 final class FocusBoardTests: XCTestCase {
     private func bar(_ key: String, _ date: String, _ close: Double,
-                     open: Double? = nil, high: Double? = nil, low: Double? = nil) -> PricePoint {
+                     open: Double? = nil, high: Double? = nil, low: Double? = nil,
+                     raw: Double? = nil) -> PricePoint {
         PricePoint(assetKey: key, date: date, close: close,
-                   open: open, high: high, low: low)
+                   rawClose: raw, open: open, high: high, low: low)
     }
 
     private let d1 = "2026-10-22"
@@ -174,5 +175,84 @@ final class FocusBoardTests: XCTestCase {
         XCTAssertEqual(board.candles[1].close, 0.5, accuracy: 1e-12)
         XCTAssertEqual(board.candles[2].close, 1.0, accuracy: 1e-12)
         XCTAssertNil(board.loser)   // 只有一个可比标的 → 不给跌幅卡
+    }
+
+    // MARK: - 极值卡的真实现价（Schema v10 raw_close）
+
+    /// 价格蜡烛 = 入库 O/H/L × (rawClose / close)：复权价 ×100 → 真实价格。
+    func testPickPriceCandlesRescaleToRealPrices() throws {
+        let s = FocusSeries(assetKey: "DEMO-A", name: "示例权益", weight: 1, bars: [
+            bar("DEMO-A", d1, 2.4, open: 2.3, high: 2.5, low: 2.2, raw: 240),
+            bar("DEMO-A", d2, 2.5, open: 2.45, high: 2.6, low: 2.4, raw: 250),
+        ])
+        let board = FocusComposer.compose(series: [s])
+        let price = try XCTUnwrap(board.gainer?.price)
+        XCTAssertEqual(price.currency, "USD")
+        XCTAssertEqual(price.candles.count, 2)
+        let last = price.candles[1]
+        XCTAssertEqual(last.close, 250, accuracy: 1e-9)
+        XCTAssertEqual(last.open, 245, accuracy: 1e-9)
+        XCTAssertEqual(last.high, 260, accuracy: 1e-9)
+        XCTAssertEqual(last.low, 240, accuracy: 1e-9)
+        // 归一化序列仍在（未回补时视图用它），且不受原始价影响。
+        XCTAssertEqual(board.gainer?.candles[1].close ?? 0, 1.0, accuracy: 1e-12)
+    }
+
+    /// 基金：rawClose = 单位净值；无日内价 → 开 = 上一根真实收盘、高/低 = 实体两端（无假影线）。
+    /// 顶部涨跌幅仍是总回报口径（累计净值），除息日两者会背离 —— 这是预期行为。
+    func testFundPriceCandlesUseUnitNavAndPreviousClose() throws {
+        let fund = FocusSeries(assetKey: "DEMO-B", name: "示例基金", weight: 1, bars: [
+            bar("DEMO-B", d1, 2.0, raw: 1.50),
+            bar("DEMO-B", d2, 2.0, raw: 1.48),   // 累计净值不变（分红再投），份额净值下跌
+        ])
+        let board = FocusComposer.compose(series: [fund])
+        let price = try XCTUnwrap(board.gainer?.price)
+        let last = try XCTUnwrap(price.candles.last)
+        XCTAssertEqual(last.close, 1.48, accuracy: 1e-12)
+        XCTAssertEqual(last.open, 1.50, accuracy: 1e-12)
+        XCTAssertEqual(last.high, 1.50, accuracy: 1e-12)
+        XCTAssertEqual(last.low, 1.48, accuracy: 1e-12)
+        XCTAssertEqual(board.gainer?.dayChange ?? 9, 0, accuracy: 1e-12)
+    }
+
+    /// 全有或全无：窗口内任一根缺原始价 → 整条价格序列为 nil（不混画两种口径）。
+    func testPickPriceIsNilWhenAnyBarLacksRawClose() {
+        let s = FocusSeries(assetKey: "DEMO-A", name: "示例权益", weight: 1, bars: [
+            bar("DEMO-A", d1, 2.0),
+            bar("DEMO-A", d2, 2.1, raw: 210),
+        ])
+        let board = FocusComposer.compose(series: [s])
+        XCTAssertNil(board.gainer?.price)
+    }
+
+    /// 只取最后 20 根；窗口首根的「开」= 窗口外那一根的真实收盘（不是自己的收盘）。
+    func testPriceWindowCapsAtTwentyAndSeedsFirstOpenFromPriorClose() throws {
+        var bars: [PricePoint] = []
+        for i in 0..<25 {
+            bars.append(bar("DEMO-A", String(format: "2026-09-%02d", i + 1),
+                            10 + Double(i), raw: 100 + Double(i)))
+        }
+        let board = FocusComposer.compose(series: [
+            FocusSeries(assetKey: "DEMO-A", name: "示例权益", weight: 1, bars: bars)
+        ])
+        let price = try XCTUnwrap(board.gainer?.price)
+        XCTAssertEqual(price.candles.count, FocusComposer.defaultCandleCount)
+        // 窗口 = 索引 5…24 的 20 根；索引 4 的真实收盘 = 104 作首根的开。
+        XCTAssertEqual(price.candles.first?.open ?? 0, 104, accuracy: 1e-12)
+        XCTAssertEqual(price.candles.last?.close ?? 0, 124, accuracy: 1e-12)
+    }
+
+    /// 原始价不参与合成：给不给 rawClose，合成蜡烛必须逐位相同。
+    func testRawCloseDoesNotAffectComposition() {
+        let without = FocusSeries(assetKey: "DEMO-A", name: "示例权益", weight: 1, bars: [
+            bar("DEMO-A", d1, 2.0, open: 1.9, high: 2.1, low: 1.8),
+            bar("DEMO-A", d2, 2.2, open: 2.0, high: 2.3, low: 1.95),
+        ])
+        let with = FocusSeries(assetKey: "DEMO-A", name: "示例权益", weight: 1, bars: [
+            bar("DEMO-A", d1, 2.0, open: 1.9, high: 2.1, low: 1.8, raw: 200),
+            bar("DEMO-A", d2, 2.2, open: 2.0, high: 2.3, low: 1.95, raw: 220),
+        ])
+        XCTAssertEqual(FocusComposer.compose(series: [without]).candles,
+                       FocusComposer.compose(series: [with]).candles)
     }
 }

@@ -254,6 +254,7 @@ final class DividendTests: XCTestCase {
         try db.exec("ALTER TABLE prices DROP COLUMN open;")
         try db.exec("ALTER TABLE prices DROP COLUMN high;")
         try db.exec("ALTER TABLE prices DROP COLUMN low;")
+        try db.exec("ALTER TABLE prices DROP COLUMN raw_close;")   // v10 加的列
         try db.exec("UPDATE schema_meta SET value = '7' WHERE key = 'version'")
         XCTAssertEqual(db.currentSchemaVersion(), 7)
         try db.migrate()

@@ -53,6 +53,18 @@ enum DisplayFormat {
         guard !hidden else { return PrivacyStyle.masked }
         return String(format: signed ? "%+.\(decimals)f%%" : "%.\(decimals)f%%", v * 100)
     }
+
+    /// 价格（真实现价 / 单位净值）——不加千分位，避免和"金额"混淆。
+    static func price(_ v: Double, decimals: Int, hidden: Bool = false) -> String {
+        guard !hidden else { return PrivacyStyle.masked }
+        return String(format: "%.\(decimals)f", v)
+    }
+
+    /// 价格的小数位数：≥10 两位；<10 四位（基金份额净值常见 4 位）。
+    /// 极值卡的卡头、坐标轴、悬停读数共用这一处判断。
+    static func priceDecimals(for v: Double) -> Int {
+        abs(v) >= 10 ? 2 : 4
+    }
 }
 
 /// 结果页/敏感性页共用的指标卡片。

@@ -58,7 +58,7 @@ struct FocusView: View {
                     }
                 }
             }
-            CandleChart(candles: board.candles, height: 300, compact: false)
+            CandleChart(candles: board.candles, height: 300, compact: false, axis: .percent)
             Text("合成 = 各资产「开/高/低/收」先除以自己的今收（归一到 1.00），再按当前市值权重逐项加权；基金没有日内价 → 开 = 昨收、收 = 今收、高/低 = 两者较大/较小。百分比以今收为 0%（最新一根收盘恒在 0%）。")
                 .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
@@ -85,7 +85,9 @@ struct FocusView: View {
     }
 
     private func pickCard(title: String, pick: FocusPick, up: Bool) -> some View {
-        Button {
+        let price = pick.price
+        let decimals = DisplayFormat.priceDecimals(for: price?.candles.last?.close ?? 0)
+        return Button {
             // 跨模块的意图：ContentView 切到资产明细，AssetPerspectiveView 消费后清空。
             store.pendingAssetSelection = pick.assetKey
         } label: {
@@ -98,13 +100,29 @@ struct FocusView: View {
                     }
                     Spacer(minLength: 0)
                     VStack(alignment: .trailing, spacing: 2) {
+                        if let price, let last = price.candles.last {
+                            // 真实现价：权益 = 交易所收盘价，基金 = 份额净值（不是复权价/累计净值）。
+                            Text(CurrencyStyle.symbol(price.currency)
+                                 + DisplayFormat.price(last.close, decimals: decimals))
+                                .font(.subheadline.weight(.semibold)).monospacedDigit()
+                        }
                         Text(DisplayFormat.pct(pick.dayChange, signed: true))
-                            .font(.subheadline.weight(.semibold)).monospacedDigit()
+                            .font(.caption.weight(.semibold)).monospacedDigit()
                             .foregroundStyle(up ? .green : .red)
                         Text("最后日期 \(pick.lastDate)").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
-                CandleChart(candles: pick.candles, height: 140, compact: true)
+                if let price {
+                    CandleChart(candles: price.candles, height: 140, compact: true,
+                                axis: .price(decimals: decimals))
+                } else {
+                    CandleChart(candles: pick.candles, height: 140, compact: true, axis: .percent)
+                }
+                Text(price == nil
+                     ? "该标的历史价格还没回补真实现价，先按归一化百分比画；点右上角「更新行情」后按实际价格重画。"
+                     : "坐标 = 真实现价（权益为交易所收盘价，基金为份额净值）。顶部涨跌幅是总回报口径（含分红/分派），除息日会让 K 线出现向下跳空 —— 那是真实价格，不是亏损。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("点击查看该标的明细").font(.caption2).foregroundStyle(.secondary)
             }
             .padding()
@@ -154,22 +172,45 @@ struct FocusView: View {
 
 // MARK: - 蜡烛图
 
+/// 蜡烛图的纵轴口径。
+///
+/// - `.percent`：归一化口径（1.00 = 今收 = 0%），合成卡用；
+/// - `.price`：现实世界的真实价格（权益 = 收盘价、基金 = 份额净值），极值卡用。
+///
+/// 两者共用同一套 Mark 与悬停逻辑，只有显示单位/读数字符串不同 —— 不复制第二份实现。
+private enum CandleAxis: Equatable {
+    case percent
+    case price(decimals: Int)
+
+    var isPercent: Bool { self == .percent }
+}
+
 /// 20 根日 K。实体 = 开→收，影线 = 低→高；绿涨红跌（收 ≥ 开 为绿）。
-/// 归一化值换算成百分比（1.00 = 0%），X 轴用日期、Y 轴只留刻度文字（不画网格线）。
+/// X 轴用日期、Y 轴只留刻度文字（不画网格线）。
 private struct CandleChart: View {
     let candles: [FocusCandle]
     let height: CGFloat
     let compact: Bool
+    let axis: CandleAxis
 
     @State private var hoverIndex: Int?
 
-    /// 单根蜡烛的最小视觉高度（百分点）—— 十字星/平盘日也要画得出来。
-    private let minSpan: Double = 0.06
+    /// 单根蜡烛的最小视觉高度（显示单位）—— 十字星/平盘日也要画得出来。
+    private var minSpan: Double {
+        switch axis {
+        case .percent:
+            return 0.06                     // 百分点：沿用改造前的值，组合卡外观不变
+        case .price:
+            let values = candles.flatMap { [$0.high, $0.low] }
+            let range = (values.max() ?? 0) - (values.min() ?? 0)
+            return max(range * 0.02, abs(candles.last?.close ?? 1) * 0.001, 1e-9)
+        }
+    }
 
     private struct Bar: Identifiable {
         let id: String
         let date: Date
-        /// 真实的开/高/低/收（百分点，0 = 今收）—— 悬停读数用这一组。
+        /// 开/高/低/收（显示单位：百分点 or 真实价格）—— 悬停读数用这一组。
         let open: Double
         let high: Double
         let low: Double
@@ -180,18 +221,31 @@ private struct CandleChart: View {
         let wickLow: Double
         let wickHigh: Double
         let up: Bool
+        /// 百分比口径的当日涨跌（归一化序列的前收基准）。
         let dayChange: Double?
+        /// 价格口径的当日涨跌额（同一价格序列的前收基准，不与顶部总回报口径混淆）。
+        let priceDelta: Double?
+    }
+
+    /// 归一化蜡烛 → 百分比（百分点），价格蜡烛 → 原样。
+    private func display(_ candle: FocusCandle) -> (open: Double, high: Double, low: Double, close: Double) {
+        switch axis {
+        case .percent:
+            return ((candle.open - 1) * 100, (candle.high - 1) * 100,
+                    (candle.low - 1) * 100, (candle.close - 1) * 100)
+        case .price:
+            return (candle.open, candle.high, candle.low, candle.close)
+        }
     }
 
     private var bars: [Bar] {
         var out: [Bar] = []
         out.reserveCapacity(candles.count)
-        var previousClose: Double?
+        var previousClose: Double?      // 归一化收盘（百分比口径的前收）
+        var previousDisplay: Double?    // 显示单位收盘（价格口径的前收）
         for candle in candles {
-            let open = (candle.open - 1) * 100
-            let close = (candle.close - 1) * 100
-            let high = (candle.high - 1) * 100
-            let low = (candle.low - 1) * 100
+            let values = display(candle)
+            let open = values.open, high = values.high, low = values.low, close = values.close
             // 渲染用的最小高度：不改变读数，只保证十字星/平盘日可见。
             let bodyMin = min(open, close)
             let bodyMax = max(open, close)
@@ -203,8 +257,10 @@ private struct CandleChart: View {
                            bodyLow: bodyLow, bodyHigh: bodyHigh,
                            wickLow: min(low, bodyLow), wickHigh: max(high, bodyHigh),
                            up: candle.close >= candle.open,
-                           dayChange: previousClose.flatMap { $0 == 0 ? nil : candle.close / $0 - 1 }))
+                           dayChange: previousClose.flatMap { $0 == 0 ? nil : candle.close / $0 - 1 },
+                           priceDelta: previousDisplay.map { close - $0 }))
             previousClose = candle.close
+            previousDisplay = close
         }
         return out
     }
@@ -245,7 +301,7 @@ private struct CandleChart: View {
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: compact ? 2 : 5)) { value in
                 AxisValueLabel {
-                    Text(Self.percentLabel(value.as(Double.self) ?? 0))
+                    Text(axisLabel(value.as(Double.self) ?? 0))
                         .font(.caption2)
                 }
             }
@@ -303,15 +359,21 @@ private struct CandleChart: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text(String(bar.id.suffix(5))).font(.caption.weight(.semibold)).monospacedDigit()
-                if let change = bar.dayChange {
+                if axis.isPercent, let change = bar.dayChange {
+                    // 百分比口径：沿用改造前的「当日涨跌 %」。
                     Text(DisplayFormat.pct(change, signed: true))
                         .font(.caption2).monospacedDigit()
                         .foregroundStyle(change >= 0 ? .green : .red)
+                } else if !axis.isPercent, let delta = bar.priceDelta {
+                    // 价格口径：显示同一价格序列的涨跌额（总回报 % 在卡头，避免两个口径混在一行）。
+                    Text(Self.priceLabel(delta, decimals: priceDecimals, signed: true))
+                        .font(.caption2).monospacedDigit()
+                        .foregroundStyle(delta >= 0 ? .green : .red)
                 }
             }
-            Text("开 \(Self.percentLabel(bar.open))　高 \(Self.percentLabel(bar.high))")
+            Text("开 \(axisLabel(bar.open))　高 \(axisLabel(bar.high))")
                 .font(.caption2).monospacedDigit()
-            Text("低 \(Self.percentLabel(bar.low))　收 \(Self.percentLabel(bar.close))")
+            Text("低 \(axisLabel(bar.low))　收 \(axisLabel(bar.close))")
                 .font(.caption2).monospacedDigit()
         }
         .padding(8)
@@ -320,7 +382,26 @@ private struct CandleChart: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
     }
 
+    /// 价格口径的小数位数（百分比口径不使用）。
+    private var priceDecimals: Int {
+        if case .price(let d) = axis { return d }
+        return 2
+    }
+
+    private func axisLabel(_ value: Double) -> String {
+        switch axis {
+        case .percent:
+            return Self.percentLabel(value)
+        case .price(let decimals):
+            return DisplayFormat.price(value, decimals: decimals)
+        }
+    }
+
     private static func percentLabel(_ percent: Double) -> String {
         String(format: "%+.1f%%", percent)
+    }
+
+    private static func priceLabel(_ value: Double, decimals: Int, signed: Bool = false) -> String {
+        (signed && value >= 0 ? "+" : "") + DisplayFormat.price(value, decimals: decimals)
     }
 }
