@@ -19,13 +19,8 @@ public struct OptimizeButton: View {
         .popover(isPresented: $showSettings) {
             settingsPopover()
                 .onAppear {
-                    // 初始化本地变量: 优先 UserDefaults (持久化), 否则用 store 当前值
-                    if let saved = UserDefaults.standard.object(forKey: "optimizer.targetReturn") as? Double {
-                        targetReturnInput = saved
-                        store.targetReturn = saved
-                    } else {
-                        targetReturnInput = store.targetReturn
-                    }
+                    // 持久化的读写在 store 里（AppEnvironment.defaults），视图只拿当前值。
+                    targetReturnInput = store.targetReturn
                 }
         }
         .sheet(isPresented: $showResult) {
@@ -148,13 +143,12 @@ public struct OptimizeButton: View {
             }
             Slider(value: $targetReturnInput, in: 0.05...0.25, step: 0.005)
                 .onChange(of: targetReturnInput) { _, newValue in
-                    store.targetReturn = newValue
-                    UserDefaults.standard.set(newValue, forKey: "optimizer.targetReturn")
+                    store.setTargetReturn(newValue)
                 }
             Text("优化目标是「最大化夏普比率」（单位风险的收益），这个数字只是「收益不低于」的**下限**：若最优夏普组合本身的收益已经高于它，滑杆不会改变结果。想让滑杆真正说话，请把它设到最优夏普组合的收益之上（此时解会落到相同风险下收益更高的那一点）。")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            let w = store.livePoolWeights
+            let w = store.poolShares
             HStack {
                 Text("境内池 / 境外池")
                 Spacer()

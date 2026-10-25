@@ -38,6 +38,7 @@ from market_data import (
 )
 from portfolio_system.services.data_fetcher import cached_series, series_for_broad_key
 import asset_classes as AC
+from asset_identity import canonical_ticker, classify_source as _classify_source
 
 _CORR_MIN_PERIODS = 180
 _CORR_DEFAULT = 0.30
@@ -69,7 +70,8 @@ def parse_test_tickers(raw):
     """逗号/全角逗号/分号/空白分隔 → 去重保序大写列表."""
     if not raw:
         return []
-    parts = [p.strip().upper() for p in re.split(r"[,，;；\s]+", raw) if p.strip()]
+    # 与取数/持仓同一套规范化：去后缀、大写（"123456.CN_Fund" → "123456"）。
+    parts = [canonical_ticker(p) for p in re.split(r"[,，;；\s]+", raw) if p.strip()]
     seen, out = set(), []
     for p in parts:
         if p not in seen:
@@ -79,10 +81,11 @@ def parse_test_tickers(raw):
 
 
 def classify_source(ticker):
-    """6 位纯数字 → ("fund", 代码) 归境内池; 其余 → ("yahoo", 代码) 归境外池."""
-    if re.fullmatch(r"\d{6}", ticker):
-        return "fund", ticker
-    return "yahoo", ticker
+    """6 位境内基金 → ("fund", 代码) 归境内池; 其余 → ("yahoo", 代码) 归境外池。
+
+    规则唯一来源 = asset_identity（与 Swift AssetIdentity 同一张矩阵）。
+    """
+    return _classify_source(ticker)
 
 
 def resolve_test_assets(raw, work_dir, existing_keys, internal_keys, log=None, corr_keys=None,

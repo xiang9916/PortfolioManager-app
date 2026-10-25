@@ -312,7 +312,6 @@ PROXY_MAP = {
     "D_HSBC_CDB": None,
     "D_HSBC_MMF": None,
     "D_CN_CREDIT_BOND": None,
-    "D_CN_DIVLOWVOL100": None,
     "D_CN_QDII_STOCK": ("yahoo", "^SP500TR"),
     "D_CN_QDII_STABLE": ("yahoo", "BND"),
     "D_CN_QDII_COMMODITY": ("yahoo", "CL=F"),

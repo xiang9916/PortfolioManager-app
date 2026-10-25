@@ -223,35 +223,22 @@ public final class OptimizationService {
     ///     锚定目标点用它当 canonical 候选初值，与主结果同一口径。
     ///   - anchorRet / anchorVol: 主结果的实际收益 / 波动，供 Python 侧做锚点一致性检查。
     ///   全部默认 nil → 不追加任何 CLI 参数，与旧行为一致。
+    /// 敏感性分析（实例入口保留，内部委托给静态实现）。
+    ///
+    /// ⚠️ 这个方法是**同步阻塞**的（一次扫描约 1–3 分钟）。App 侧不要直接调它 ——
+    /// 用 `OptimizationRunner` 的后台入口 `runSensitivityOffMain`，否则会卡住主线程。
     public func runSensitivityAnalysis(extractJSON: URL,
                                        anchorTarget: Double? = nil,
                                        anchorSleeve: [String: [Double]]? = nil,
                                        anchorRet: Double? = nil,
                                        anchorVol: Double? = nil) throws -> SensitivityAnalysisResult {
-        var args = [
-            extractJSON.path,
-            "--work-dir", Self.workDirURL().path,
-            "--step-min", "0.05",
-        ]
-        // 锚点参数全部是加法式: 缺省不出现 → Python 侧走旧路径（求解次数/点字段不变）。
-        if let t = anchorTarget { args += ["--anchor-target", String(t)] }
-        if let sleeve = anchorSleeve, !sleeve.isEmpty,
-           let sleeveJSON = Self.compactJSON(sleeve) {
-            args += ["--anchor-sleeve", sleeveJSON]
-        }
-        if let r = anchorRet { args += ["--anchor-ret", String(r)] }
-        if let v = anchorVol { args += ["--anchor-vol", String(v)] }
-
-        let stdout = try sidecar.run(script: "sensitivity_analysis.py", args: args)
-
-        guard let data = stdout.data(using: .utf8) else {
-            throw SidecarError.nonZeroExit(code: -1, stderr: "sensitivity analysis produced no output")
-        }
-
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let result = try decoder.decode(SensitivityAnalysisResult.self, from: data)
-        return result
+        try Self.runSensitivity(
+            config: SidecarConfig(interpreterPath: sidecar.interpreterPath,
+                                  scriptsDir: sidecar.scriptsDir,
+                                  currentDirectoryURL: sidecar.currentDirectoryURL),
+            extractJSON: extractJSON,
+            anchor: SensitivityAnchor(targetReturn: anchorTarget, sleeve: anchorSleeve,
+                                      actualReturn: anchorRet, volatility: anchorVol))
     }
 
     /// 袖内参数 → 紧凑 JSON 字符串。键排序保证同一输入产生同一条命令行（可复现）。
@@ -264,5 +251,57 @@ public final class OptimizationService {
 
     private static func isoNow() -> String {
         ISO8601DateFormatter().string(from: Date())
+    }
+}
+
+// MARK: - 敏感性分析（静态面：不依赖实例状态，可在后台线程执行）
+
+extension OptimizationService {
+
+    /// 纯参数装配 + 解码。不碰实例状态，因此可以安全地在后台线程调用。
+    public static func runSensitivity(config: SidecarConfig, extractJSON: URL,
+                                      anchor: SensitivityAnchor) throws -> SensitivityAnalysisResult {
+        var args = [
+            extractJSON.path,
+            "--work-dir", workDirURL().path,
+            "--step-min", "0.05",
+        ]
+        // 锚点参数全部是加法式: 缺省不出现 → Python 侧走旧路径（求解次数/点字段不变）。
+        if let t = anchor.targetReturn { args += ["--anchor-target", String(t)] }
+        if let sleeve = anchor.sleeve, !sleeve.isEmpty,
+           let sleeveJSON = compactJSON(sleeve) {
+            args += ["--anchor-sleeve", sleeveJSON]
+        }
+        if let r = anchor.actualReturn { args += ["--anchor-ret", String(r)] }
+        if let v = anchor.volatility { args += ["--anchor-vol", String(v)] }
+
+        let sidecar = PythonSidecar(interpreterPath: config.interpreterPath,
+                                    scriptsDir: config.scriptsDir,
+                                    currentDirectoryURL: config.currentDirectoryURL)
+        let stdout = try sidecar.run(script: "sensitivity_analysis.py", args: args)
+
+        guard let data = stdout.data(using: .utf8) else {
+            throw SidecarError.nonZeroExit(code: -1, stderr: "sensitivity analysis produced no output")
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(SensitivityAnalysisResult.self, from: data)
+    }
+
+    /// 在**后台线程**执行敏感性分析（不占 MainActor）。
+    ///
+    /// 改造前：View 里的 `Task { await runSensitivity() }` 继承 MainActor，而 `sidecar.run`
+    /// 同步 `waitUntilExit()` → 整段扫描（实测约 156s）期间 UI 不可响应。结果数值完全不变，
+    /// 只是不再卡住主线程（ADR 0011）。
+    public static func runSensitivityOffMain(config: SidecarConfig, extractJSON: URL,
+                                             anchor: SensitivityAnchor) async throws -> SensitivityAnalysisResult {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<SensitivityAnalysisResult, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(with: Result {
+                    try runSensitivity(config: config, extractJSON: extractJSON, anchor: anchor)
+                })
+            }
+        }
     }
 }

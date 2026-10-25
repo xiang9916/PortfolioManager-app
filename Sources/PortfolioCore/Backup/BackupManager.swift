@@ -105,11 +105,13 @@ public final class BackupManager {
                 // 兼容旧备份：pool 里的 'cross'（已废除）与自由文本 market 一律按
                 // 「market 归一 → ticker 推断 → 币种回退」重新解析（Q20=C / Q32）。
                 let marketRaw = asString(r["market"])
+                let identity = AssetIdentity(key: key, ticker: ticker,
+                                             marketRaw: marketRaw, currency: currency)
                 assets.append(Asset(key: key, name: name,
                                     ticker: ticker,
-                                    market: AssetMarket.resolve(market: marketRaw, ticker: ticker),
+                                    market: identity.market,
                                     assetClass: asString(r["asset_class"]),
-                                    pool: AssetMarket.pool(market: marketRaw, ticker: ticker, currency: currency),
+                                    pool: identity.pool,
                                     currency: currency,
                                     source: asString(r["source"]),
                                     feeRate: asDouble(r["fee_rate"]),

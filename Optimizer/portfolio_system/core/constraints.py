@@ -100,8 +100,13 @@ def bounds_arrays(problem: ProblemSpec):
 
 
 def pool_indices(problem: ProblemSpec) -> Tuple[List[int], List[int]]:
+    """池成员索引。unconstrained（原 cross）两边都不进，与 core/engine 的 stage-1 口径一致。
+
+    历史写法是 ov = pool != "domestic" —— 这会把 unconstrained 当成境外；
+    两套入口（engine 与单层 DTO）对同一资产给出不同池成员，语义上已经分叉。
+    """
     dom = [i for i, a in enumerate(problem.assets) if a.pool == "domestic"]
-    ov = [i for i, a in enumerate(problem.assets) if a.pool != "domestic"]
+    ov = [i for i, a in enumerate(problem.assets) if a.pool == "overseas"]
     return dom, ov
 
 

@@ -219,10 +219,10 @@ BROAD_ASSETS = [
     {"key": "D_CN_QDII_STOCK", "name": "QDII全球股票", "fund_code": None, "pool": "domestic"},
     {"key": "D_CN_QDII_STABLE", "name": "QDII稳健配置(债性FOF)", "fund_code": None, "pool": "domestic"},
     {"key": "D_CN_QDII_COMMODITY", "name": "QDII商品/原油", "fund_code": None, "pool": "domestic"},
-    # 大中华权益一级大类（跨池：内地权益 + 香港权益，内部再拆 9 类二级）
-    {"key": "D_GREATER_CN", "name": "大中华权益（沪深300/红利低波/主动/港股等）", "fund_code": None, "pool": "cross"},
-    # 黄金一级大类（跨池：境内黄金基金 + 境外黄金ETF 合并）
-    {"key": "O_GOLD", "name": "黄金（境内/境外合并）", "fund_code": None, "pool": "cross"},
+    # 大中华权益一级大类（不受池约束：内地权益 + 香港权益，内部再拆 9 类二级）
+    {"key": "D_GREATER_CN", "name": "大中华权益（沪深300/红利低波/主动/港股等）", "fund_code": None, "pool": "unconstrained"},
+    # 黄金一级大类（不受池约束：境内黄金基金 + 境外黄金ETF 合并）
+    {"key": "O_GOLD", "name": "黄金（境内/境外合并）", "fund_code": None, "pool": "unconstrained"},
     # 境外：核心与已有
     {"key": "O_US_CORE", "name": "美国核心权益（文件内部权重）", "pool": "overseas", "mu": None, "vol": None},
     {"key": "O_BTC", "name": "比特币", "pool": "overseas"},

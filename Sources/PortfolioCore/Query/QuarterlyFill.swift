@@ -8,7 +8,8 @@
 /// - 返回 `nil` = 现在没有可填的数（例如行情未抓取导致总市值为 0）→ 按钮不出现。
 ///
 /// ⚠️ 填入的是**当下**的实时值，不是该季末的历史值：App 不记录历史总市值
-/// （`snapshots` 表存在但从未被写入），没有别的选择。见 `docs/adr/0001`。
+/// （`snapshots` 表只有导入/备份恢复两个写点、没有任何读路径参与计算），没有别的选择。
+/// 见 `docs/adr/0001`。
 public enum QuarterlyFill {
     public static func value(field: QuarterlyField,
                              periodEnd: String,

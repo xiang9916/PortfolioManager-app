@@ -49,7 +49,7 @@ def test_cap_map_follows_test_class():
 
 
 def test_apply_caps_sets_upper_bounds():
-    assets = [{"key": "O_US_ENERGY", "pool": "overseas"}, {"key": "O_GOLD", "pool": "cross"},
+    assets = [{"key": "O_US_ENERGY", "pool": "overseas"}, {"key": "O_GOLD", "pool": "unconstrained"},
               {"key": "D_X", "pool": "domestic"}]
     upper = np.ones(3)
     warnings = []
@@ -224,6 +224,21 @@ def test_zero_weight_hit_candidate_stays_out_of_cap_hits():
     OP.apply_active_caps(upper, assets, OP._active_cap_map(assets), [], 0.0, [])
     upper[0] = 0.0     # 该腿最终权重 0：即使上界被夹紧，也绝不是触顶
     assert OP.CAP_HITS == before, OP.CAP_HITS
+
+
+def test_pool_indices_exclude_unconstrained():
+    """unconstrained（原 cross）两边都不进：与 engine 的 stage-1 口径一致。"""
+    class _Asset:
+        def __init__(self, pool):
+            self.pool = pool
+
+    class _Problem:
+        def __init__(self, pools):
+            self.assets = [_Asset(p) for p in pools]
+
+    dom, ov = core_constraints.pool_indices(_Problem(["domestic", "overseas", "unconstrained"]))
+    assert dom == [0], dom
+    assert ov == [1], ov
 
 
 def main():

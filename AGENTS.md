@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 113 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
+swift test  --disable-sandbox          # 201 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -126,20 +126,28 @@ PortfolioManager (SwiftUI)  ──依赖──▶  PortfolioCore (纯逻辑, 无
   ContentView: 4 Tab               ├ Models (Asset/Holding/Snapshot/QuarterlyReport/AssetMarket…)
   Focus/AssetOverview/Asset-       ├ Database (SQLite + Schema v10 迁移 + 幂等数据归一)
   Perspective/FinancialAnalysis    ├ Query (Repository 聚合 + QuarterlyMetrics 公式链 + QuarterlyFill)
-  AppStore = @MainActor 状态中枢    ├ DataSources (Yahoo/Eastmoney + AssetCatalog)
-   持有 db / repository / optimizer ├ Backup (每日 .db 快照 + JSON 导入导出)
-                                   ├ Optimizer (OptimizationService → PythonSidecar)
+  AppStore = @MainActor 状态中枢    ├ Identity (AssetIdentity: 代码/市场/池/取数)
+   (快照 + 用户意图)                 ├ DataSources (Yahoo/Eastmoney + AssetCatalog
+                                   │   + MarketDataSync/FxRateSync/MacroRateSync/BenchmarkSeries)
+   db/repo/optimizer 均 private      ├ Backup (每日 .db 快照 + JSON 导入导出)
+   AppEnvironment = 路径/默认值/时钟  ├ Optimizer (OptimizationService + OptimizationRunner + LiveExtract)
                                    └ Import/JSON (PortfolioImporter / ResultImporter)
 pm-cli (headless CLI) 复用 PortfolioCore
 ```
 红线：**`PortfolioCore` 永不 import `PortfolioManager`**；Views 只经 AppStore 取数。
-- 市值 = 份额 × 最新价（派生不落库）；`quotes` = 最新价，`prices` = 历史 K 线（v9 起含**复权** 开/高/低，基金为 NULL；v10 起另有 `raw_close` = **真实现价**：权益未复权收盘、基金单位净值，未回补时为 NULL）。
+- **App 层三分（ADR 0011）**：「一次行情同步」= `MarketDataSync`（App 与 pm-cli 同一份实现）、
+  「一次优化运行」= `OptimizationRunner`、`LiveExtract` = App↔Python 的输入契约（唯一一处）。
+  这三块都带单测；AppStore 只剩会话状态、装配与文案。**同一件事不允许再写第二份实现。**
+  敏感性分析与宏观利率在后台线程跑（曾经同步等子进程 → 主线程卡死 156s）。
+- 市值 = 份额 × 最新价（派生不落库）。**唯一计算入口 = `PortfolioValuation`**（ADR 0009）：最后价 `quote → rawClose → close（必告警）→ missing`，缺汇率按 1:1 且告警；`asOfDate` = 最晚价格日。`quotes` = 最新价，`prices` = 历史 K 线（v9 起含**复权** 开/高/低，基金为 NULL；v10 起另有 `raw_close` = **真实现价**：权益未复权收盘、基金单位净值，未回补时为 NULL）。
 - **特别关注（第 4 个模块）**：20 根合成日 K（归一化百分比轴）+ 当日涨幅/跌幅最高两只。口径唯一来源 = ADR 0008 / `FocusComposer`（归一化基准 = 各标的最新收盘 1.00、逐项加权、无日内价按昨收降级）；视图只做展示。
   两张极值卡画**真实现价**（Schema v10 `prices.raw_close`：权益 = 未复权收盘价、基金 = 单位净值），**全有或全无** —— 窗口内缺任何一根原始价就整条退回归一化百分比（不混口径、不编造价格）；顶部涨跌幅仍是总回报口径。
 - 财务分析 = `quarterly_reports`（一列一季，9 个手动字段，其余由 `QuarterlyMetrics.compute` 派生）。
 - **市场**是闭集 `AssetMarket {US, HK, CN, JP, SG}`：按 ticker 推断（`.HK`→香港、`.T`→日本、`.SI`→新加坡、
   6 位数字/`.CN_FUND`→中国内地、纯字母→美国），也可手选；旧自由文本（`NASDAQ`/`HKEX`…）归一到这五个，认不出的置空。
 - **池（境内/境外）由市场派生、读路径现算**；`assets.pool` 只是写入时的缓存；`Pool.cross`（跨池）已彻底删除。
+- **资产身份（ADR 0010）**：代码规范化 / 市场 / 池 / 取数源的唯一入口 = `PortfolioCore/Identity/AssetIdentity.swift`（Python 同规则 = `Optimizer/scripts/asset_identity.py`）。基金后缀 `.CN_FUND/.SZ/.SH` 大小写不敏感（`.SS` 是 A 股后缀，不算基金）；取数优先级 = 基金代码 → 目录 key → Yahoo；无 assets 行的持仓按持仓币种回退并告警 `missingAsset`。
+  `AssetCatalog` 分两层：`modeled`（与 Python `SOURCES` 逐 key 一致，`Optimizer/tests/test_asset_catalog_parity.py` 机器校验）与 `legacy`（旧 key/别名，只为本机已有资产保留）。**改 modeled 必须两侧同时改**；优化器参数表的第三池值叫 `unconstrained`（原 cross，表示不参与池约束）。
 - `Database.migrate()` 末尾调用 `normalizeAssetClassification()`（幂等数据归一，不占 Schema 版本号）。
 - 命名：模块0 **特别关注**、模块1 **资产总览**、模块2 **资产明细**、财务分析；明细里是 **成本 (折人民币) / 成本 (CCY)**；
   聚合口径叫 **总成本**，卡片第一项叫 **总市值**。术语表见 `CONTEXT.md`，决策见 `docs/adr/0001`、`0002`。
@@ -150,11 +158,11 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **113 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **201 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）
-- 一键填入只填当下值，不是该季末历史值（`snapshots` 表建库至今没有任何代码写入过）。
+- 一键填入只填当下值，不是该季末历史值（`snapshots` 表只有导入提取文件与备份恢复两个写点，**没有任何读路径**参与计算；2026-10-24 更正了旧表述「从未被写入」）。
 - 前年无分红的标的外推偏高（公式 `max(0, 2×去年 − 前年)`）。
 - 当年新上市的标的显示 `¥0.00` 而非 `—`。
 - 日本/新加坡股息税率未配置（按 0% 计，详情标注「未配置」）。
@@ -182,7 +190,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - `importJSON(from:clearAssets:clearFinancials:)`：默认**合并**（upsert）；`clearAssets` 先清
   holdings/prices/quotes/snapshots/assets/fx_rates；`clearFinancials` 先清 quarterly_reports/income_periods。
   UI 导入前弹窗让用户勾选；pm-cli 对应 `--clear-assets` / `--clear-financials`。
-- 财务字段 UI 防抖 0.6s 落盘；**导出备份前记得 `flushQuarterlyPersist()`**（AppStore 已处理）。
+- 财务字段 UI 防抖 0.6s 落盘（`QuarterlyDesk`，Core）；**导出备份前记得 `flush()`**（AppStore 已处理）。
 - 已删除功能：PDF 导出（按钮/AppStore/PDFExporter/pm-cli report 全移除，勿复活）。
 
 ## 12. 优化器（能力2）注意
@@ -366,7 +374,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 35 文件 / 231 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 37 文件 / 244 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。

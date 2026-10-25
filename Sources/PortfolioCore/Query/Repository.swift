@@ -1,43 +1,9 @@
 import Foundation
 
 // MARK: - UI view models (shared across SwiftUI views)
-
-/// One slice of the asset-allocation pie (grouped by asset class).
-public struct AllocationSlice: Codable, Hashable, Identifiable {
-    public let assetClass: String
-    public let value: Double
-    public let weight: Double
-    public let pool: Pool
-    public var id: String { assetClass }
-}
-
-/// Current portfolio allocation snapshot.
-/// 境内/境外按每个标的的**市场**派生（`AssetMarket` → 池，见 Q26=C / Q31），
-/// 与资产明细里显示的「池」一致；不再按资产大类分组取整组归属。
-public struct AllocationSnapshot: Codable, Hashable {
-    public let asOfDate: String?
-    public let totalValue: Double
-    public let domesticValue: Double
-    public let overseasValue: Double
-    /// 总成本 = Σ 各持仓「成本（折人民币）」；总市值 = totalValue。两者同口径（都含全部持仓）。
-    public let totalCost: Double
-    public let domesticCost: Double
-    public let overseasCost: Double
-    public let slices: [AllocationSlice]
-
-    public init(asOfDate: String?, totalValue: Double, domesticValue: Double,
-                overseasValue: Double, totalCost: Double = 0, domesticCost: Double = 0,
-                overseasCost: Double = 0, slices: [AllocationSlice]) {
-        self.asOfDate = asOfDate
-        self.totalValue = totalValue
-        self.domesticValue = domesticValue
-        self.overseasValue = overseasValue
-        self.totalCost = totalCost
-        self.domesticCost = domesticCost
-        self.overseasCost = overseasCost
-        self.slices = slices
-    }
-}
+//
+// AllocationSlice / AllocationSnapshot 已迁到 Query/PortfolioValuation.swift：
+// 它们现在是「组合估值」的投影，不再是 Repository 自己算的一份。
 
 /// One point of the reconstructed portfolio NAV (weighted index).
 public struct PerformancePoint: Codable, Hashable, Identifiable {
@@ -112,17 +78,8 @@ public struct FinancialAnalysis: Codable, Hashable {
     public let periods: [IncomeSummary] // 期间明细
 }
 
-/// Shared context for portfolio queries: fetches holdings/fx/latest once,
-/// reused across allocation/perspective/financial queries to avoid triple-fetching.
-public struct PortfolioContext {
-    public let holdings: [Holding]
-    public let byKey: [String: Asset]
-    public let fx: [String: Double]
-    public let latest: [String: Double]
-    public let totalValueCny: Double
-}
-
 /// High-level query layer: composes raw Database rows into UI-ready structures.
+/// 估值口径集中在 `PortfolioValuation`；本类只负责读库与投影。
 /// All methods are synchronous; call from a single (main-actor) context.
 public final class Repository {
     public let db: Database
@@ -139,7 +96,7 @@ public final class Repository {
         self.db = db
     }
 
-    // MARK: FX + 派生市值 — 能力2 权重统一成人民币
+    // MARK: FX
 
     /// Load currency→CNY rates; CNY is always 1.0.
     private func fxRates() -> [String: Double] {
@@ -148,109 +105,44 @@ public final class Repository {
         return map
     }
 
-    /// Latest price per asset key.
-    /// Prefers the quotes table (unit NAV for funds, latest price for others);
-    /// falls back to the last price-history point if no quote is stored.
-    /// This ensures funds use 单位净值 for market value, while 累计净值 history
-    /// is used only for the 模拟历史财务表现 chart.
-    private func latestPriceMap(_ holdings: [Holding]) -> [String: Double] {
-        let quotes = (try? db.fetchLatestQuotes()) ?? [:]
-        var map: [String: Double] = [:]
-        for h in holdings {
-            if let q = quotes[h.assetKey] {
-                map[h.assetKey] = q.price
-            } else if let pts = try? db.fetchPrices(assetKey: h.assetKey), let last = pts.last {
-                map[h.assetKey] = last.close
-            }
-        }
-        return map
-    }
+    // MARK: - 组合估值（唯一入口）
 
-    /// A holding's derived market value in its own currency: 份额 × 最后价.
-    private func derivedValue(_ h: Holding, latest: [String: Double]) -> Double {
-        h.quantity * (latest[h.assetKey] ?? 0)
-    }
-
-    /// A holding's derived market value converted to CNY (份额 × 最后价 × 汇率).
-    private func valueCny(_ h: Holding, fx: [String: Double], latest: [String: Double]) -> Double {
-        derivedValue(h, latest: latest) * (fx[h.currency] ?? 1.0)
-    }
-
-    /// Build a shared context (holdings + assets + fx + latest prices) in a single pass.
-    /// All downstream fetch* methods accept this to avoid re-querying the DB.
-    public func loadContext() throws -> PortfolioContext {
+    /// 读一次库，产出组合估值。所有读模型都从这里派生。
+    ///
+    /// 最新价：`quotes` 优先；缺有效 quote 的持仓才用 `fetchLastPrice` 取最后一根 K 线
+    /// （有 quote 时价格与日期都取 quote，不再读历史）。
+    public func loadValuation() throws -> PortfolioValuation {
         let assets = try db.fetchAssets()
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let holdings = try db.fetchHoldings()
+        let quotes = try db.fetchLatestQuotes()
         let fx = fxRates()
-        let latest = latestPriceMap(holdings)
-        let total = holdings.reduce(0.0) { $0 + valueCny($1, fx: fx, latest: latest) }
-        return PortfolioContext(holdings: holdings, byKey: byKey, fx: fx, latest: latest, totalValueCny: total)
+
+        var lastPrices: [String: PricePoint] = [:]
+        for h in holdings {
+            let quote = quotes[h.assetKey]
+            let quoteValid = quote.map { $0.price.isFinite && $0.price > 0 } ?? false
+            if quoteValid { continue }
+            if let bar = try db.fetchLastPrice(assetKey: h.assetKey) {
+                lastPrices[h.assetKey] = bar
+            }
+        }
+
+        return PortfolioValuation.make(holdings: holdings, assetsByKey: byKey,
+                                       quotes: quotes, lastPrices: lastPrices,
+                                       fxRates: fx)
     }
 
-    /// Convenience: valueCny from context (avoids passing fx/latest separately).
-    private func valueCny(_ h: Holding, ctx: PortfolioContext) -> Double {
-        derivedValue(h, latest: ctx.latest) * (ctx.fx[h.currency] ?? 1.0)
-    }
-
-    // MARK: 市场 / 池 — 唯一解析入口 (Q26=C, Q31)
-
-    /// 标的的市场（闭集）: 已填 market → ticker 推断 → nil。
-    private func market(_ a: Asset) -> AssetMarket? {
-        AssetMarket.resolve(market: a.market?.rawValue, ticker: a.ticker ?? a.key)
-    }
-
-    /// 标的的池归属: 由市场派生，市场解析不出来时按币种回退。
-    /// **不再读 `assets.pool` 列** —— 那一列只是写入时的缓存，读时派生才能保证
-    /// 池与股息税率永远从同一个市场结论出发。
-    private func pool(_ a: Asset) -> Pool {
-        AssetMarket.pool(market: a.market?.rawValue, ticker: a.ticker ?? a.key, currency: a.currency)
+    /// 已加载的估值优先；没有就现读一次。
+    private func resolve(_ valuation: PortfolioValuation?) throws -> PortfolioValuation {
+        if let valuation { return valuation }
+        return try loadValuation()
     }
 
     // MARK: 模块1 — asset allocation
 
     public func fetchAllocation() throws -> AllocationSnapshot {
-        let ctx = try loadContext()
-        let total = ctx.totalValueCny
-        var groups: [String: (value: Double, pool: Pool)] = [:]
-        // 池统计按「每个标的自身的市场」累计 — 修复: 之前按大类分组且组池被同组
-        // 最后一个标的覆盖, 导致同一大类里的境内标的被计入境外池.
-        var domestic = 0.0
-        var overseas = 0.0
-        var totalCost = 0.0
-        var domesticCost = 0.0
-        var overseasCost = 0.0
-        for h in ctx.holdings {
-            let a = ctx.byKey[h.assetKey]
-            let cls = a?.assetClass ?? "其他"
-            let p = a.map { pool($0) } ?? .overseas
-            let v = valueCny(h, ctx: ctx)
-            let c = h.costBasis * (ctx.fx[h.currency] ?? 1.0)
-            if let cur = groups[cls] {
-                groups[cls] = (cur.value + v, cur.pool)
-            } else {
-                groups[cls] = (v, p)
-            }
-            totalCost += c
-            switch p {
-            case .domestic: domestic += v; domesticCost += c
-            case .overseas: overseas += v; overseasCost += c
-            }
-        }
-        let slices = groups.map { (cls, v) in
-            AllocationSlice(assetClass: cls, value: v.value,
-                            weight: total > 0 ? v.value / total : 0, pool: v.pool)
-        }.sorted { $0.value > $1.value }
-
-        return AllocationSnapshot(
-            asOfDate: ctx.holdings.first?.asOfDate,
-            totalValue: total,
-            domesticValue: domestic,
-            overseasValue: overseas,
-            totalCost: totalCost,
-            domesticCost: domesticCost,
-            overseasCost: overseasCost,
-            slices: slices)
+        try loadValuation().allocationSnapshot
     }
 
     // MARK: 能力1 — historical performance (weighted NAV reconstruction)
@@ -259,20 +151,22 @@ public final class Repository {
     /// Each asset is rebased to 1.0 at its first observation inside a trailing window
     /// (default 3 years) and weighted by its current derived CNY value. Cross-currency is ignored
     /// (FX is not embedded), so the series reflects relative weighted performance.
-    public func fetchPerformance(lookbackYears: Double = 3.0) throws -> (points: [PerformancePoint], summary: PerformanceSummary) {
-        let ctx = try loadContext()
-        let holdings = ctx.holdings
-        let total = ctx.totalValueCny
-        guard total > 0, !holdings.isEmpty else {
+    public func fetchPerformance(lookbackYears: Double = 3.0,
+                                 valuation: PortfolioValuation? = nil) throws
+        -> (points: [PerformancePoint], summary: PerformanceSummary) {
+        let v = try resolve(valuation)
+        let positions = v.positions
+        guard v.totalValueCny > 0, !positions.isEmpty else {
             return ([], PerformanceSummary(startDate: nil, endDate: nil, totalReturn: 0,
                                            annualizedVolatility: 0, maxDrawdown: 0, pointCount: 0))
         }
-        let weights = Dictionary(uniqueKeysWithValues: holdings.map { ($0.assetKey, valueCny($0, ctx: ctx) / total) })
+        let weights = Dictionary(positions.map { ($0.assetKey, $0.weight) },
+                                 uniquingKeysWith: { first, _ in first })
 
         // window end = latest price date across holdings; start = end - lookback
         var latestDate = ""
-        for h in holdings {
-            if let last = (try? db.fetchPrices(assetKey: h.assetKey))?.last, last.date > latestDate {
+        for p in positions {
+            if let last = (try? db.fetchPrices(assetKey: p.assetKey))?.last, last.date > latestDate {
                 latestDate = last.date
             }
         }
@@ -284,16 +178,16 @@ public final class Repository {
         // normalized series per asset within the window, forward-filled on the union of dates
         var series: [String: [String: Double]] = [:]
         var dateSet = Set<String>()
-        for h in holdings {
-            let points = try db.fetchPrices(assetKey: h.assetKey)
+        for p in positions {
+            let points = try db.fetchPrices(assetKey: p.assetKey)
             let inWindow = points.filter { $0.date >= startStr }
             guard let base = inWindow.first?.close, base > 0, inWindow.count >= 2 else { continue }
             var norm: [String: Double] = [:]
-            for p in inWindow {
-                norm[p.date] = p.close / base
-                dateSet.insert(p.date)
+            for pt in inWindow {
+                norm[pt.date] = pt.close / base
+                dateSet.insert(pt.date)
             }
-            series[h.assetKey] = norm
+            series[p.assetKey] = norm
         }
         guard !dateSet.isEmpty else {
             return ([], PerformanceSummary(startDate: startStr, endDate: latestDate, totalReturn: 0,
@@ -307,7 +201,7 @@ public final class Repository {
         for d in dates {
             var weighted = 0.0
             for (key, w) in weights {
-                if let v = series[key]?[d] { lastNorm[key] = v }
+                if let nv = series[key]?[d] { lastNorm[key] = nv }
                 weighted += (lastNorm[key] ?? 1.0) * w
             }
             points.append(PerformancePoint(date: d, value: weighted))
@@ -348,61 +242,49 @@ public final class Repository {
     ///
     /// 只做取数与装配；口径（归一化、逐项加权、无日内价的降级）全部在 FocusComposer 里，
     /// 与视图层无关、可脱离数据库单测。没有历史价格时返回 .empty，由视图给出引导文案。
-    public func fetchFocusBoard(candleCount: Int = FocusComposer.defaultCandleCount) throws -> FocusBoard {
-        let ctx = try loadContext()
+    public func fetchFocusBoard(candleCount: Int = FocusComposer.defaultCandleCount,
+                                valuation: PortfolioValuation? = nil) throws -> FocusBoard {
+        let v = try resolve(valuation)
         var series: [FocusSeries] = []
-        for h in ctx.holdings {
-            let value = valueCny(h, ctx: ctx)
-            guard value > 0 else { continue }
-            let bars = (try? db.fetchPrices(assetKey: h.assetKey)) ?? []
+        for p in v.positions {
+            guard p.valueCny > 0 else { continue }
+            let bars = (try? db.fetchPrices(assetKey: p.assetKey)) ?? []
             guard !bars.isEmpty else { continue }
-            series.append(FocusSeries(assetKey: h.assetKey,
-                                      name: ctx.byKey[h.assetKey]?.name ?? h.assetKey,
-                                      weight: value,
-                                      bars: bars))
+            series.append(FocusSeries(assetKey: p.assetKey, name: p.name,
+                                      weight: p.valueCny, bars: bars))
         }
         return FocusComposer.compose(series: series, candleCount: candleCount)
     }
 
     // MARK: 模块2 — asset perspective
 
-    public func fetchAssetPerspectives() throws -> [AssetPerspectiveRow] {
-        let ctx = try loadContext()
-        let total = ctx.totalValueCny
+    public func fetchAssetPerspectives(valuation: PortfolioValuation? = nil) throws -> [AssetPerspectiveRow] {
+        let v = try resolve(valuation)
         let divInputs = dividendInputs()
 
-        return ctx.holdings.compactMap { h -> AssetPerspectiveRow? in
-            guard let a = ctx.byKey[h.assetKey] else { return nil }
-            let value = derivedValue(h, latest: ctx.latest)
-            let valueCny = value * (ctx.fx[h.currency] ?? 1.0)
-            let costCny = h.costBasis * (ctx.fx[h.currency] ?? 1.0)
-            let unrealizedPnl = valueCny - costCny
-            let latestPrice = ctx.latest[h.assetKey]
-            var latestDate: String? = nil
-            if let pts = try? db.fetchPrices(assetKey: h.assetKey), let last = pts.last {
-                latestDate = last.date
-            }
+        return v.positions.compactMap { p -> AssetPerspectiveRow? in
+            guard p.hasAsset else { return nil }
             return AssetPerspectiveRow(
-                assetKey: h.assetKey,
-                name: a.name,
-                assetClass: a.assetClass ?? "其他",
-                market: market(a),
-                pool: pool(a),
-                currency: h.currency,
-                value: value,
-                valueCny: valueCny,
-                costCny: costCny,
-                unrealizedPnl: unrealizedPnl,
-                returnRate: costCny > 0 ? unrealizedPnl / costCny : 0,
-                quantity: h.quantity,
-                costBasis: h.costBasis,
-                weight: total > 0 ? valueCny / total : 0,
-                latestPrice: latestPrice,
-                latestDate: latestDate,
-                sortOrder: a.sortOrder ?? 0,
-                dividend: assetDividend(asset: a, quantity: h.quantity,
-                                        currency: h.currency, fx: ctx.fx,
-                                        market: market(a), inputs: divInputs))
+                assetKey: p.assetKey,
+                name: p.name,
+                assetClass: p.assetClass,
+                market: p.market,
+                pool: p.pool,
+                currency: p.currency,
+                value: p.valueLocal,
+                valueCny: p.valueCny,
+                costCny: p.costCny,
+                unrealizedPnl: p.unrealizedPnlCny,
+                returnRate: p.returnRate,
+                quantity: p.quantity,
+                costBasis: p.costBasis,
+                weight: p.weight,
+                latestPrice: p.priceLocal,
+                latestDate: p.priceDate,
+                sortOrder: p.sortOrder,
+                dividend: assetDividend(assetKey: p.assetKey, quantity: p.quantity,
+                                        currency: p.currency, fxRate: p.fxRate,
+                                        market: p.market, inputs: divInputs))
         }.sorted {
             // 手动排序优先 (拖动后持久化); 未排序 (全部 0) 时按市值降序展示.
             if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
@@ -440,13 +322,13 @@ public final class Repository {
     /// (详情显示「—」)。注意: 新上市标的只要**任一抓取窗口**有数据就算 `ok` ——
     /// 例如某只当年新上市的标的会命中当年窗口, 因此显示 ¥0.00 而不是「—」
     /// (它在 2024/2025 确实没有派息, 数值上与 NULL 态一样按 0 计入)。
-    private func assetDividend(asset: Asset, quantity: Double, currency: String,
-                               fx: [String: Double], market: AssetMarket?,
+    private func assetDividend(assetKey: String, quantity: Double, currency: String,
+                               fxRate: Double?, market: AssetMarket?,
                                inputs: DividendInputs) -> AssetDividend {
-        let meta = inputs.metas[asset.key]
+        let meta = inputs.metas[assetKey]
         let status = meta?.status ?? .unavailable
         let ok = (status == .ok)
-        let records = ok ? (inputs.recordsByAsset[asset.key] ?? []) : []
+        let records = ok ? (inputs.recordsByAsset[assetKey] ?? []) : []
         let yearPrevPrev = inputs.currentYear - 2
         let yearPrev = inputs.currentYear - 1
         let yearCurrent = inputs.currentYear
@@ -460,12 +342,11 @@ public final class Repository {
 
         // 税率与池归属共用同一个解析结果 (Q31): market 来自 AssetMarket，币种回退只在解析不出市场时发生。
         let taxRate = DividendTax.rate(market: market?.rawValue, currency: currency)
-        let fxRate = fx[currency]
         var fxMissing = false
         var estimatedCny: Double?
         var actualCny: Double?
         if ok {
-            if let fxRate, fxRate > 0 {
+            if let fxRate, fxRate.isFinite, fxRate > 0 {
                 let net = 1 - (taxRate ?? 0)
                 estimatedCny = estPerShare * quantity * fxRate * net
                 actualCny = perShare(yearCurrent) * quantity * fxRate * net
@@ -491,23 +372,23 @@ public final class Repository {
 
     /// 全资产股息 = Σ 各资产今年预计股息 (税后, 折人民币); NULL 态与缺汇率按 0 计入.
     /// 覆盖率只统计非 NULL 态 (决策 Q12), 因为 NULL 计 0 会系统性低估该指标。
-    public func fetchDividendSummary() throws -> DividendSummary {
-        let ctx = try loadContext()
+    public func fetchDividendSummary(valuation: PortfolioValuation? = nil) throws -> DividendSummary {
+        let v = try resolve(valuation)
         let inputs = dividendInputs()
         var total = 0.0
         var covered = 0
         var latest: String?
-        for h in ctx.holdings {
-            guard let a = ctx.byKey[h.assetKey] else { continue }
-            let d = assetDividend(asset: a, quantity: h.quantity,
-                                  currency: h.currency, fx: ctx.fx,
-                                  market: market(a), inputs: inputs)
+        for p in v.positions {
+            guard p.hasAsset else { continue }
+            let d = assetDividend(assetKey: p.assetKey, quantity: p.quantity,
+                                  currency: p.currency, fxRate: p.fxRate,
+                                  market: p.market, inputs: inputs)
             if d.status == .ok { covered += 1 }
             total += d.estimatedTotalCny ?? 0
             if let f = d.fetchedAt, f > (latest ?? "") { latest = f }
         }
         return DividendSummary(totalNetCny: total, coveredCount: covered,
-                               assetCount: ctx.holdings.count, fetchedAt: latest)
+                               assetCount: v.positions.count, fetchedAt: latest)
     }
 
     // MARK: 能力4 — 财务分析 (个人资产/收益结构)
@@ -520,10 +401,10 @@ public final class Repository {
         try db.fetchQuarterlyReports()
     }
 
-    public func fetchFinancialAnalysis() throws -> FinancialAnalysis {
-        let ctx = try loadContext()
-        let originalPrincipal = ctx.holdings.reduce(0.0) { $0 + $1.costBasis * (ctx.fx[$1.currency] ?? 1.0) }
-        let marketValue = ctx.totalValueCny
+    public func fetchFinancialAnalysis(valuation: PortfolioValuation? = nil) throws -> FinancialAnalysis {
+        let v = try resolve(valuation)
+        let originalPrincipal = v.positions.reduce(0.0) { $0 + $1.costCny }
+        let marketValue = v.totalValueCny
         let periods = try db.fetchIncomeSummaries()
         let totalDividends = periods.reduce(0.0) { $0 + $1.dividends }
         let totalRealized = periods.reduce(0.0) { $0 + $1.realizedPnl }

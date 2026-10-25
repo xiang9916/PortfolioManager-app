@@ -233,43 +233,21 @@ public struct OptimizationResultView: View {
         sensitivityLoading = true
         sensitivityError = nil
         sensitivityResult = nil
+        // 装配（sidecar / 提取文件 / 锚点参数）全在 store 内部，且在后台线程跑 ——
+        // 视图过去自己 new 一套 sidecar + Database，并同步阻塞主线程约 1–3 分钟（ADR 0011）。
+        guard let store else {
+            sensitivityError = "只有从优化结果页打开时才能运行敏感性分析。"
+            showSensitivity = true
+            sensitivityLoading = false
+            return
+        }
         do {
-            // Get extract live path
-            let extractURL = AppPaths.extractJSONURL()
-                .deletingLastPathComponent()
-                .appendingPathComponent("extract_live.json")
-            guard FileManager.default.fileExists(atPath: extractURL.path) else {
-                sensitivityError = "未找到提取文件：\(extractURL.path)。请先运行优化。"
-                showSensitivity = true
-                sensitivityLoading = false
-                return
-            }
-
-            // Build sidecar + service
-            // 敏感性分析复用优化运行留在共享临时目录的联网产物
-            // (基金搜索易实时列表 + 天天基金实时申赎状态), 不再读预存快照。
-            let sidecar = PythonSidecar(
-                interpreterPath: AppPaths.interpreterPath(),
-                scriptsDir: AppPaths.scriptsURL(),
-                currentDirectoryURL: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            )
-            let logsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("tmp/optimizer_logs", isDirectory: true)
-            let tempDB = try Database(path: AppPaths.databaseURL().path)
-            let optimizer = OptimizationService(db: tempDB, sidecar: sidecar, logsDir: logsDir)
-
-            // 锚点参数：主结果的目标收益 / 袖内参数 / 实际落点一起带给敏感性分析，
-            // 这样锚点目标上的点与结果页同一口径（蓝点重合于绿点）。旧结果缺这些字段 → 不传。
-            let sr = try optimizer.runSensitivityAnalysis(
-                extractJSON: extractURL,
-                anchorTarget: result.targetReturn,
-                anchorSleeve: result.sleeveParams,
-                anchorRet: result.portfolio.expectedReturn,
-                anchorVol: result.portfolio.volatility)
+            let sr = try await store.runSensitivity(for: result)
             sensitivityResult = sr
             showSensitivity = true
         } catch {
-            sensitivityError = String(describing: error)
+            sensitivityError = (error as? LocalizedError)?.errorDescription
+                ?? String(describing: error)
             showSensitivity = true
         }
         sensitivityLoading = false

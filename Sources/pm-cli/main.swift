@@ -117,26 +117,51 @@ if args.count >= 3 && args[1] == "fetch" {
         }
     })
 }
+/// 行情 + 股息同步（与 App 共用 Core 的 `MarketDataSync`）。
+///
+/// 改造前这里是一套独立实现：只写 `prices`、不写 `quotes`（于是市值不会变）、不抓股息
+/// （于是股息率不会变），还会写一条写死的 snapshot。现在 App 与 CLI 走同一份实现（ADR 0011）。
+@MainActor
+func runRefresh(dbPath: String, keys: [String]) async -> Int32 {
+    do {
+        let db = try Database(path: dbPath)
+        let metas = (try? db.fetchDividendFetchMetas()) ?? [:]
+        let now = Date()
+        var targets: [SyncPlan.Target] = []
+        for key in keys {
+            guard let feed = AssetFeedResolver.feed(key: key, ticker: nil) else {
+                print("  未知标的: \(key)"); continue
+            }
+            let source: any DataSource = feed.kind == .fund ? EastmoneySource() : YahooFinanceSource()
+            let skip = metas[key].map { MarketDataSync.cacheIsFresh($0, now: now) } ?? false
+            targets.append(SyncPlan.Target(assetKey: key, source: source,
+                                           symbol: feed.symbol, skipDividends: skip))
+        }
+        let plan = SyncPlan(targets: targets,
+                            dividendYears: MarketDataSync.dividendYears(now: now), now: now)
+        let report = await MarketDataSync.run(plan, into: db)
+        for t in targets {
+            print("  \(t.assetKey) (\(t.symbol)): \(report.pointCounts[t.assetKey] ?? 0) 点")
+        }
+        print("共写入 \(report.pricePointCount) 个价格点 → \(dbPath)")
+        if !report.failedAssetKeys.isEmpty {
+            print("  抓取/落库失败: \(report.failedAssetKeys.joined(separator: ", "))")
+        }
+        print("prices 表行数: \(db.count(table: "prices"))  snapshots 表行数: \(db.count(table: "snapshots"))")
+        return 0
+    } catch {
+        FileHandle.standardError.write("刷新失败: \(error)\n".data(using: .utf8)!)
+        return 1
+    }
+}
+
 if args.count >= 2 && args[1] == "refresh" {
     let dbPath = args.count >= 3 ? args[2] : "tmp/portfolio.db"
+    let keys = args.count >= 4 ? Array(args[3...]) : ["VTV", "GOOG", "O_GOLD", "O_BTC", "D_CN_QDII_STOCK"]
     exit(runAsync {
-        let db = try Database(path: dbPath)
-        let keys = args.count >= 4 ? Array(args[3...]) : ["VTV", "GOOG", "O_GOLD", "O_BTC", "D_CN_QDII_STOCK"]
-        var total = 0
-        for key in keys {
-            guard let ref = AssetCatalog.ref(for: key) else { print("  未知标的: \(key)"); continue }
-            let source: any DataSource = ref.source == .fund ? EastmoneySource() : YahooFinanceSource()
-            let hist = try await source.fetchHistory(symbol: ref.symbol)
-            let points = hist.map { PricePoint(assetKey: ref.key, date: $0.date, close: $0.close,
-                                               rawClose: $0.rawClose, currency: $0.currency,
-                                               open: $0.open, high: $0.high, low: $0.low) }
-            try db.upsertPrices(points)
-            total += points.count
-            print("  \(ref.key) (\(ref.symbol)): \(points.count) 点")
-        }
-        try db.insertSnapshot(Snapshot(date: "2026-08-20", totalValue: 354290.32, domesticValue: 82051.27, overseasValue: 272239.04))
-        print("共写入 \(total) 个价格点 → \(dbPath)")
-        print("prices 表行数: \(db.count(table: "prices"))  snapshots 表行数: \(db.count(table: "snapshots"))")
+        // Database 在 MainActor 上创建并只在同步器内部串行使用（不跨 actor 传非 Sendable 对象）。
+        let code = await runRefresh(dbPath: dbPath, keys: keys)
+        if code != 0 { exit(code) }
     })
 }
 if args.count >= 2 && args[1] == "import" {

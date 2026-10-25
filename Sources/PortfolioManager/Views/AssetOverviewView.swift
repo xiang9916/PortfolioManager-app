@@ -59,6 +59,7 @@ public struct AssetOverviewView: View {
         总市值 = Σ 各持仓「市值（份额 × 最后价）折人民币」。
         总成本 = Σ 各持仓在资产明细中手工录入的「成本」折人民币；两者同口径，可直接相减看未实现资本利得。
         口径：成本 × 持仓币种汇率；缺汇率的币种按 1:1 估算（与总市值同一处理方式）。
+        总市值最后价：行情快照 → 真实现价（基金为单位净值）→ 总回报收盘（会标注）。
         """
         let domesticHelp = """
         境内池 = 市场为中国内地（A股 / 境内基金）的持仓，「市值 / 成本」均折人民币。
@@ -100,7 +101,21 @@ public struct AssetOverviewView: View {
                 metricCard("最大回撤", perf(s?.maxDrawdown), "arrow.down.right", .purple)
                 metricCard("全资产股息率", pct(dividendYield), "percent", .pink, help: yieldHelp)
             }
+            if !store.valuationWarnings.isEmpty {
+                valuationWarningLine
+            }
         }
+    }
+
+    /// 估值兜底（缺价 / 缺汇率 / 币种不一致）的可见出口：前两条 + 计数，完整列表在 tooltip。
+    private var valuationWarningLine: some View {
+        let warnings = store.valuationWarnings
+        let head = warnings.prefix(2).map(\.message).joined(separator: "；")
+        let suffix = warnings.count > 2 ? "，等 \(warnings.count) 项" : ""
+        return Label(head + suffix, systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .help(warnings.map(\.message).joined(separator: "\n"))
     }
 
     /// 绩效卡缺数据时显示「—」, 保持 4×2 网格形状稳定.

@@ -387,7 +387,7 @@ public struct OptimizationLogEntry: Codable, Identifiable {
 
 // MARK: - Sensitivity Analysis
 
-public struct SensitivityPoint: Codable, Hashable, Identifiable {
+public struct SensitivityPoint: Codable, Hashable, Sendable, Identifiable {
     public var id: Int { Int((targetReturn * 10000).rounded()) }
     public let targetReturn: Double
     public let feasible: Bool
@@ -405,7 +405,7 @@ public struct SensitivityPoint: Codable, Hashable, Identifiable {
 }
 
 /// 敏感性锚点一致性检查里的一个落点（收益 / 波动 / 夏普）。
-public struct AnchorMetrics: Codable, Hashable {
+public struct AnchorMetrics: Codable, Hashable, Sendable {
     public let ret: Double?
     public let vol: Double?
     public let sharpe: Double?
@@ -415,7 +415,7 @@ public struct AnchorMetrics: Codable, Hashable {
 ///
 /// 主结果的目标收益率被并进扫描网格后，这里给出「锚点目标点」与「主结果」的落点对比，
 /// 用于说明曲线上锚点是否真的与结果页同源。字段全部 optional（加法式，旧输出没有该块）。
-public struct AnchorInfo: Codable, Hashable {
+public struct AnchorInfo: Codable, Hashable, Sendable {
     public let target: Double?
     /// 锚点目标点与主结果是否一致（未被主结果支配）。
     public let matched: Bool?
@@ -425,7 +425,7 @@ public struct AnchorInfo: Codable, Hashable {
     public let main: AnchorMetrics?
 }
 
-public struct SensitivityAnalysisResult: Codable {
+public struct SensitivityAnalysisResult: Codable, Sendable {
     public let maxFeasibleReturn: Double
     /// 扫描口径（Python 侧 scope 字段）：一句话说明这一点是怎么算出来的
     /// （2026-10-14 起 = 完整流水线：阶段一 + 袖内固定点 + 阶段二，与结果页同源）。

@@ -13,7 +13,7 @@
 
 1. **Python 校准**：所有 Yahoo 序列按 adjusted=True 取 adjclose；缺失时回落 close 并记 warning。ETF/个股/REIT/债券代理获得分红；价格指数改用总回报指数（^SP500TR）或复权 ETF 代理（见第 5 条）；期货/加密仍为价格序列。
 2. **校准文件**：`calibrated_params.json` 一次性重校准；顶层加 `series_basis: "total_return"`，每条 provenance 加 `adjusted: true/false`（加法式）。
-3. **App**：`prices`（历史/累计净值）改存 `adjclose`；`quotes` 仍存最新价，`lookup` 仍用 `regularMarketPrice`。`adjclose` 的最后一点等于当前收盘价，`prices.last` 的“最新价兜底”与市值不受影响。
+3. **App**：`prices`（历史/累计净值）改存 `adjclose`；`quotes` 仍存最新价，`lookup` 仍用 `regularMarketPrice`。`adjclose` 的最后一点等于当前收盘价；但市值兜底不再使用 `close`（基金是累计净值），改由 ADR 0009 统一为 quote → rawClose → close（告警）。
 4. **Schema 注释**：`prices` 的语义改为“权益 = 复权（总回报），基金 = 累计净值”。
 
 5. **指数代理总回报化（2026-10-20 续）**：^GSPC → ^SP500TR（S&P 500 Total Return，1988 起）；HK_DIV 代理 ^HSI → 2800.HK；D_GREATER_CN 源 ^HSI → 2800.HK；O_SG_EQ 去掉 ^STI 代理（源 G3B.SI 本身是复权 ETF）。Yahoo 没有 ^HSITR/^STITR，HK/SG 只能用总回报 ETF，不是指数。

@@ -96,9 +96,10 @@ public struct AddAssetSheet: View {
     }
 
     private func save() {
-        let rawTicker = ticker.trimmingCharacters(in: .whitespaces)
-        store.addAsset(key: rawTicker.uppercased(), name: name.trimmingCharacters(in: .whitespaces),
-                       ticker: rawTicker,
+        // 新资产的 key/ticker 都写规范形式（基金 = 6 位、其余大写）；旧 key 不迁移（ADR 0010）。
+        let canonical = AssetTicker.canonical(ticker.trimmingCharacters(in: .whitespaces))
+        store.addAsset(key: canonical, name: name.trimmingCharacters(in: .whitespaces),
+                       ticker: canonical,
                        market: market,
                        assetClass: assetClass, currency: currency)
         dismiss()

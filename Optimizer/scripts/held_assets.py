@@ -15,9 +15,8 @@
 不联网、不落盘：行情取数全部经注入的 resolve（唯一网络入口在 services）。
 """
 
-import re
-
 import asset_classes as AC
+from asset_identity import canonical_ticker
 from market_data import SOURCES
 from params import GC_INTERNAL, JP_INTERNAL, US_INTERNAL
 
@@ -26,28 +25,11 @@ HELD_KEY_PREFIX = "H_"
 HELD_NAME_PREFIX = "[持仓] "
 HELD_LABEL = "持仓"
 
-# 境内基金代码：与 Swift 侧 `AppStore.fundCode` 同一正则
-# （6 位数字 + 可选份额/交易所后缀 `.CN_Fund` / `.SZ` / `.SH`）。
-# 用途：把持仓 ticker 归一成取数用的 6 位代码（"123456.CN_Fund" ↔ "123456"）；
-# 注意 A 股个股用 `.SS` 后缀（不匹配本正则），保持 Yahoo 口径。
-_SIX_DIGIT_RE = re.compile(r"^(\d{6})(?:\.(?:CN_FUND|SZ|SH))?$", re.IGNORECASE)
-
-
-def harmonize_held_ticker(raw):
-    """持仓 ticker → 归一化后的代码（6 位境内代码取数字；其余用 ticker 大写）。
-
-    >>> harmonize_held_ticker("123456.CN_Fund") == "123456"
-    >>> harmonize_held_ticker("qqq") == "QQQ"
-    """
-    if raw is None:
-        return ""
-    text = str(raw).strip()
-    if not text:
-        return ""
-    match = _SIX_DIGIT_RE.match(text)
-    if match is not None:
-        return match.group(1)
-    return text.upper()
+# 持仓 ticker 归一：唯一实现见 asset_identity（与 Swift AssetIdentity 同一张规则矩阵）。
+# 保留 harmonize_held_ticker 这个名字给既有调用方/测试（契约 §1.3）：
+# 6 位境内代码取数字（"123456.CN_Fund" ↔ "123456"），其余用 ticker 大写。
+# 注意 A 股个股用 .SS 后缀（不属于基金），保持 Yahoo 口径。
+harmonize_held_ticker = canonical_ticker
 
 
 def _internal_pool_keys():

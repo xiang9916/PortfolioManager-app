@@ -60,6 +60,21 @@ public enum AppPaths {
             .appendingPathComponent("tmp/extract_app.json")
     }
 
+    /// live 覆盖后的提取文件（优化运行与敏感性分析共用同一个文件名）。
+    /// 只有 `liveExtractURL()` 会写它；敏感性分析读它——两者必须指向同一个文件。
+    public static func liveExtractURL() -> URL {
+        extractJSONURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("extract_live.json")
+    }
+
+    /// 调 Python 子进程所需的三个不可变参数（优化运行 / 敏感性 / 宏观利率共用）。
+    public static func sidecarConfig() -> SidecarConfig {
+        SidecarConfig(interpreterPath: interpreterPath(),
+                      scriptsDir: scriptsURL(),
+                      currentDirectoryURL: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+    }
+
     /// Daily-backup directory (sibling of the active DB's parent).
     public static func backupsURL() -> URL {
         let parent = databaseURL().deletingLastPathComponent()
@@ -69,29 +84,21 @@ public enum AppPaths {
     }
 }
 
-/// Editable draft of a holding's fields (资产明细 editing).
-public struct HoldingDraft: Hashable {
-    public var quantity: Double
-    public var costBasis: Double
-    public var currency: String
-    public init(quantity: Double = 0, costBasis: Double = 0, currency: String = "CNY") {
-        self.quantity = quantity
-        self.costBasis = costBasis
-        self.currency = currency
-    }
-}
-
 /// Central @MainActor store: owns the DB + repository + optimizer and exposes
 /// observable state to all SwiftUI views.
 @MainActor
 @Observable
 public final class AppStore {
-    public let db: Database
-    public let repository: Repository
-    public let optimizer: OptimizationService
+    /// 三个 Core 对象都是**私有**：视图只能通过快照与意图方法驱动 App（ADR 0011）。
+    private let db: Database
+    private let repository: Repository
+    /// 只由 `OptimizationRunner` 使用；视图不再直接持有它。
+    private let optimizer: OptimizationService
 
     // 模块1 / 能力1
     public var allocation: AllocationSnapshot?
+    /// 组合估值的降级说明（缺价 / 缺汇率 / 币种不一致），供资产总览脚注展示。
+    public var valuationWarnings: [ValuationWarning] = []
     public var performancePoints: [PerformancePoint] = []
     public var performanceSummary: PerformanceSummary?
     public var benchmarkPoints: [PerformancePoint] = []  // 比较基准 (沪深300+标普500加权)
@@ -107,12 +114,17 @@ public final class AppStore {
 
     // 模块2
     public var perspectives: [AssetPerspectiveRow] = []
-    /// Editing drafts (assetKey -> draft). Populated on load; saved via savePerspectives().
-    public var holdingDrafts: [String: HoldingDraft] = [:]
+    /// 编辑草稿的唯一改动来源是 Core 的 `HoldingEditor`（有单测）；这里只暴露只读快照。
+    private var editor = HoldingEditor()
+    public var holdingDrafts: [String: HoldingDraft] { editor.drafts }
 
     // 能力4 财务分析 (重做: 逐季度底稿, 9 手动字段 + 派生行)
-    public var quarterlyReports: [QuarterlyReport] = []
-    @ObservationIgnored private var quarterlyPersistTask: Task<Void, Never>?
+    /// 底稿本体与落盘节奏在 Core 的 `QuarterlyDesk`（有单测）；这里只暴露只读快照。
+    private let desk: QuarterlyDesk
+    public var quarterlyReports: [QuarterlyReport] { desk.reports }
+
+    /// 外部世界的唯一入口（路径 / UserDefaults / 时钟）。注入后 AppModel 才能在测试里跑。
+    @ObservationIgnored private let env: AppEnvironment
 
     // 能力2 汇率 (币种→人民币), 自动抓取 + 手动可覆盖
     public var fxRates: [FxRate] = []
@@ -134,7 +146,9 @@ public final class AppStore {
     public var statusMessage: String?
     public var lastUpdated: String?
 
-    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    /// 「一次优化运行」的编排（Core 的 module）。主运行与新标的测试共用同一个实例，
+    /// 因此二者天然互斥（`isBusy`）。
+    @ObservationIgnored private let runner: OptimizationRunner
     @ObservationIgnored private var backupManager: BackupManager?
     @ObservationIgnored private var backupTask: Task<Void, Never>?
     public var lastBackupAt: String?
@@ -148,27 +162,31 @@ public final class AppStore {
     public var clearAssetsOnImport = false
     public var clearFinancialsOnImport = false
 
-    public init(db: Database, optimizer: OptimizationService) {
+    public init(db: Database, optimizer: OptimizationService,
+                env: AppEnvironment = .current) {
         self.db = db
         self.repository = Repository(db: db)
         self.optimizer = optimizer
+        self.runner = OptimizationRunner(driver: optimizer)
+        self.env = env
+        self.desk = QuarterlyDesk(persistence: QuarterlyDesk.Persistence(
+            upsert: { try db.upsertQuarterlyReports($0) },
+            remove: { try db.deleteQuarterlyReport(periodEnd: $0) },
+            rename: { try db.renameQuarterlyReport(from: $0, to: $1) }))
+        desk.onPersistFailure = { [weak self] message in
+            self?.statusMessage = "保存失败: " + message
+        }
     }
 
     /// Bootstrap the store using dev/AppPaths defaults.
     public static func makeDefault() -> AppStore? {
+        let env = AppEnvironment.current
         do {
-            let dbURL = AppPaths.databaseURL()
-            let db = try Database(path: dbURL.path)
-            let sidecar = PythonSidecar(
-                interpreterPath: AppPaths.interpreterPath(),
-                scriptsDir: AppPaths.scriptsURL(),
-                currentDirectoryURL: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
-            let logsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("tmp/optimizer_logs", isDirectory: true)
-            let optimizer = OptimizationService(db: db, sidecar: sidecar, logsDir: logsDir)
-            let store = AppStore(db: db, optimizer: optimizer)
-            // Restore persisted optimizer target return (if saved previously)
-            if let saved = UserDefaults.standard.object(forKey: "optimizer.targetReturn") as? Double {
+            let db = try Database(path: env.databaseURL.path)
+            let optimizer = OptimizationService(db: db, sidecar: env.makeSidecar(), logsDir: env.logsDir)
+            let store = AppStore(db: db, optimizer: optimizer, env: env)
+            // 目标收益率的持久化也走环境（视图不再直接碰 UserDefaults）。
+            if let saved = env.defaults.object(forKey: AppEnvironment.targetReturnKey) as? Double {
                 store.targetReturn = saved
             }
             store.startBackupScheduler()
@@ -178,11 +196,17 @@ public final class AppStore {
         }
     }
 
+    /// 设置优化目标收益率并持久化（视图只调这个方法）。
+    public func setTargetReturn(_ value: Double) {
+        targetReturn = value
+        env.defaults.set(value, forKey: AppEnvironment.targetReturnKey)
+    }
+
     // MARK: 能力3 — daily auto-backup scheduler
 
     /// Kick off a loop that checks hourly and creates one backup per day.
     public func startBackupScheduler() {
-        let bm = BackupManager(db: db, backupDir: AppPaths.backupsURL())
+        let bm = BackupManager(db: db, backupDir: env.backupsURL)
         backupManager = bm
         backupTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -201,22 +225,23 @@ public final class AppStore {
 
     public func loadAll() {
         do {
-            allocation = try repository.fetchAllocation()
-            let perf = try repository.fetchPerformance()
+            // 一次装配：allocation / perspectives / 股息 / 绩效 / 特别关注 共用同一个估值。
+            let valuation = try repository.loadValuation()
+            allocation = valuation.allocationSnapshot
+            valuationWarnings = valuation.warnings
+            let perf = try repository.fetchPerformance(valuation: valuation)
             performancePoints = perf.points
             performanceSummary = perf.summary
-            focusBoard = try repository.fetchFocusBoard()
-            dividendSummary = try repository.fetchDividendSummary()
-            perspectives = try repository.fetchAssetPerspectives()
-            holdingDrafts = Dictionary(uniqueKeysWithValues: perspectives.map {
-                ($0.assetKey, HoldingDraft(quantity: $0.quantity, costBasis: $0.costBasis,
-                                           currency: $0.currency))
-            })
+            focusBoard = try repository.fetchFocusBoard(valuation: valuation)
+            dividendSummary = try repository.fetchDividendSummary(valuation: valuation)
+            perspectives = try repository.fetchAssetPerspectives(valuation: valuation)
+            editor.seed(perspectives)
             fxRates = try db.fetchFxRates()
-            quarterlyReports = try repository.fetchQuarterlyReports()
+            desk.replaceAll(try repository.fetchQuarterlyReports())
             lastUpdated = DateFormatters.nowISO()
             statusMessage = nil
         } catch {
+            valuationWarnings = []
             statusMessage = "加载失败: \(error)"
         }
     }
@@ -260,20 +285,13 @@ public final class AppStore {
 
     // MARK: 模块2 / 能力4 — editing & save
 
-    public var hasUnsavedChanges: Bool {
-        for (key, draft) in holdingDrafts {
-            guard let row = perspectives.first(where: { $0.assetKey == key }) else { continue }
-            if draft.quantity != row.quantity || draft.costBasis != row.costBasis || draft.currency != row.currency {
-                return true
-            }
-        }
-        return false
-    }
+    /// 脏判定在 Core 的 `HoldingEditor`（有单测）。
+    public var hasUnsavedChanges: Bool { editor.isDirty(against: perspectives) }
 
     /// Persist all holding drafts back to the holdings table and reload.
     public func savePerspectives() {
         do {
-            for (key, draft) in holdingDrafts {
+            for (key, draft) in editor.drafts {
                 try db.updateHolding(assetKey: key, quantity: draft.quantity,
                                      costBasis: draft.costBasis, currency: draft.currency)
             }
@@ -285,15 +303,16 @@ public final class AppStore {
     }
 
     /// A two-way Binding into a holding draft's Double field.
-    public func holdingBinding(_ key: String, _ keyPath: WritableKeyPath<HoldingDraft, Double>) -> Binding<Double> {
+    public func holdingBinding(_ key: String,
+                               _ keyPath: WritableKeyPath<HoldingDraft, Double>) -> Binding<Double> {
         Binding(
-            get: { self.holdingDrafts[key]?[keyPath: keyPath] ?? 0 },
-            set: { v in
-                var d = self.holdingDrafts[key] ?? HoldingDraft()
-                d[keyPath: keyPath] = v
-                var copy = self.holdingDrafts
-                copy[key] = d
-                self.holdingDrafts = copy
+            get: { self.editor.draft(key)[keyPath: keyPath] },
+            set: { value in
+                if keyPath == \HoldingDraft.quantity {
+                    self.editor.setQuantity(key, value)
+                } else {
+                    self.editor.setCostBasis(key, value)
+                }
             }
         )
     }
@@ -301,39 +320,33 @@ public final class AppStore {
     // MARK: 能力4 — 逐季度财务分析底稿
 
     /// 网格内联编辑: 更新某季度某手动字段 (内存立即生效, 派生行实时重算; 落盘防抖).
+    /// 防抖与「删除必须取消未落盘快照」的时序规则在 Core 的 `QuarterlyDesk`（有单测）。
     public func updateQuarterlyField(periodEnd: String, field: QuarterlyField, value: Double?) {
-        guard let i = quarterlyReports.firstIndex(where: { $0.periodEnd == periodEnd }) else { return }
-        quarterlyReports[i][keyPath: field.keyPath] = value
-        scheduleQuarterlyPersist()
+        desk.update(periodEnd: periodEnd, field: field, value: value)
     }
 
     /// 添加一个季度列 (默认 = 最后一列之后的下一个季末; 首列 = 当前季末).
     public func addQuarter() {
-        let next: String
-        if let last = quarterlyReports.map(\.periodEnd).max(),
-           let n = QuarterlyMetrics.nextQuarterEnd(after: last) {
-            next = n
-        } else {
-            next = QuarterlyMetrics.currentQuarterEnd()
+        switch desk.add() {
+        case .added(let end):
+            statusMessage = "已添加季度 " + QuarterlyMetrics.quarterLabel(end)
+        case .duplicate(let end):
+            statusMessage = "季度 \(end) 已存在"
+        case .failed(let message):
+            statusMessage = "保存失败: " + message
+        default:
+            break
         }
-        guard !quarterlyReports.contains(where: { $0.periodEnd == next }) else {
-            statusMessage = "季度 \(next) 已存在"
-            return
-        }
-        quarterlyReports.append(QuarterlyReport(periodEnd: next, source: "manual"))
-        quarterlyReports.sort { $0.periodEnd < $1.periodEnd }
-        flushQuarterlyPersist()
-        statusMessage = "已添加季度 " + QuarterlyMetrics.quarterLabel(next)
     }
 
     public func deleteQuarter(periodEnd: String) {
-        quarterlyPersistTask?.cancel()   // 取消未落盘快照, 防止删行被旧快照复活
-        quarterlyReports.removeAll { $0.periodEnd == periodEnd }
-        do {
-            try db.deleteQuarterlyReport(periodEnd: periodEnd)
+        switch desk.delete(periodEnd: periodEnd) {
+        case .deleted:
             statusMessage = "已删除季度"
-        } catch {
-            statusMessage = "删除失败: \(error)"
+        case .failed(let message):
+            statusMessage = "删除失败: " + message
+        default:
+            break
         }
     }
 
@@ -362,44 +375,18 @@ public final class AppStore {
 
     /// 修改季度列的截止日 (表头编辑).
     public func renameQuarter(from oldEnd: String, to newEnd: String) {
-        let trimmed = newEnd.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, trimmed != oldEnd else { return }
-        guard !quarterlyReports.contains(where: { $0.periodEnd == trimmed }) else {
-            statusMessage = "季度 \(trimmed) 已存在"
-            return
+        switch desk.rename(from: oldEnd, to: newEnd) {
+        case .renamed(let to):
+            statusMessage = "已改为 " + to
+        case .duplicate(let end):
+            statusMessage = "季度 \(end) 已存在"
+        case .failed(let message):
+            statusMessage = "修改失败: " + message
+        case .unchanged:
+            break
+        default:
+            break
         }
-        do {
-            try db.renameQuarterlyReport(from: oldEnd, to: trimmed)
-            quarterlyPersistTask?.cancel()
-            if let i = quarterlyReports.firstIndex(where: { $0.periodEnd == oldEnd }) {
-                quarterlyReports[i].periodEnd = trimmed
-                quarterlyReports.sort { $0.periodEnd < $1.periodEnd }
-            }
-            flushQuarterlyPersist()
-            statusMessage = "已改为 " + trimmed
-        } catch {
-            statusMessage = "修改失败: \(error)"
-        }
-    }
-
-    /// 防抖落盘: 停止输入 0.6s 后整表 upsert (表小, 整表写无压力).
-    private func scheduleQuarterlyPersist() {
-        quarterlyPersistTask?.cancel()
-        let snapshot = quarterlyReports
-        quarterlyPersistTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(0.6))
-            guard !Task.isCancelled else { return }
-            do { try self?.db.upsertQuarterlyReports(snapshot) }
-            catch { self?.statusMessage = "保存失败: \(error)" }
-        }
-    }
-
-    /// 立即落盘 (添加/删除/改名等结构性操作后调用).
-    private func flushQuarterlyPersist() {
-        quarterlyPersistTask?.cancel()
-        quarterlyPersistTask = nil
-        do { try db.upsertQuarterlyReports(quarterlyReports) }
-        catch { statusMessage = "保存失败: \(error)" }
     }
 
     // MARK: 能力2 — 标的增删 + 联网校验 + 汇率
@@ -413,7 +400,7 @@ public final class AppStore {
 
     /// Validate a ticker online; 6位基金代码走天天基金, 其余走 Yahoo Finance。
     public func lookupSymbol(_ symbol: String) async -> (valid: Bool, currency: String, name: String?, message: String) {
-        if let code = Self.fundCode(symbol) {
+        if let code = AssetTicker.fundCode(symbol) {
             let src = EastmoneySource()
             do {
                 let info = try await src.lookup(symbol: code)
@@ -442,10 +429,10 @@ public final class AppStore {
         do {
             // New targets get sort_order = max+1 → appended at the end of the list.
             let nextOrder = ((try? db.fetchAssets())?.compactMap { $0.sortOrder }.max() ?? 0) + 1
-            let asset = Asset(key: key, name: name, ticker: ticker, market: market,
-                              assetClass: assetClass,
-                              pool: AssetMarket.pool(market: market?.rawValue, ticker: ticker ?? key,
-                                                     currency: currency),
+            let identity = AssetIdentity(key: key, ticker: ticker,
+                                         marketRaw: market?.rawValue, currency: currency)
+            let asset = Asset(key: key, name: name, ticker: ticker, market: identity.market,
+                              assetClass: assetClass, pool: identity.pool,
                               currency: currency, source: "manual",
                               sortOrder: nextOrder)
             try db.insertAsset(asset)
@@ -466,9 +453,9 @@ public final class AppStore {
         rows.move(fromOffsets: source, toOffset: destination)
         do {
             try db.updateAssetSortOrders(rows.enumerated().map { ($0.element.assetKey, Double($0.offset)) })
-            let drafts = holdingDrafts
+            let drafts = editor.drafts
             loadAll()
-            holdingDrafts = drafts  // 拖动排序不应清掉「编辑持仓」里未保存的草稿
+            editor.restore(drafts)  // 拖动排序不应清掉「编辑持仓」里未保存的草稿
         } catch {
             statusMessage = "保存排序失败: \(error)"
         }
@@ -488,36 +475,23 @@ public final class AppStore {
     /// Two-way Binding into a holding draft's currency (String).
     public func holdingCurrencyBinding(_ key: String) -> Binding<String> {
         Binding(
-            get: { self.holdingDrafts[key]?.currency ?? "CNY" },
-            set: { v in
-                var d = self.holdingDrafts[key] ?? HoldingDraft()
-                d.currency = v
-                var copy = self.holdingDrafts
-                copy[key] = d
-                self.holdingDrafts = copy
-            }
+            get: { self.editor.draft(key).currency },
+            set: { self.editor.setCurrency(key, $0) }
         )
     }
 
     /// Auto-fetch CNY rates for every non-CNY currency in the portfolio (能力1).
+    /// 取数/落库/失败分组在 `FxRateSync`（Core）；这里只决定币种清单。
     public func refreshFxRates() async {
         statusMessage = "正在更新汇率…"
         var currencies = Set(perspectives.map { $0.currency }).filter { $0 != "CNY" }
         if currencies.isEmpty { currencies = ["USD", "HKD", "JPY", "SGD"] }
         let src = YahooFinanceSource()
-        var newRates: [FxRate] = []
-        var failed: [String] = []
-        for ccy in currencies.sorted() {
-            do {
-                let info = try await src.lookup(symbol: ccy + "CNY=X")
-                guard let price = info.price, price > 0 else { failed.append(ccy); continue }
-                newRates.append(FxRate(currency: ccy, rateToCny: price,
-                                       asOfDate: Self.todayString(), source: "yahoo"))
-            } catch { failed.append(ccy) }
+        let report = await FxRateSync.run(currencies: Array(currencies), now: Date(), into: db) { ccy in
+            try await src.lookup(symbol: ccy + "CNY=X").price
         }
-        if !newRates.isEmpty { try? db.upsertFxRates(newRates) }
         loadAll()
-        statusMessage = "汇率更新完成" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个币种")
+        statusMessage = "汇率更新完成" + (report.failed.isEmpty ? "" : "，失败 \(report.failed.count) 个币种")
     }
 
     /// Manual override of a single FX rate.
@@ -534,310 +508,136 @@ public final class AppStore {
 
     // MARK: 能力1 — data refresh (auto-fetch public quotes)
 
-    /// Extract a 6-digit fund code from a ticker/key (e.g. "000001.CN_Fund" / "159307.SZ" → "000001" / "159307").
-    /// Bare 6-digit codes are also treated as funds. Returns nil otherwise (Yahoo symbols).
-    private static func fundCode(_ ticker: String) -> String? {
-        let pattern = #"^(\d{6})(\.(CN_Fund|SZ|SH))?$"#
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let ns = ticker as NSString
-        let m = re.firstMatch(in: ticker, range: NSRange(location: 0, length: ns.length))
-        guard let m, m.numberOfRanges > 1, m.range(at: 1).location != NSNotFound else { return nil }
-        return ns.substring(with: m.range(at: 1))
-    }
-
-    /// Resolve an asset to (data source, symbol). 境内基金(6位代码) → 天天基金, 其余 → Yahoo.
+    /// Resolve an asset to (data source, symbol). 唯一解析入口 = AssetIdentity（ADR 0010）：
+    /// 基金代码（大小写不敏感）→ 天天基金；目录 key → 目录里的源；其余 → Yahoo。
     private func resolveDataSource(asset: Asset) -> (source: any DataSource, symbol: String)? {
-        let ticker = asset.ticker ?? asset.key
-        if let code = Self.fundCode(ticker) {
-            return (EastmoneySource(), code)
+        guard let feed = AssetIdentity(asset).feed else { return nil }
+        switch feed.kind {
+        case .fund: return (EastmoneySource(), feed.symbol)
+        case .yahoo: return (YahooFinanceSource(), feed.symbol)
         }
-        if let ref = AssetCatalog.ref(for: asset.key) {
-            return ref.source == .fund ? (EastmoneySource(), ref.symbol) : (YahooFinanceSource(), ref.symbol)
-        }
-        if !ticker.isEmpty {
-            return (YahooFinanceSource(), ticker)
-        }
-        return nil
     }
 
     /// 刷新行情 + 股息 (能力1)。
     ///
-    /// 全网请求并发 (限流 5), **子任务只 fetch 不碰数据库**, 全部完成后回到
-    /// MainActor 串行批量落库 —— `Database` 没有队列/锁, 并发写 SQLite 会
-    /// `SQLITE_BUSY` / 事务交错 (决策 Q31/Q33/Q34)。
-    /// 股息是低频数据: 7 天内且同一年抓过就跳过 (缓存), 跨年自动重抓 (决策 Q17/Q24)。
+    /// 编排只剩「组计划 → 跑同步 → 更新文案 → 重载 → 拉宏观利率」；并发限流、股息缓存、
+    /// 批量落库、失败聚合全在 `MarketDataSync`（Core，有单测）。
     /// 失败计数与 statusMessage 语义保持与改造前一致。
     public func refreshPrices() async {
         statusMessage = "正在更新行情…"
         let assets = (try? db.fetchAssets()) ?? []
         let assetByKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
         let metas = (try? db.fetchDividendFetchMetas()) ?? [:]
-        let years = dividendYears()
+        let now = Date()
+        let years = MarketDataSync.dividendYears(now: now)
 
-        var jobs: [RefreshJob] = []
-        for row in perspectives {
+        let targets: [SyncPlan.Target] = perspectives.compactMap { row in
             guard let a = assetByKey[row.assetKey],
-                  let (source, symbol) = resolveDataSource(asset: a) else { continue }
-            let skipDividends = metas[row.assetKey].map { dividendCacheFresh($0) } ?? false
-            jobs.append(RefreshJob(assetKey: row.assetKey, source: source,
-                                   symbol: symbol, skipDividends: skipDividends))
+                  let (source, symbol) = resolveDataSource(asset: a) else { return nil }
+            let skip = metas[row.assetKey].map {
+                MarketDataSync.cacheIsFresh($0, now: now)
+            } ?? false
+            return SyncPlan.Target(assetKey: row.assetKey, source: source,
+                                   symbol: symbol, skipDividends: skip)
         }
 
-        // 网络阶段: 并发 (限流), 无数据库访问.
-        let outcomes = await withTaskGroup(of: RefreshOutcome.self) { group -> [RefreshOutcome] in
-            var collected: [RefreshOutcome] = []
-            var next = 0
-            let limit = min(refreshConcurrency, jobs.count)
-            while next < limit {
-                let job = jobs[next]; next += 1
-                group.addTask { await runRefreshJob(job, years: years) }
-            }
-            while let out = await group.next() {
-                collected.append(out)
-                if next < jobs.count {
-                    let job = jobs[next]; next += 1
-                    group.addTask { await runRefreshJob(job, years: years) }
-                }
-            }
-            return collected
-        }
-
-        // 落库阶段: 单线程批量写入.
-        var updated = 0
-        var failed: [String] = []
-        var newQuotes: [Quote] = []
-        var dividendUpdates: [(assetKey: String, records: [DividendRecord],
-                               meta: DividendFetchMeta)] = []
-        for out in outcomes {
-            var writeFailed = false
-            updated += out.points.count
-            if !out.points.isEmpty {
-                // 落库失败也要计入失败数 (与改造前 try db.upsertPrices 的语义一致).
-                do { try db.upsertPrices(out.points) } catch { writeFailed = true }
-            }
-            if out.priceFailed || writeFailed { failed.append(out.assetKey) }
-            if let q = out.quote { newQuotes.append(q) }
-            if let status = out.dividendStatus {
-                let records = (out.dividends ?? []).map {
-                    DividendRecord(assetKey: out.assetKey, exDate: $0.exDate,
-                                   amount: $0.amount, currency: $0.currency,
-                                   source: out.dividendSource ?? "")
-                }
-                dividendUpdates.append((
-                    assetKey: out.assetKey,
-                    records: records,
-                    meta: DividendFetchMeta(assetKey: out.assetKey, status: status,
-                                            source: out.dividendSource,
-                                            fetchedAt: out.dividendStamp ?? dividendStampNow())))
-            }
-        }
-        if !newQuotes.isEmpty { try? db.upsertQuotes(newQuotes) }
-        if !dividendUpdates.isEmpty { try? db.replaceDividendsBatch(dividendUpdates) }
-        statusMessage = "行情更新完成：\(updated) 个数据点" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个")
+        let report = await MarketDataSync.run(
+            SyncPlan(targets: targets, dividendYears: years, now: now), into: db)
+        statusMessage = "行情更新完成：\(report.pricePointCount) 个数据点"
+            + (report.failedAssetKeys.isEmpty ? "" : "，失败 \(report.failedAssetKeys.count) 个")
         loadAll()
         await refreshMacroRates()
     }
 
     // MARK: 能力2 — macro rates (动态 RF)
 
-    /// Fetch CN/US 10-year treasury yields via akshare (Python sidecar) and cache
-    /// into macro_rates. RF = ov_w * us_10y + dom_w * cn_10y replaces params.py's
-    /// hardcoded 0.025 — reflects the portfolio's actual domestic/overseas opportunity cost.
-    /// akshare.bond_zh_us_rate returns 百分点 (e.g. 4.69); the script converts to fraction.
+    /// 拉 CN/US 10 年期国债收益率（akshare 子进程）并缓存进 `macro_rates`。
+    /// 本体在 `MacroRateSync`（Core）：解析是纯函数、子进程在后台线程跑 —— 不再卡主线程。
     public func refreshMacroRates() async {
-        let sidecar = optimizer.sidecar
-        let scriptPath = sidecar.scriptURL("fetch_macro_rates.py").path
-        guard FileManager.default.fileExists(atPath: sidecar.interpreterPath),
-              FileManager.default.fileExists(atPath: scriptPath) else { return }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: sidecar.interpreterPath)
-        process.arguments = [scriptPath]
-        if let cwd = sidecar.currentDirectoryURL { process.currentDirectoryURL = cwd }
-        process.environment = ProcessInfo.processInfo.environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0,
-                  let data = try? pipe.fileHandleForReading.readToEnd(),
-                  let raw = String(data: data, encoding: .utf8),
-                  let json = raw.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else { return }
-            if let cn = obj["cn_10y"] as? Double,
-               let us = obj["us_10y"] as? Double,
-               let date = obj["date"] as? String {
-                try? db.upsertMacroRate("cn_10y", value: cn, asOfDate: date, source: "akshare")
-                try? db.upsertMacroRate("us_10y", value: us, asOfDate: date, source: "akshare")
-            }
-        } catch {
-            // macro rates are best-effort; failure falls back to params.py hardcoded RF.
-        }
+        await MacroRateSync.refresh(config: env.sidecarConfig, into: db)
     }
 
     // MARK: 能力1 — 比较基准 (沪深300 + 标普500 加权, 与优化器基准一致)
 
-    /// 境内/境外池权重 — 来自资产总览的实时统计 (池由每个标的的**市场**派生),
-    /// 不再使用提取文件的预填比例; 无持仓数据时回退 50/50.
-    /// 池只有境内/境外两种, 因此两者必然归一 (旧的「跨池余量」已随 cross 一起废除)。
-    public var livePoolWeights: (domestic: Double, overseas: Double) {
-        guard let alloc = allocation, alloc.totalValue > 0 else { return (0.5, 0.5) }
-        let dom = alloc.domesticValue / alloc.totalValue
-        let ov = alloc.overseasValue / alloc.totalValue
-        let used = dom + ov
-        guard used > 0 else { return (0.5, 0.5) }
-        return (dom / used, ov / used)
+    /// 境内/境外池权重 — 来自组合估值的投影（池由每个标的的**市场**派生）。
+    /// 池只有境内/境外两种，因此两者必然归一；无持仓时回退 50/50。
+    public var poolShares: (domestic: Double, overseas: Double) {
+        allocation?.poolShares ?? (0.5, 0.5)
     }
 
     /// Fetch and store benchmark history (SPY + 000300.SS weighted by the live
     /// domestic/overseas pool split from 资产总览). Falls back to 50/50 when no data.
+    /// 合成规则（并集/前向填充/归一/裁剪）在 `BenchmarkSeries`（Core，纯函数）。
     public func fetchBenchmark() async {
-        let w = livePoolWeights
-        let domW = w.domestic
-        let overW = w.overseas
+        let weights = poolShares
         let src = YahooFinanceSource()
-        var spyPts: [PricePoint] = []
-        var csiPts: [PricePoint] = []
-        do { spyPts = try await src.fetchHistory(symbol: "SPY") } catch {}
-        do { csiPts = try await src.fetchHistory(symbol: "000300.SS") } catch {}
+        var spyPoints: [PricePoint] = []
+        var csiPoints: [PricePoint] = []
+        do { spyPoints = try await src.fetchHistory(symbol: "SPY") } catch {}
+        do { csiPoints = try await src.fetchHistory(symbol: "000300.SS") } catch {}
         // Try alternative CSI300 symbol if 000300.SS fails
-        if csiPts.isEmpty { do { csiPts = try await src.fetchHistory(symbol: "510300.SS") } catch {} }
-        guard !spyPts.isEmpty || !csiPts.isEmpty else { return }
-        // Build union of dates, forward-filled, rebased to 1.0 at first observation, weighted.
-        var dateSet = Set<String>()
-        var spyMap: [String: Double] = [:]
-        var csiMap: [String: Double] = [:]
-        if let base = spyPts.first?.close, base > 0 {
-            for p in spyPts { spyMap[p.date] = p.close / base; dateSet.insert(p.date) }
-        }
-        if let base = csiPts.first?.close, base > 0 {
-            for p in csiPts { csiMap[p.date] = p.close / base; dateSet.insert(p.date) }
-        }
-        let dates = dateSet.sorted()
-        var lastSpy = 1.0, lastCsi = 1.0
-        var allPts: [PerformancePoint] = []
-        for d in dates {
-            if let v = spyMap[d] { lastSpy = v }
-            if let v = csiMap[d] { lastCsi = v }
-            let weighted = lastCsi * domW + lastSpy * overW
-            allPts.append(PerformancePoint(date: d, value: weighted))
-        }
-        // Trim to last 3 years to align with fetchPerformance(lookbackYears: 3).
-        // Rebase the trimmed series to 1.0 at its first point so the benchmark
-        // starts at the same baseline as the portfolio series.
-        let cutoff = Calendar.current.date(byAdding: .year, value: -3, to: Date()) ?? Date()
-        let fmt = DateFormatters.utcDay
-        let cutoffStr = fmt.string(from: cutoff)
-        var trimmed = allPts.filter { $0.date >= cutoffStr }
-        if let base = trimmed.first?.value, base > 0 {
-            trimmed = trimmed.map { PerformancePoint(date: $0.date, value: $0.value / base) }
-        }
-        benchmarkPoints = trimmed
+        if csiPoints.isEmpty { do { csiPoints = try await src.fetchHistory(symbol: "510300.SS") } catch {} }
+        guard !spyPoints.isEmpty || !csiPoints.isEmpty else { return }
+        benchmarkPoints = BenchmarkSeries.compose(spy: spyPoints, csi: csiPoints,
+                                                  domesticWeight: weights.domestic,
+                                                  overseasWeight: weights.overseas)
     }
 
     // MARK: 能力2 — optimizer
 
-    /// Copy of extract_app.json with pool stats + us_equity + domestic_holdings + held_assets + rf
-    /// overwritten by LIVE 资产总览/资产明细 statistics — 优化器不再使用提取时的冻结快照.
-    /// - 境内/境外权重 = 占总市值比例 (未归一化); 池由每个标的的市场派生, 只有两种, 必然归一.
-    /// - us_equity.holdings = 实时美股持仓 (替代导入日冻结值 → O_US_CORE 聚合 mu/vol + stage2 优先级).
-    /// - domestic_holdings = 实时境内基金持仓 (动态锚定, 替代 params.py 写死的 fund_code).
-    /// - held_assets = 全部 value>0 持仓 (候选目录外的持仓由 Python 侧决定是否注入为 what-if 资产).
-    /// - rf = 池比例加权中美10年国债收益率 (params.py 里不写死利率，取不到就按 0 计).
+    /// 组装 live 提取文件：把「资产总览 / 资产明细」的实时统计写进提取文件的一份副本。
+    ///
+    /// 覆盖规则（池权重 / us_equity / domestic_holdings / held_assets / RF）的**本体在
+    /// `LiveExtract`（PortfolioCore，有单测）**；这里只负责取数与落盘。
+    /// 优化运行与敏感性分析读的是**同一个**文件（`env.liveExtractURL`）。
     private func liveExtractURL() -> URL? {
-        let src = AppPaths.extractJSONURL()
-        guard FileManager.default.fileExists(atPath: src.path),
-              let data = try? Data(contentsOf: src),
-              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        let src = env.extractURL
+        guard let data = try? Data(contentsOf: src),
+              let base = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
 
-        // Pool stats (R5+): live 境内/境外 比例.
-        var domW = 0.0, ovW = 0.0
-        if let alloc = allocation, alloc.totalValue > 0 {
-            obj["pool_mode"] = "app_live"
-            obj["domestic_value"] = alloc.domesticValue
-            obj["overseas_value"] = alloc.overseasValue
-            obj["total_value"] = alloc.totalValue
-            domW = alloc.domesticValue / alloc.totalValue
-            ovW = alloc.overseasValue / alloc.totalValue
-            obj["domestic_weight"] = domW
-            obj["overseas_weight"] = ovW
-        }
-
-        // us_equity: live 美股持仓 (替代导入时的冻结快照).
         let assets = (try? db.fetchAssets()) ?? []
         let byKey = Dictionary(uniqueKeysWithValues: assets.map { ($0.key, $0) })
-        let usRows = perspectives.filter { $0.assetClass == "us_equity" && $0.valueCny > 0 }
-        if !usRows.isEmpty {
-            let totalUs = usRows.reduce(0.0) { $0 + $1.valueCny }
-            let holdings = usRows.sorted { $0.valueCny > $1.valueCny }.map { row -> [String: Any] in
-                let ticker = (byKey[row.assetKey]?.ticker) ?? row.assetKey
-                return [
-                    "ticker": ticker,
-                    "name": row.name,
-                    "value_cny": row.valueCny,
-                    "weight": totalUs > 0 ? row.valueCny / totalUs : 0,
-                ]
-            }
-            obj["us_equity"] = ["total_value": totalUs, "holdings": holdings] as [String: Any]
-        }
-        // 美股为空时跳过覆盖 → 保留原值 (Python us_core_params 空权重会 div-zero, 不可覆盖为空).
-
-        // domestic_holdings: live 境内基金持仓 (动态锚定, 替代 params.py 写死的 fund_code).
-        let domFunds: [[String: Any]] = perspectives.filter { $0.pool == .domestic }
-            .compactMap { row -> [String: Any]? in
-                let a = byKey[row.assetKey]
-                let raw = a?.ticker ?? row.assetKey
-                guard let code = Self.fundCode(raw) else { return nil }  // 只取 6 位基金代码
-                return ["code": code, "name": row.name, "value_cny": row.valueCny]
-            }
-        if !domFunds.isEmpty { obj["domestic_holdings"] = domFunds }
-
-        // held_assets: **全部** value>0 的持仓（不只美股/境内基金）。Python 侧据此判断哪些持仓
-        // 不在候选目录内、需要按 what-if 口径注入候选池 —— 此前这类持仓被静默丢弃。
-        // ticker/market/asset_class 关联 assets 表；pool 用读路径派生值；weight = 占总持仓市值比例。
-        let heldRows = perspectives.filter { $0.valueCny > 0 }
-        let heldTotal = heldRows.reduce(0.0) { $0 + $1.valueCny }
-        let heldAssets: [[String: Any]] = heldRows.sorted { $0.valueCny > $1.valueCny }.map { row in
+        let rows = perspectives.map { row -> LiveExtract.Row in
             let a = byKey[row.assetKey]
-            return [
-                "ticker": a?.ticker ?? row.assetKey,
-                "name": row.name,
-                "market": a?.market?.rawValue ?? row.market?.rawValue ?? "",
-                "asset_class": a?.assetClass ?? row.assetClass,
-                "pool": row.pool.rawValue,
-                "value_cny": row.valueCny,
-                "weight": heldTotal > 0 ? row.valueCny / heldTotal : 0,
-            ]
+            return LiveExtract.Row(assetKey: row.assetKey,
+                                   ticker: a?.ticker,
+                                   name: row.name,
+                                   assetMarket: a?.market?.rawValue,
+                                   rowMarket: row.market?.rawValue,
+                                   assetClass: row.assetClass,
+                                   storedAssetClass: a?.assetClass,
+                                   pool: row.pool.rawValue,
+                                   valueCny: row.valueCny)
         }
-        obj["held_assets"] = heldAssets
-        // 开关: 允许 Python 侧把目录外持仓注入为 what-if 资产（缺键 = 旧行为）。
-        obj["include_unmodeled_holdings"] = true
-        // 开关: Q2 锚定所需的 sleeve_params 由 Python 侧按此开关决定是否写进 detail/summary。
-        // App 必须置 true；CLI / 旧提取文件不写 → 保持逐字节兼容。
-        obj["emit_sensitivity_anchor"] = true
-
-        // RF: 池比例加权中美10年国债收益率 (替代 params.py 写死 0.025).
-        if let cn = try? db.fetchMacroRate("cn_10y")?.value,
-           let us = try? db.fetchMacroRate("us_10y")?.value,
-           domW > 0 || ovW > 0 {
-            let rf = ovW * us + domW * cn
-            obj["rf"] = rf
+        let alloc = allocation.map { a in
+            LiveExtract.Allocation(totalValue: a.totalValue,
+                                   domesticValue: a.domesticValue,
+                                   overseasValue: a.overseasValue,
+                                   domesticWeight: a.poolShares.domestic,
+                                   overseasWeight: a.poolShares.overseas)
         }
-
-        let dst = src.deletingLastPathComponent().appendingPathComponent("extract_live.json")
+        let input = LiveExtract.Input(allocation: alloc, rows: rows,
+                                      cn10y: try? db.fetchMacroRate("cn_10y")?.value,
+                                      us10y: try? db.fetchMacroRate("us_10y")?.value)
+        let obj = LiveExtract.apply(to: base, input)
+        let dst = env.liveExtractURL
         guard let out = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
         do { try out.write(to: dst) } catch { return nil }
         return dst
     }
 
+    /// 提取文件缺失时的提示（路径取本次解析到的那一个）。
+    private static func missingExtractMessage(_ url: URL) -> String {
+        "未找到优化器输入文件 extract_app.json：\n\(url.path)\n\n"
+            + "请先生成提取文件（终端执行 pm-cli extract <表格文件路径>），"
+            + "再把生成的 extract_app.json 放到上面这个目录后重试。"
+    }
+
     public func runOptimization() {
         guard !isOptimizing, !isTestOptimizing else { return }
-        let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
+        let extract = liveExtractURL() ?? env.extractURL
         guard FileManager.default.fileExists(atPath: extract.path) else {
-            optimizeError = "未找到优化器输入文件 extract_app.json：\n\(extract.path)\n\n"
-                + "请先生成提取文件（终端执行 pm-cli extract <表格文件路径>），"
-                + "再把生成的 extract_app.json 放到上面这个目录后重试。"
+            optimizeError = Self.missingExtractMessage(extract)
             return
         }
         isOptimizing = true
@@ -845,30 +645,12 @@ public final class AppStore {
         optimizeError = nil
         lastOptimization = nil
 
-        do {
-            _ = try optimizer.start(extractJSON: extract, targetReturn: targetReturn)
-            pollTask = Task { [weak self] in
-                guard let self else { return }
-                while self.optimizer.isRunning {
-                    let fresh = self.optimizer.pollSteps()
-                    if !fresh.isEmpty { self.optimizeSteps.append(contentsOf: fresh) }
-                    try? await Task.sleep(for: .milliseconds(300))
-                }
-                do {
-                    let out = try self.optimizer.finalize()
-                    self.lastOptimization = out.result
-                    self.optimizeError = out.error
-                    if !out.steps.isEmpty { self.optimizeSteps = out.steps }
-                } catch {
-                    self.optimizeError = String(describing: error)
-                }
-                self.isOptimizing = false
-                self.loadAll()
-                Task { await self.fetchBenchmark() }  // refresh benchmark with new weights
+        let request = OptimizationRequest(extract: extract, targetReturn: targetReturn)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runner.run(request) { event in
+                self.consume(event, isTest: false)
             }
-        } catch {
-            optimizeError = String(describing: error)
-            isOptimizing = false
         }
     }
 
@@ -876,16 +658,14 @@ public final class AppStore {
 
     /// 临时加入标的重跑一次优化。结果写入 testOptimization（「测试结果」弹窗），
     /// 不影响 lastOptimization 与资产总览数据; 仅 optimization_runs 留痕
-    /// (paramsDesc 带 test=...)。与普通优化互斥。
+    /// (paramsDesc 带 test=...)。与普通优化互斥（共用同一个 runner）。
     /// testClass: 标的类别 broad / strategy / active（见 asset_classes.py 的口径说明），
     /// 决定 μ 的构造方式与历史窗口（σ 一律取历史年化波动，无人工下限）；缺省 active。
     public func runTestOptimization(tickers: [String], testClass: String = "active") {
         guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }
-        let extract = liveExtractURL() ?? AppPaths.extractJSONURL()
+        let extract = liveExtractURL() ?? env.extractURL
         guard FileManager.default.fileExists(atPath: extract.path) else {
-            testOptimizeError = "未找到优化器输入文件 extract_app.json：\n\(extract.path)\n\n"
-                + "请先生成提取文件（终端执行 pm-cli extract <表格文件路径>），"
-                + "再把生成的 extract_app.json 放到上面这个目录后重试。"
+            testOptimizeError = Self.missingExtractMessage(extract)
             return
         }
         isTestOptimizing = true
@@ -894,43 +674,81 @@ public final class AppStore {
         testOptimization = nil
         testTickersUsed = tickers
 
-        do {
-            _ = try optimizer.start(extractJSON: extract, targetReturn: targetReturn,
-                                    testTickers: tickers, testClass: testClass)
-            pollTask = Task { [weak self] in
-                guard let self else { return }
-                while self.optimizer.isRunning {
-                    let fresh = self.optimizer.pollSteps()
-                    if !fresh.isEmpty { self.testSteps.append(contentsOf: fresh) }
-                    try? await Task.sleep(for: .milliseconds(300))
-                }
-                do {
-                    let out = try self.optimizer.finalize()
-                    self.testOptimization = out.result
-                    self.testOptimizeError = out.error
-                    if !out.steps.isEmpty { self.testSteps = out.steps }
-                } catch {
-                    self.testOptimizeError = String(describing: error)
-                }
-                self.isTestOptimizing = false
+        let request = OptimizationRequest(extract: extract, targetReturn: targetReturn,
+                                          testTickers: tickers, testClass: testClass)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runner.run(request) { event in
+                self.consume(event, isTest: true)
             }
-        } catch {
-            testOptimizeError = String(describing: error)
-            isTestOptimizing = false
         }
+    }
+
+    /// 把一次运行的事件写回 store 状态 —— 主运行与新标的测试只差「写哪一组字段」。
+    private func consume(_ event: OptimizationEvent, isTest: Bool) {
+        switch event {
+        case .started:
+            break
+        case .steps(let fresh):
+            if isTest {
+                testSteps.append(contentsOf: fresh)
+            } else {
+                optimizeSteps.append(contentsOf: fresh)
+            }
+        case .finished(let out):
+            if isTest {
+                testOptimization = out.result
+                testOptimizeError = out.error
+                if !out.steps.isEmpty { testSteps = out.steps }
+                isTestOptimizing = false
+            } else {
+                lastOptimization = out.result
+                optimizeError = out.error
+                if !out.steps.isEmpty { optimizeSteps = out.steps }
+                isOptimizing = false
+                loadAll()
+                Task { await fetchBenchmark() }  // 用新权重刷新基准线
+            }
+        case .failed(let message):
+            if isTest {
+                testOptimizeError = message
+                isTestOptimizing = false
+            } else {
+                optimizeError = message
+                isOptimizing = false
+            }
+        }
+    }
+
+    // MARK: 能力2 — 敏感性分析
+
+    /// 敏感性分析：与结果页同源（读同一份 live 提取文件），在**后台线程**执行。
+    /// 一次扫描约 1–3 分钟；调用方必须 await（过去在 View 里同步跑 sidecar → 主线程卡死）。
+    public func runSensitivity(for result: OptimizationResult) async throws -> SensitivityAnalysisResult {
+        let extract = env.liveExtractURL
+        guard FileManager.default.fileExists(atPath: extract.path) else {
+            throw SensitivityRunError.missingExtract(extract.path)
+        }
+        return try await OptimizationService.runSensitivityOffMain(
+            config: env.sidecarConfig,
+            extractJSON: extract,
+            anchor: SensitivityAnchor(targetReturn: result.targetReturn,
+                                      sleeve: result.sleeveParams,
+                                      actualReturn: result.portfolio.expectedReturn,
+                                      volatility: result.portfolio.volatility))
     }
 
     // MARK: 能力3 — 备份数据导入/导出 (可移植 JSON)
 
     public func exportBackup(to url: URL) throws {
         // 财务分析字段是防抖落盘 (0.6s), 导出前先 flush, 避免刚录入的数据丢在内存里.
-        flushQuarterlyPersist()
-        let bm = BackupManager(db: db, backupDir: AppPaths.backupsURL())
+        desk.flush()
+        let bm = BackupManager(db: db, backupDir: env.backupsURL)
         try bm.exportJSON(to: url)
     }
 
     public func importBackup(from url: URL, clearAssets: Bool, clearFinancials: Bool) async throws {
-        let bm = BackupManager(db: db, backupDir: AppPaths.backupsURL())
+        let bm = BackupManager(db: db, backupDir: env.backupsURL)
         try bm.importJSON(from: url, clearAssets: clearAssets, clearFinancials: clearFinancials)
         loadAll()
         await startupRefresh()
@@ -953,103 +771,14 @@ public final class AppStore {
     }
 }
 
-// MARK: - 行情 / 股息刷新辅助 (文件作用域: 不继承 @MainActor, 可在子任务里执行)
+/// 敏感性分析的前置条件错误（视图直接展示 localizedDescription）。
+public enum SensitivityRunError: LocalizedError {
+    case missingExtract(String)
 
-/// 股息抓取覆盖的自然年起点 (决策 Q20/Q26: 2024-01-01 至今, 全量入库).
-private let dividendStartYear = 2024
-/// 并发上限 (决策 Q33): 公开接口短时几十个并发容易被限流.
-private let refreshConcurrency = 5
-/// 股息缓存有效期 7 天 (决策 Q17/Q24).
-private let dividendCacheTTL: TimeInterval = 7 * 86_400
-
-/// 一次刷新的网络任务 (只带发请求需要的东西).
-private struct RefreshJob: Sendable {
-    let assetKey: String
-    let source: any DataSource
-    let symbol: String
-    /// 命中缓存 → 本次不抓股息 (行情照抓).
-    let skipDividends: Bool
-}
-
-/// 一个标的的网络结果 —— 落库一律回到主上下文串行完成 (决策 Q34).
-private struct RefreshOutcome: Sendable {
-    let assetKey: String
-    let points: [PricePoint]
-    let quote: Quote?
-    let priceFailed: Bool
-    /// nil 的 dividendStatus = 命中缓存, 本次不写股息.
-    let dividends: [DividendEvent]?
-    let dividendStatus: DividendFetchStatus?
-    let dividendSource: String?
-    let dividendStamp: String?
-}
-
-/// 每次新建 formatter —— DateFormatter 不是线程安全的, 不能跨并发任务共享.
-private func dividendStampNow() -> String {
-    let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    f.timeZone = TimeZone.current
-    return f.string(from: Date())
-}
-
-/// 缓存新鲜: 7 天内 **且** 与当前同一自然年 —— 跨年后目标年份变化, 必须重抓,
-/// 否则「去年」会缺最新一年 (决策 Q24)。
-private func dividendCacheFresh(_ meta: DividendFetchMeta) -> Bool {
-    let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    f.timeZone = TimeZone.current
-    guard let d = f.date(from: meta.fetchedAt) else { return false }
-    let cal = Calendar.current
-    guard cal.component(.year, from: d) == cal.component(.year, from: Date()) else { return false }
-    return Date().timeIntervalSince(d) < dividendCacheTTL
-}
-
-/// 需要覆盖的自然年: 2024 ... 今年.
-private func dividendYears(now: Date = Date()) -> [Int] {
-    let y = Calendar.current.component(.year, from: now)
-    guard y >= dividendStartYear else { return [y] }
-    return Array(dividendStartYear...y)
-}
-
-/// 单标的网络抓取 (历史行情 + 最新价 + 股息), 不触碰数据库.
-private func runRefreshJob(_ job: RefreshJob, years: [Int]) async -> RefreshOutcome {
-    var points: [PricePoint] = []
-    var quote: Quote?
-    var priceFailed = false
-    do {
-        let hist = try await job.source.fetchHistory(symbol: job.symbol)
-        // 必须带上 开/高/低 与原始价：只重建 close 会把日内价/真实现价丢掉，
-        // 「特别关注」的影线与极值卡的真实价格就永远补不上。
-        points = hist.map { PricePoint(assetKey: job.assetKey, date: $0.date,
-                                       close: $0.close, rawClose: $0.rawClose,
-                                       currency: $0.currency,
-                                       open: $0.open, high: $0.high, low: $0.low) }
-        if let q = try? await job.source.fetchQuote(symbol: job.symbol) {
-            quote = Quote(symbol: job.assetKey, price: q.price, currency: q.currency,
-                          date: q.date, source: q.source)
+    public var errorDescription: String? {
+        switch self {
+        case .missingExtract(let path):
+            return "未找到提取文件：\(path)。请先运行优化。"
         }
-    } catch {
-        priceFailed = true
     }
-
-    var dividends: [DividendEvent]?
-    var status: DividendFetchStatus?
-    var stamp: String?
-    if !job.skipDividends {
-        do {
-            dividends = try await job.source.fetchDividends(symbol: job.symbol, years: years)
-            status = .ok
-        } catch {
-            // `empty` = 数据源对该标的无历史覆盖 (如新上市标的) → NULL 态;
-            // 其它错误 = 抓取失败 → 也是 NULL 态, 但已抓到记录保留不删.
-            status = (error as? DataSourceError)?.isUnavailable == true ? .unavailable : .failed
-        }
-        stamp = status == nil ? nil : dividendStampNow()
-    }
-
-    return RefreshOutcome(assetKey: job.assetKey, points: points, quote: quote,
-                          priceFailed: priceFailed, dividends: dividends,
-                          dividendStatus: status,
-                          dividendSource: status == nil ? nil : job.source.name,
-                          dividendStamp: stamp)
 }

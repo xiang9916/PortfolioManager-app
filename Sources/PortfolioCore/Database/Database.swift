@@ -235,7 +235,8 @@ public final class Database {
     /// Delete an asset target and its holdings / prices / dividends (资产明细 删除标的).
     public func deleteAsset(key: String) throws {
         try inTransaction {
-            for table in ["holdings", "prices", "dividends", "assets"] {
+            // quotes 也是资产域数据：漏删会在「删除后重建同一 key」时复活旧报价（ADR 0010）。
+            for table in ["holdings", "prices", "quotes", "dividends", "assets"] {
                 let col = (table == "assets") ? "key" : "asset_key"
                 let sql = "DELETE FROM " + table + " WHERE " + col + " = ?"
                 let stmt = try prepared(sql)
@@ -462,6 +463,25 @@ public final class Database {
         return out
     }
 
+    /// 只取最后一个价格点 —— 估值只需要它，不要为此把整段历史读进内存。
+    /// 列序 / 可空处理与 `fetchPrices` 完全一致（`raw_close` → nullableDouble）。
+    public func fetchLastPrice(assetKey: String) throws -> PricePoint? {
+        let sql = "SELECT asset_key, date, close, currency, open, high, low, raw_close FROM prices WHERE asset_key = ? ORDER BY date DESC LIMIT 1"
+        let stmt = try prepared(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, assetKey)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let key = String(cString: sqlite3_column_text(stmt, 0))
+        let date = String(cString: sqlite3_column_text(stmt, 1))
+        let close = sqlite3_column_double(stmt, 2)
+        let cur = String(cString: sqlite3_column_text(stmt, 3))
+        return PricePoint(assetKey: key, date: date, close: close,
+                          rawClose: nullableDouble(stmt, 7), currency: cur,
+                          open: nullableDouble(stmt, 4),
+                          high: nullableDouble(stmt, 5),
+                          low: nullableDouble(stmt, 6))
+    }
+
     public func count(table: String) -> Int {
         let sql = "SELECT COUNT(*) FROM " + table
         var stmt: OpaquePointer?
@@ -489,20 +509,20 @@ public final class Database {
         defer { sqlite3_finalize(stmt) }
         var out: [Asset] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
+            let key = String(cString: sqlite3_column_text(stmt, 1))
             let ticker = colText(stmt, 3)
             let marketRaw = colText(stmt, 4)
             let currency = String(cString: sqlite3_column_text(stmt, 7))
+            // 市场是闭集、池是派生量：一律经 AssetIdentity（ADR 0010），不信任 assets.pool 列。
+            let identity = AssetIdentity(key: key, ticker: ticker, marketRaw: marketRaw, currency: currency)
             out.append(Asset(
                 id: sqlite3_column_int64(stmt, 0),
-                key: String(cString: sqlite3_column_text(stmt, 1)),
+                key: key,
                 name: String(cString: sqlite3_column_text(stmt, 2)),
                 ticker: ticker,
-                // 市场是闭集：原文经别名归一（NASDAQ→US），识别不出则按 ticker 推断（Q26=C / Q32）。
-                market: AssetMarket.resolve(market: marketRaw, ticker: ticker),
+                market: identity.market,
                 assetClass: colText(stmt, 5),
-                // 池是派生量：读时一律由市场推导（解析不出市场时按币种回退），
-                // 不信任 assets.pool 列 —— 它只是写入时的缓存（Q31）。
-                pool: AssetMarket.pool(market: marketRaw, ticker: ticker, currency: currency),
+                pool: identity.pool,
                 currency: currency,
                 source: colText(stmt, 8),
                 feeRate: colDouble(stmt, 9),
@@ -528,11 +548,11 @@ public final class Database {
             let marketRaw = colText(stmt, 2)
             let currency = colText(stmt, 3) ?? "CNY"
             let poolRaw = colText(stmt, 4) ?? ""
-            let market = AssetMarket.resolve(market: marketRaw, ticker: ticker)
-            let pool = AssetMarket.pool(market: marketRaw, ticker: ticker, currency: currency)
-            let marketChanged = (market?.rawValue ?? "") != (marketRaw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            if marketChanged || poolRaw != pool.rawValue {
-                pending.append((key: key, market: market?.rawValue, pool: pool.rawValue))
+            let identity = AssetIdentity(key: key, ticker: ticker, marketRaw: marketRaw, currency: currency)
+            // 对落库原文做精确比较：us / 两端空白 / 自由文本 / 空串都会收敛（幂等）。
+            let marketChanged = AssetIdentity.marketNeedsRewrite(stored: marketRaw, resolved: identity.market)
+            if marketChanged || poolRaw != identity.pool.rawValue {
+                pending.append((key: key, market: identity.market?.rawValue, pool: identity.pool.rawValue))
             }
         }
         guard !pending.isEmpty else { return }

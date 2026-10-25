@@ -63,10 +63,11 @@ public enum PortfolioImporter {
             let currency = h.currency ?? "CNY"
             // market / pool 不再来自表名：市场按 ticker 推断（提取 JSON 里根本没有 market 字段），
             // 池由市场派生，推断不出市场时按币种回退。
-            let market = AssetMarket.infer(ticker: h.ticker)
+            let identity = AssetIdentity(key: h.ticker, ticker: h.ticker,
+                                         marketRaw: nil, currency: currency)
             assets.append(Asset(key: h.ticker, name: h.name, ticker: h.ticker,
-                                market: market, assetClass: cls,
-                                pool: AssetMarket.pool(market: nil, ticker: h.ticker, currency: currency),
+                                market: identity.market, assetClass: cls,
+                                pool: identity.pool,
                                 currency: currency, source: "external"))
             // 份额/成本留空(0), 由用户在资产明细手填; 市值 = 份额 × 最后价 (派生).
             holdings.append(Holding(assetKey: h.ticker, quantity: 0, costBasis: 0,
