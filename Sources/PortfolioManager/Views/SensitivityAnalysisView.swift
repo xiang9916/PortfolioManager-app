@@ -20,12 +20,12 @@ public struct SensitivityAnalysisView: View {
                 Spacer()
             }
             if let scope = result.scope {
-                Text("口径：\(scope)。每一点都是「把目标设成它、实际会交付的组合」；蓝点 = 同一锚定口径下找到的最优可交付组合；绿点 = 主结果锚点。")
+                Text("口径：\(scope)。蓝点 = 目标 T 处已知最优的可交付组合（候选包络）；T 只是下限（组合收益可以更高）；绿点 = 主结果锚点。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 // 旧输出没有 scope：图注仍然要说明蓝点/绿点的口径。
-                Text("蓝点 = 同一锚定口径下找到的最优可交付组合；绿点 = 主结果锚点。")
+                Text("蓝点 = 目标 T 处已知最优的可交付组合（候选包络）；目标只是下限；绿点 = 主结果锚点。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -210,6 +210,12 @@ public struct SensitivityAnalysisView: View {
         var text = pctShort(p.targetReturn)
         if !p.feasible { text += " ✗" }
         if p.fallback == true { text += " 回退" }
+        // 候选包络：统计借自更高目标的可行组合（T 只是下限）→ 标来源目标。
+        if let src = p.sourceTarget, abs(src - p.targetReturn) > 1e-9 {
+            text += " ←" + pctShort(src)
+        }
+        // 支配修复：该点用主结果袖参数重解并替换（曲线不再被次优固定点顶出回升）。
+        if p.repaired == true { text += " 补" }
         return text
     }
 

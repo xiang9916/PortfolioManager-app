@@ -166,6 +166,38 @@ final class OptimizationResultModelsTests: XCTestCase {
         """
         let result = try decodeSensitivity(json)
         XCTAssertNil(result.points.first?.fallback)
+        XCTAssertNil(result.points.first?.sourceTarget)
+        XCTAssertNil(result.points.first?.repaired)
         XCTAssertNil(result.anchor)
+    }
+
+    // MARK: - 敏感性：候选包络 source_target / repaired
+
+    func testDecodeSensitivityEnvelopeFields() throws {
+        let json = """
+        {"max_feasible_return": 0.105, "rf": 0.02,
+         "domestic_weight": 0.45, "overseas_weight": 0.55,
+         "points": [
+            {"target_return": 0.09, "feasible": true,
+             "achieved_return": 0.10, "volatility": 0.0576, "sharpe": 1.39,
+             "source_target": 0.10},
+            {"target_return": 0.095, "feasible": true,
+             "achieved_return": 0.095, "volatility": 0.0517, "sharpe": 1.45,
+             "repaired": true},
+            {"target_return": 0.10, "feasible": true,
+             "achieved_return": 0.10, "volatility": 0.0576, "sharpe": 1.39}
+         ]}
+        """
+        let result = try decodeSensitivity(json)
+        XCTAssertEqual(result.points.count, 3)
+        // 借用更高目标的候选：source_target 记录来源、repaired 缺失
+        XCTAssertEqual(result.points[0].sourceTarget, 0.10)
+        XCTAssertNil(result.points[0].repaired)
+        // 支配修复：本点自己的解被替换
+        XCTAssertNil(result.points[1].sourceTarget)
+        XCTAssertEqual(result.points[1].repaired, true)
+        // 正常点：两个键都没有
+        XCTAssertNil(result.points[2].sourceTarget)
+        XCTAssertNil(result.points[2].repaired)
     }
 }

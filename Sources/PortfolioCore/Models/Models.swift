@@ -402,6 +402,10 @@ public struct SensitivityPoint: Codable, Hashable, Sendable, Identifiable {
     /// 该点是否为「回退点」：目标在当前约束下不可行，交付收益低于该点目标（或阶段一目标被下调）。
     /// 这类点不是「目标设成它时能交付的组合」，不应画进蓝色前沿。旧输出没有该键 → nil。
     public let fallback: Bool?
+    /// 候选包络的来源目标：该点统计借自更高目标的可行组合时才有值（加法式；旧输出 → nil）。
+    public let sourceTarget: Double?
+    /// 该点是否被「支配修复」用主结果袖参数重解并替换（加法式；旧输出 → nil）。
+    public let repaired: Bool?
 }
 
 /// 敏感性锚点一致性检查里的一个落点（收益 / 波动 / 夏普）。

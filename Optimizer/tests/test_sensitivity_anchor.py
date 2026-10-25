@@ -162,8 +162,10 @@ def _run_sensitivity(*, responder, assets=None, anchor_kwargs=None, seed_vec=Non
     saved_asm = _patch_assembly(assets)
     seed_calls, saved_seed = _patch_seed(seed_vec)
     try:
+        # 本文件锁定的是**扫描/start-policy**（2026-10-18 契约）；候选包络是 2026-10-25
+        # 新增的显示层，由 test_sensitivity_envelope.py 覆盖，这里显式关闭以保持断言不变。
         kwargs = dict(extract=dict(EXTRACT), step_min=step_min, step_max=step_max,
-                      log=lambda *a, **k: None)
+                      log=lambda *a, **k: None, monotone_envelope=False)
         kwargs.update(anchor_kwargs or {})
         out = SENS.run_sensitivity(**kwargs)
     finally:

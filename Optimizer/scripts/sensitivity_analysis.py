@@ -83,6 +83,8 @@ _ANCHOR_SEED_LAMBDA = 0.20
 #: 改用 **prev 起跑**（anchor 起跑在该带每点打满 10 轮未收敛 ~30s；D4 实测 3 点 105s；
 #: prev 起跑 ~4s）。失败才做一次独立 anchor（无袖参数则 seed）重试。
 _ANCHOR_BOUNDARY_BAND = 0.02
+#: 候选包络的判等容差：Sharpe 已 round 到 6 位，1e-6 覆盖舍入误差。
+ENVELOPE_EPS = 1e-6
 
 
 def _sleeve_universe():
@@ -397,7 +399,7 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
                     request_timeout=12.0, check_total_timeout=300.0,
                     step_min=0.05, step_max=None, tail_dof=3.0, log=None,
                     anchor_target=None, anchor_sleeve=None,
-                    anchor_ret=None, anchor_vol=None):
+                    anchor_ret=None, anchor_vol=None, monotone_envelope=True):
     """Run sensitivity analysis from step_min to max feasible return, 1% increments.
 
     锚定模式（契约 §2.2，2026-10-18 Q2）：传 `anchor_target`（= 主结果的目标收益率）
@@ -406,6 +408,12 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
     那一点就是「同锚定口径下实际会交付的组合」，可与主结果（绿点）重合。
     无锚点调用（anchor_target=None）：求解次数、数值行为与旧版一致，只多加法字段
     `fallback` / `chosen_start`（锚定模式才有的 `anchor` 块不出现）。
+
+    候选包络（2026-10-25，契约 §2.3）：`monotone_envelope=True`（默认）时，扫描结束后
+    把每个目标点的显示值改为「所有可交付候选中 ret ≥ T 的夏普最大者」——可行集随 T
+    收缩，包络必然非增（目标↑ ⇒ 夏普不增）。被支配的点先用主结果袖参数重解一次
+    （`repaired=true`）；修不掉就借用包络候选并标 `source_target`。
+    `monotone_envelope=False` 只用于锁定旧 start-policy 的回归测试。
     """
     global RF
 
@@ -494,12 +502,14 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
     pool_specs = dict(universe.pool_specs or {})
     runner = SensitivityRunner(universe=universe)
     points = []
+    point_meta = []              # 与 points 对齐：deliverable/converged/origin（包络用）
     sleeve_start = None          # 上一点的交付袖参数（prev 热启动/重试的唯一来源）
     last_mu, last_cov = mu, cov
     last_ok_mu = None            # 最后一个**非回退**点的模型（max_final 的诚实口径）
     tangency_est = None          # 首个可行点的交付收益 = 切点（约束开始绷紧）估计
     anchor_point = None          # 锚点目标点的 {ret, vol, sharpe}
     _slack_ref = None            # 上一个 slack 点的交付字段（锚定模式复用来源）
+    _slack_meta = None           # 与 _slack_ref 对齐的候选元数据
     _seed_cache = {"resolved": False, "vec": False}   # λ=0.20 种子惰性缓存（False=无种子）
 
     def _seed_params():
@@ -602,7 +612,7 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         锚定模式的 slack 点**不求解**，直接复用上一个 slack 点的交付字段（v4）。
         """
         nonlocal sleeve_start, last_mu, last_cov, last_ok_mu, tangency_est
-        nonlocal anchor_point, _slack_ref
+        nonlocal anchor_point, _slack_ref, _slack_meta
         target_f = float(target)
         is_anchor = bool(anchor_mode) and \
             abs(target_f - float(anchor_target)) <= _ANCHOR_TARGET_EQ_EPS
@@ -625,7 +635,9 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
                 "chosen_start": "reuse",
             }
             points.append(reused)
+            point_meta.append(dict(_slack_meta or {}))
             _slack_ref = reused       # 后续 slack 点复用同一组字段
+            _slack_meta = point_meta[-1]
             return True, False
         prev_start = sleeve_start
         start, label, retry = _plan_start(target_f, is_anchor, prev_start)
@@ -649,6 +661,8 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
                 "fallback": False,
                 "chosen_start": "prev",
             })
+            point_meta.append({"deliverable": False, "converged": False,
+                               "origin": "point"})
             if is_anchor:
                 anchor_point = {"ret": None, "vol": None, "sharpe": None}
             return False, True
@@ -682,9 +696,21 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
             "chosen_start": chosen_start,
         }
         points.append(point)
+        meta = {"deliverable": bool(solved.get("deliverable", True)),
+                "final_source": str(solved.get("final_source", "delivered")),
+                "converged": bool(solved.get("sleeve_converged", True)),
+                "origin": "point"}
+        try:
+            meta["model_gap"] = round(
+                abs(float(fin["ret"]) - float(solved.get("stage1_ret", fin["ret"])))
+                + abs(float(fin["vol"]) - float(solved.get("stage1_vol", fin["vol"]))), 6)
+        except (TypeError, ValueError, KeyError):
+            pass
+        point_meta.append(meta)
         if anchor_mode and not fallback and target_f <= float(tangency_est) + _SCAN_LOOP_EPS:
             # 该实解点也是「切点组合」（例如锚点目标落在切点以下）→ 作为后续 slack 复用来源
             _slack_ref = point
+            _slack_meta = meta
         if is_anchor:
             anchor_point = {"ret": point["achieved_return"],
                             "vol": point["volatility"],
@@ -723,6 +749,137 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
             and (not points or points[-1]["target_return"] < max_ret_final - 0.002)):
         _add_point(max_ret_final - _SCAN_MARGIN)
 
+    # ── 候选包络 + 支配修复（2026-10-25，契约 §2.3）─────────────────────────────
+    # 目标 T 的可行集 {ret ≥ T} 随 T 收缩，所以「同一资产级模型下所有候选的夏普上包络」
+    # 必然非增。候选 = 各点的自身解 + 主结果锚点（App 提供 --anchor-ret/--anchor-vol）。
+    # 被更高目标的可行候选支配的点，先用主结果袖参数重解一次（App 有 anchor_sleeve）；
+    # 修不掉就借用包络候选并标 source_target。这样曲线满足「目标↑ ⇒ 夏普不增」，
+    # 而不是让热启动的次优固定点把曲线顶出一个假回升。
+    if monotone_envelope and points:
+        def _env_candidate(index, target_f, ret, vol, origin, chosen,
+                           worst=None, cagr_ln=None, cagr_ft=None):
+            if ret is None or vol is None or float(vol) <= 0:
+                return None
+            ret_f, vol_f = float(ret), float(vol)
+            return {
+                "index": index,
+                "target": round(float(target_f), 4),
+                "ret": round(ret_f, 6),
+                "vol": round(vol_f, 6),
+                "sharpe": round((ret_f - rf) / vol_f, 6),
+                # 点自身已有这些派生值 → 直接复用，避免重复数值积分（扫描时间）。
+                "worst": worst if worst is not None else round(ret_f - 1.96 * vol_f, 6),
+                "cagr_ln": cagr_ln if cagr_ln is not None
+                else round(lognormal_cagr(ret_f, vol_f), 6),
+                "cagr_ft": cagr_ft if cagr_ft is not None
+                else round(fattail_cagr(ret_f, vol_f, nu=tail_dof), 6),
+                "origin": origin,
+                "chosen": chosen,
+            }
+
+        env_candidates = []
+        for i, p in enumerate(points):
+            if not p.get("feasible") or p.get("fallback"):
+                continue
+            meta = point_meta[i] if i < len(point_meta) else {}
+            if not bool(meta.get("deliverable", True)):
+                continue
+            cand = _env_candidate(i, p["target_return"], p["achieved_return"],
+                                  p["volatility"], "point", p.get("chosen_start"),
+                                  worst=p.get("worst_year_95"),
+                                  cagr_ln=p.get("cagr_lognormal"),
+                                  cagr_ft=p.get("cagr_fat_tail"))
+            if cand is not None:
+                env_candidates.append(cand)
+        if (anchor_mode and anchor_ret is not None and anchor_vol is not None
+                and float(anchor_vol) > 0):
+            cand = _env_candidate(None, anchor_target, anchor_ret, anchor_vol, "main", None)
+            if cand is not None:
+                env_candidates.append(cand)
+
+        def _envelope_pick(target_f):
+            """在「ret ≥ T」的候选里取夏普最大者；同分优先本点、其次最近目标。"""
+            eligible = [c for c in env_candidates
+                        if c["ret"] is not None
+                        and float(c["ret"]) >= float(target_f) - ENVELOPE_EPS]
+            if not eligible:
+                return None
+            return min(eligible, key=lambda c: (
+                -float(c["sharpe"]),
+                0 if abs(float(c["target"]) - float(target_f)) <= ENVELOPE_EPS else 1,
+                abs(float(c["target"]) - float(target_f)),
+                float(c["target"]),
+            ))
+
+        # 支配修复：只对「自身解被更高目标的可行候选支配」的点；每点最多一次。
+        if anchor_mode and anchor_sleeve:
+            for i, p in enumerate(points):
+                if not p.get("feasible") or p.get("fallback"):
+                    continue
+                meta = point_meta[i] if i < len(point_meta) else {}
+                if not bool(meta.get("deliverable", True)):
+                    continue
+                best = _envelope_pick(p["target_return"])
+                if best is None or best["index"] == i:
+                    continue
+                if float(best["sharpe"]) <= float(p["sharpe"]) + ENVELOPE_EPS:
+                    continue
+                repair_warns = []
+                solved = _solve_at(p["target_return"], dict(anchor_sleeve), repair_warns)
+                if solved is None or _needs_retry(solved, p["target_return"]):
+                    continue
+                if not bool(solved.get("deliverable", True)):
+                    continue
+                fin = solved["final"]
+                cand = _env_candidate(i, p["target_return"], fin["ret"], fin["vol"],
+                                      "repair", "anchor-repair")
+                if cand is None or float(cand["sharpe"]) <= float(best["sharpe"]) + ENVELOPE_EPS:
+                    continue
+                env_candidates.append(cand)
+                point_meta[i] = {"deliverable": True,
+                                 "final_source": str(solved.get("final_source", "delivered")),
+                                 "converged": bool(solved.get("sleeve_converged", True)),
+                                 "origin": "repair"}
+                for w in repair_warns:
+                    if w not in warnings:
+                        warnings.append(w)
+
+        # 最终包络：每个点显示「ret ≥ T 的候选里夏普最大者」。
+        for i, p in enumerate(points):
+            if not p.get("feasible") or p.get("fallback"):
+                continue
+            best = _envelope_pick(p["target_return"])
+            if best is None:
+                continue
+            p["achieved_return"] = best["ret"]
+            p["volatility"] = best["vol"]
+            p["sharpe"] = best["sharpe"]
+            p["worst_year_95"] = best["worst"]
+            p["cagr_lognormal"] = best["cagr_ln"]
+            p["cagr_fat_tail"] = best["cagr_ft"]
+            if best["index"] == i:
+                p.pop("source_target", None)
+                if best["origin"] == "repair":
+                    p["repaired"] = True
+                else:
+                    p.pop("repaired", None)
+            else:
+                if abs(float(best["target"]) - float(p["target_return"])) > ENVELOPE_EPS:
+                    p["source_target"] = best["target"]
+                else:
+                    p.pop("source_target", None)
+                p.pop("repaired", None)
+        # 锚点块取包络后的显示值（锚点目标点若被更高目标候选支配，这里如实反映）。
+        if anchor_mode:
+            for p in points:
+                if (p.get("feasible") and not p.get("fallback")
+                        and abs(float(p["target_return"]) - float(anchor_target))
+                        <= _ANCHOR_TARGET_EQ_EPS):
+                    anchor_point = {"ret": p["achieved_return"],
+                                    "vol": p["volatility"],
+                                    "sharpe": p["sharpe"]}
+                    break
+
     result = {
         "max_feasible_return": round(max_ret_final, 6),
         "tail_dof": float(tail_dof),
@@ -730,7 +887,9 @@ def run_sensitivity(extract, work_dir=None, hsbc_request_timeout=60.0,
         "domestic_weight": round(dom_w, 6),
         "overseas_weight": round(ov_w, 6),
         "points": points,
-        "scope": "完整流水线（阶段一 + 袖内固定点 + 阶段二），与结果页同源",
+        "scope": ("候选包络（每点 = 目标 T 处已知最优的可交付组合；T 只是下限）"
+                  if monotone_envelope else
+                  "完整流水线（阶段一 + 袖内固定点 + 阶段二），与结果页同源"),
         "warnings": warnings,
         "pipeline": pipeline_info,
     }
