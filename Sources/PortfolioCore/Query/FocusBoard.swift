@@ -8,6 +8,9 @@ import Foundation
 /// 3. **无日内价**（基金净值、v9 之前抓的历史行）：开 = 昨收、收 = 今收、高/低 = 两者较大/较小。
 /// 4. **当日无数据**（休市 / T+1 未更新）：平盘，开 = 高 = 低 = 收 = 最近的收盘 —— 不产生假影线。
 ///
+/// 涨跌归因（窗口 / 逐标的贡献）见 FocusAttribution.swift 与 ADR 0013 —— 复用同一套
+/// 归一化与前向填充口径，所以「当日」归因的组合涨跌与 dayChange 逐位一致。
+///
 /// 这里不做任何数据库访问，输入是已经取好的 PricePoint 序列，便于纯函数单测。
 public struct FocusCandle: Hashable, Identifiable, Sendable {
     /// "yyyy-MM-dd"（与 prices.date 同口径）。
@@ -77,18 +80,26 @@ public struct FocusBoard: Hashable, Sendable {
     /// 合成口径的当日涨跌（最后一根收 ÷ 前一根收 − 1）；不足两根为 nil。
     public let dayChange: Double?
     public let lastDate: String?
+    /// 按窗口给出的涨跌归因（当日 / 近 5 日 / 近 20 日）；不足两根合成 K 时为空数组。
+    public let attributions: [FocusAttribution]
 
     public init(candles: [FocusCandle], gainer: FocusPick?, loser: FocusPick?,
-                dayChange: Double?, lastDate: String?) {
+                dayChange: Double?, lastDate: String?,
+                attributions: [FocusAttribution] = []) {
         self.candles = candles
         self.gainer = gainer
         self.loser = loser
         self.dayChange = dayChange
         self.lastDate = lastDate
+        self.attributions = attributions
+    }
+
+    public func attribution(for window: FocusWindow) -> FocusAttribution? {
+        attributions.first { $0.window == window }
     }
 
     public static let empty = FocusBoard(candles: [], gainer: nil, loser: nil,
-                                        dayChange: nil, lastDate: nil)
+                                        dayChange: nil, lastDate: nil, attributions: [])
 }
 
 /// 一只持仓的输入：价格序列（升序）+ 当前市值权重（折人民币，未归一）。
@@ -154,12 +165,15 @@ public enum FocusComposer {
         }()
 
         return FocusBoard(candles: candles, gainer: gainer, loser: loser,
-                          dayChange: dayChange, lastDate: candles.last?.date)
+                          dayChange: dayChange, lastDate: candles.last?.date,
+                          attributions: makeAttributions(entries, dates: window))
     }
 
     // MARK: - internals
 
     private struct Entry {
+        let assetKey: String
+        let name: String
         let bars: [PricePoint]
         /// 今收（归一化基准）。
         let base: Double
@@ -168,7 +182,8 @@ public enum FocusComposer {
 
     private static func entry(for series: FocusSeries) -> Entry? {
         guard let base = series.bars.last?.close, base > 0 else { return nil }
-        return Entry(bars: series.bars, base: base, weight: series.weight)
+        return Entry(assetKey: series.assetKey, name: series.name,
+                     bars: series.bars, base: base, weight: series.weight)
     }
 
     private static func pick(from series: FocusSeries, change: Double, count: Int) -> FocusPick? {
@@ -262,5 +277,86 @@ public enum FocusComposer {
                                    close: sumClose / sumWeight))
         }
         return out
+    }
+
+    // MARK: - 涨跌归因（ADR 0013）
+
+    /// 三个窗口逐个算；不足两根合成 K 时整体为空（无法定义区间）。
+    private static func makeAttributions(_ entries: [Entry], dates: [String]) -> [FocusAttribution] {
+        guard dates.count >= 2 else { return [] }
+        return FocusWindow.allCases.compactMap { window in
+            makeAttribution(entries, dates: dates, window: window)
+        }
+    }
+
+    /// 一个窗口的精确分解。
+    ///
+    /// 期初 t0 = 窗口第一根；参与者 = 期初已有价格的标的（首根 bar ≤ t0），
+    /// 期初收盘 c0 = 最近 ≤ t0 的收盘（前向填充，与合成 K 同一套指针语义）。
+    /// 记 V(t0) = Σ w·c0/base ÷ Σ w（= 期初合成收盘），则
+    ///
+    /// - 组合区间涨跌 = 1/V(t0) − 1；
+    /// - 期初有效权重 ω_i = w_i·(c0_i/base_i) ÷ Σ_j w_j·(c0_j/base_j)；
+    /// - contribution_i = ω_i·(base_i/c0_i − 1)，且 Σ contribution_i ≡ 1/V(t0) − 1。
+    ///
+    /// 期初之后才出现的标的不进参与集：它没有期初权重，也就没有可归因的贡献。
+    private static func makeAttribution(_ entries: [Entry], dates: [String],
+                                        window: FocusWindow) -> FocusAttribution? {
+        let bars = min(window.tradingBars, dates.count)
+        guard bars >= 2 else { return nil }
+        let windowDates = Array(dates.suffix(bars))
+        guard let start = windowDates.first, let end = windowDates.last else { return nil }
+
+        var participants: [(entry: Entry, c0: Double, stale: Bool)] = []
+        for entry in entries {
+            var index = -1
+            while index + 1 < entry.bars.count && entry.bars[index + 1].date <= start {
+                index += 1
+            }
+            guard index >= 0 else { continue }
+            let c0 = entry.bars[index].close
+            guard c0 > 0 else { continue }
+            // stale = 期初之后**再没有**新观测（今收的日期不晚于期初）。
+            let latestDate = entry.bars.last?.date ?? entry.bars[index].date
+            participants.append((entry, c0, latestDate <= start))
+        }
+        guard !participants.isEmpty else { return nil }
+
+        let sumWeight = participants.reduce(0.0) { $0 + $1.entry.weight }
+        guard sumWeight > 0 else { return nil }
+        // 期初合成收盘 × Σw：参与者的 w·c0/base 之和。
+        let value = participants.reduce(0.0) { $0 + $1.entry.weight * ($1.c0 / $1.entry.base) }
+        guard value > 0 else { return nil }
+        let totalChange = sumWeight / value - 1
+
+        var rows: [FocusContribution] = []
+        rows.reserveCapacity(participants.count)
+        for p in participants {
+            let change = p.entry.base / p.c0 - 1
+            let omega = p.entry.weight * (p.c0 / p.entry.base) / value
+            rows.append(FocusContribution(assetKey: p.entry.assetKey,
+                                          name: p.entry.name,
+                                          change: change,
+                                          weight: p.entry.weight / sumWeight,
+                                          contribution: omega * change,
+                                          stale: p.stale))
+        }
+        rows.sort { lhs, rhs in
+            if lhs.contribution != rhs.contribution { return lhs.contribution > rhs.contribution }
+            return lhs.assetKey < rhs.assetKey
+        }
+        let upside = rows.filter { $0.contribution > 0 }.reduce(0.0) { $0 + $1.contribution }
+        let downside = rows.filter { $0.contribution < 0 }.reduce(0.0) { $0 + $1.contribution }
+        let gross = rows.reduce(0.0) { $0 + abs($1.contribution) }
+        let top3Share: Double? = gross > 0
+            ? rows.map { abs($0.contribution) }.sorted(by: >).prefix(3).reduce(0.0, +) / gross
+            : nil
+
+        return FocusAttribution(window: window, startDate: start, endDate: end,
+                                totalChange: totalChange,
+                                upside: upside, downside: downside,
+                                gainers: rows.filter { $0.contribution > 0 }.count,
+                                losers: rows.filter { $0.contribution < 0 }.count,
+                                contributions: rows, top3Share: top3Share)
     }
 }

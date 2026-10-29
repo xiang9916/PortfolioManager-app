@@ -10,6 +10,9 @@ import PortfolioCore
 struct FocusView: View {
     @Bindable var store: AppStore
 
+    /// 涨跌归因卡当前选中的窗口（当日 / 近 5 日 / 近 20 日）。
+    @State private var attributionWindow: FocusWindow = .day
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -32,6 +35,7 @@ struct FocusView: View {
         } else {
             compositeCard
             picksRow
+            attributionCard
         }
     }
 
@@ -132,6 +136,149 @@ struct FocusView: View {
         }
         .buttonStyle(.plain)
         .help("跳到「资产明细」并选中 \(pick.name)")
+    }
+
+    // MARK: - 涨跌归因（口径见 ADR 0013）
+
+    @ViewBuilder
+    private var attributionCard: some View {
+        if let attribution = store.focusBoard.attribution(for: attributionWindow) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("涨跌归因").font(.headline)
+                    Spacer(minLength: 0)
+                    Picker("窗口", selection: $attributionWindow) {
+                        ForEach(FocusWindow.allCases) { window in
+                            Text(window.label).tag(window)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 230)
+                }
+                Text(summary(attribution))
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                contributionList(attribution)
+                Text("贡献 = 期初有效权重 × 区间自身涨跌（单位 pp），相加 = 组合区间涨跌；口径与合成 K 相同：当前市值权重、无新价按前向填充、未计汇率变动。期初之后才首次有价格的标的不在期初权重里，不参与归因。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private func summary(_ attribution: FocusAttribution) -> String {
+        var parts = [
+            "组合 \(DisplayFormat.pct(attribution.totalChange, signed: true))（\(shortDate(attribution.startDate)) ~ \(shortDate(attribution.endDate))）",
+            "上涨 \(attribution.gainers) 只 \(ppText(attribution.upside))",
+        ]
+        if attribution.losers > 0 {
+            parts.append("下跌 \(attribution.losers) 只 \(ppText(attribution.downside))")
+        }
+        if let top3 = attribution.top3Share {
+            parts.append("前 3 大集中度 \(DisplayFormat.pct(top3, decimals: 0))")
+        }
+        return parts.joined(separator: "　")
+    }
+
+    /// 前 12 行逐条列出，其余合并成一行合计（避免长列表把页面撑长）。
+    @ViewBuilder
+    private func contributionList(_ attribution: FocusAttribution) -> some View {
+        let visible = Array(attribution.contributions.prefix(12))
+        let rest = attribution.contributions.dropFirst(12)
+        let maxAbs = attribution.contributions.map { abs($0.contribution) }.max() ?? 0
+        VStack(spacing: 5) {
+            HStack(spacing: 8) {
+                Text("标的").frame(width: 185, alignment: .leading)
+                Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
+                Text("权重").frame(width: 52, alignment: .trailing)
+                Text("自身涨跌").frame(width: 66, alignment: .trailing)
+                Text("贡献").frame(width: 70, alignment: .trailing)
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+            ForEach(visible) { item in
+                contributionRow(item, maxAbs: maxAbs)
+            }
+            if !rest.isEmpty {
+                let weight = rest.reduce(0.0) { $0 + $1.weight }
+                let contribution = rest.reduce(0.0) { $0 + $1.contribution }
+                HStack(spacing: 8) {
+                    Text("其余 \(rest.count) 只")
+                        .frame(width: 185, alignment: .leading).lineLimit(1)
+                    divergingBar(contribution, maxAbs: maxAbs)
+                        .frame(maxWidth: .infinity)
+                    Text(DisplayFormat.pct(weight, decimals: 1))
+                        .frame(width: 52, alignment: .trailing).monospacedDigit()
+                    Text("—").frame(width: 66, alignment: .trailing)
+                    Text(ppText(contribution))
+                        .frame(width: 70, alignment: .trailing).monospacedDigit()
+                }
+                .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func contributionRow(_ item: FocusContribution, maxAbs: Double) -> some View {
+        Button {
+            store.pendingAssetSelection = item.assetKey
+        } label: {
+            HStack(spacing: 8) {
+                Text(item.name).font(.caption).lineLimit(1)
+                    .frame(width: 185, alignment: .leading)
+                divergingBar(item.contribution, maxAbs: maxAbs)
+                    .frame(maxWidth: .infinity)
+                Text(DisplayFormat.pct(item.weight, decimals: 1))
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .frame(width: 52, alignment: .trailing).monospacedDigit()
+                // 无新价的标的自身涨跌不可知：显式标注，而不是显示 0.00%。
+                Text(item.stale ? "无新价" : DisplayFormat.pct(item.change, signed: true))
+                    .font(.caption2)
+                    .foregroundStyle(item.stale ? AnyShapeStyle(.secondary) : AnyShapeStyle(item.change >= 0 ? Color.green : Color.red))
+                    .frame(width: 66, alignment: .trailing).monospacedDigit()
+                Text(ppText(item.contribution))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(contributionColor(item.contribution))
+                    .frame(width: 70, alignment: .trailing).monospacedDigit()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("跳到「资产明细」并选中 \(item.name)")
+    }
+
+    /// 零贡献（含无新价的标的）用中性色，避免把「没动」显示成上涨。
+    private func contributionColor(_ value: Double) -> AnyShapeStyle {
+        if abs(value) < 1e-12 { return AnyShapeStyle(.secondary) }
+        return AnyShapeStyle(value > 0 ? Color.green : Color.red)
+    }
+
+    /// 居中发散条：零轴在正中，按最大 |贡献| 归一，绿涨红跌。
+    private func divergingBar(_ value: Double, maxAbs: Double) -> some View {
+        GeometryReader { geo in
+            let half = geo.size.width / 2
+            let ratio = maxAbs > 0 ? min(abs(value) / maxAbs, 1) : 0
+            let length = half * ratio
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Color.secondary.opacity(0.12))
+                Rectangle()
+                    .fill(value >= 0 ? Color.green.opacity(0.75) : Color.red.opacity(0.75))
+                    .frame(width: length)
+                    .offset(x: value >= 0 ? half : half - length)
+            }
+            .clipShape(Capsule())
+        }
+        .frame(height: 8)
+    }
+
+    private func ppText(_ value: Double) -> String {
+        (value >= 0 ? "+" : "") + String(format: "%.2fpp", value * 100)
+    }
+
+    private func shortDate(_ value: String) -> String {
+        String(value.suffix(5))
     }
 
     // MARK: - 空态 / 提示

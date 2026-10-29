@@ -83,7 +83,7 @@ rm -f /tmp/pm-tokens.txt
 ## 4. 构建与预览（★ 有坑）
 ```bash
 swift build --disable-sandbox          # DSH 沙箱下必须带 --disable-sandbox
-swift test  --disable-sandbox          # 201 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
+swift test  --disable-sandbox          # 214 个用例；2 个联网用例按设计跳过（PM_LIVE_TESTS=1 才真跑）
 bash scripts/build_dev.sh [--run]      # ★ 预览/截图一律走这个，别直接 swift build
 ```
 - **为什么不能直接 `swift build`**：SwiftPM 会把 deployment target 当成 SDK 版本写进 `LC_BUILD_VERSION`（实测 `minos 14.0 / sdk 14.0`），
@@ -141,6 +141,8 @@ pm-cli (headless CLI) 复用 PortfolioCore
   敏感性分析与宏观利率在后台线程跑（曾经同步等子进程 → 主线程卡死 156s）。
 - 市值 = 份额 × 最新价（派生不落库）。**唯一计算入口 = `PortfolioValuation`**（ADR 0009）：最后价 `quote → rawClose → close（必告警）→ missing`，缺汇率按 1:1 且告警；`asOfDate` = 最晚价格日。`quotes` = 最新价，`prices` = 历史 K 线（v9 起含**复权** 开/高/低，基金为 NULL；v10 起另有 `raw_close` = **真实现价**：权益未复权收盘、基金单位净值，未回补时为 NULL）。
 - **特别关注（第 4 个模块）**：20 根合成日 K（归一化百分比轴）+ 当日涨幅/跌幅最高两只。口径唯一来源 = ADR 0008 / `FocusComposer`（归一化基准 = 各标的最新收盘 1.00、逐项加权、无日内价按昨收降级）；视图只做展示。
+  涨跌归因（当日 / 近 5 日 / 近 20 日的逐标的贡献）见 ADR 0013：复用同一套归一化与前向填充，
+  恒等式 Σ贡献 = 组合区间涨跌（1e-12），「当日」的组合涨跌与 `dayChange` 逐位一致。
   两张极值卡画**真实现价**（Schema v10 `prices.raw_close`：权益 = 未复权收盘价、基金 = 单位净值），**全有或全无** —— 窗口内缺任何一根原始价就整条退回归一化百分比（不混口径、不编造价格）；顶部涨跌幅仍是总回报口径。
 - 财务分析 = `quarterly_reports`（一列一季，9 个手动字段，其余由 `QuarterlyMetrics.compute` 派生）。
 - **市场**是闭集 `AssetMarket {US, HK, CN, JP, SG}`：按 ticker 推断（`.HK`→香港、`.T`→日本、`.SI`→新加坡、
@@ -158,7 +160,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
 - 股息税率锚定同一个市场结论（`DividendTax.rate(market:)`），JP/SG 未配置 → nil。
 
 ## 7. 测试
-- `swift test --disable-sandbox` → **201 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
+- `swift test --disable-sandbox` → **214 个用例全绿**（其中 2 个联网用例按设计跳过，需 `PM_LIVE_TESTS=1`）。
 - fixture 一律虚构；季度指标期望值由 compute 生成后固化。**改版前先跑全量测试。**
 
 ## 8. 已知限制（v0.4-beta2 已对外声明）
@@ -201,18 +203,24 @@ pm-cli (headless CLI) 复用 PortfolioCore
   bundle 里 `Resources/Optimizer/.venv/bin/python3` 是指向它的**绝对符号链接**（strict 校验的坑见 §5）。
 - futu-api 已从 `Optimizer/requirements.txt` 移除（代码中无 import；它会带入约 30MB 的 pycryptodome 等依赖）；行情走 Yahoo/Eastmoney 公开源。仓库不得出现任何 API key/凭据。
 - 「新标的测试」= 临时加 ticker 重跑，不改持仓，结果在弹窗（testOptimization 状态）。
-- **🔴 参数口径（2026-10-14 定稿，改前务必读 `Optimizer/scripts/asset_classes.py` 的 docstring）**：
-  预期收益 μ / 波动 σ 按**资产类别**分别构造，类别与规则**只有一份事实来源** = `asset_classes.py`：
-  | 类别 | μ 构造 | μ 截断 | 历史窗口 | σ |
-  |---|---|---|---|---|
-  | broad 宽基/大类（宽基被动、债券、货币、黄金、商品、大中华 INDEX 桶） | `0.5×历史 + 0.5×（本币RF+溢价）` | `0~20%` | 全历史 | 历史年化波动 |
-  | strategy 策略指数（红利低波/价值/动量/高股息/主题/REIT/缓冲期权） | `0.67×历史 + 0.33×（本币RF+溢价）` | `−5~30%` | 20 年 | 历史年化波动 |
-  | active 个股/主动基金 | `1.00×历史`（不用先验） | `−10~40%` | 10 年 | 历史年化波动 |
-  特例：`O_BTC` 截断 `−20~60%`；`D_HSBC_MMF` 写死 μ=2%/σ=1%。
-  窗口取不到那么长就用可得全历史；`σ > 150%` 视为数据毛刺 → 丢弃并报警；**0.6 的 σ 上限已取消**。
-  **σ 的人工下限也已整体取消**（2026-10-14）：历史波动多低就是多低，不再 `max(历史, 下限)` ——
-  人工下限会系统性把「真实低波资产」抬成「中等波资产」，让结果偏离真实风险。样本太短的问题改用
-  长历史代理解决（`market_data.PROXY_MAP`）。代码里**不再有 `VOL_FLOOR` 表**。
+- **🔴 参数口径（2026-10-29 定稿，改前务必读 `Optimizer/scripts/asset_classes.py` 的 docstring）**：
+  预期收益 μ / 波动 σ 的**估计方法**按资产类别区分，但**数值护栏对所有类别只有一组**（ADR 0012）；
+  类别与规则**只有一份事实来源** = `asset_classes.py`：
+  | 类别 | μ 构造 | 历史窗口 | σ |
+  |---|---|---|---|
+  | broad 宽基/大类（宽基被动、债券、货币、黄金、商品、大中华 INDEX 桶） | `0.5×历史 + 0.5×（本币RF+溢价）` | 全历史 | 历史年化波动 |
+  | strategy 策略指数（红利低波/价值/动量/高股息/主题/REIT/缓冲期权） | `0.67×历史 + 0.33×（本币RF+溢价）` | 20 年 | 历史年化波动 |
+  | active 个股/主动基金 | `1.00×历史`（不用先验） | 10 年 | 历史年化波动 |
+  **统一数值护栏**：μ 截断 `[−10%, +30%]`、σ 套 `[1%, 60%]`（历史波动 60%~150% 截断到 60% 并报警，
+  `>150%` 仍按数据毛刺丢弃）。类别**只决定估计方法与窗口、不决定截断线**；`CLASS_OVERRIDES`
+  （旧 `O_BTC: −20~60%` 特例）已删除，单标的特例只剩 `D_HSBC_MMF`（无行情 → 写死 μ=2%/σ=1%，恰在带内）。
+  窗口取不到那么长就用可得全历史；样本太短的问题用长历史代理解决（`market_data.PROXY_MAP`）。
+  ⚠️ 护栏是**数值卫生、不是经济假设**：σ 的 1% 下限只防 σ→0 的数值病态（协方差接近奇异、夏普分母趋零），
+  不是对低波资产的风险判断；2026-10-14 取消的那批「按类别抬高真实低波资产」的人工下限语义不同，别混谈。
+  护栏变更走 `BOUNDS_VERSION`（当前 2）：校准 JSON 顶层记录 `bounds`，`params.py` 加载时校验版本并
+  **重截断旧文件**、报警「建议重新校准」；`provenance` 加法记录截断前值
+  （`mu_blend` / `mu_clipped` / `vol_before_clip` / `vol_clipped`）。截断的唯一实现是
+  `clamp_mu()` / `clamp_sigma()`（仓内无第二处字面量区间，`audit_table` 会校验）。
 - **先验 = 本币无风险利率 + 溢价**（2026-10-13 定稿；🔴 **利率必须是数据，不能写死在程序里**）：
   `prior = rf(币种) + RF_PREMIUM[key]`。溢价写死但**统一 0.5% 粒度**；币种按标的**实际敞口**判定
   （境内 A 股/债券基金 = cny，其余含港币与美元资产 = usd；标普500 QDII、美元债 QDII 按 usd）。
@@ -376,7 +384,7 @@ pm-cli (headless CLI) 复用 PortfolioCore
   ① `core/**` 与 `models/**` 禁网络/磁盘/子进程、禁模块级可变全局（`Optimizer/tests/test_core_purity.py` 静态守卫，守卫自身可证伪）；
   ② 三个调用器互不 import，只依赖 `core`/`models`/`services`；
   ③ `core` 只吃 `ProblemSpec` 里**已算好的数**（μ/σ/相关性/上下界/目标/rf），不许回头问 `params`/`market_data`。
-  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 37 文件 / 244 用例）**。
+  等价门 `Optimizer/tests/test_refactor_equivalence.py` 逐字段比对旧路径与新路径；**Python 侧用例只增不减（当前 39 文件 / 256 用例）**。
   **P4 已落地（2026-10-17）**：包已从 `Optimizer/scripts/` 上提到 `Optimizer/portfolio_system/`（`git mv` 保历史）。
   路径策略：入口三脚本 + `optimize_common`/`params` 两个 shim 自带「包根 = scripts 的父目录」bootstrap；8 个测试的包根由 `PM_OPT_SCRIPTS` **派生**（旧布局自动回退，祖先对照仍成立）；
   `build_app.sh` 增拷包目录 + 递归清 `__pycache__`，**未改任何 Swift**（bundle 与仓库保持 `Optimizer/{scripts,portfolio_system,data,.venv}` 同构，`scriptURL` 解析链不变）。
