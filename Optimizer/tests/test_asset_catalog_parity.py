@@ -80,7 +80,7 @@ def test_python_identity_tables_reference_known_keys():
     assert internal <= sources, internal - sources
     assert internal <= set(AC.ASSET_CLASS), internal - set(AC.ASSET_CLASS)
     assert set(MD.PROXY_MAP) <= sources, set(MD.PROXY_MAP) - sources
-    for table_name in ("RF_PREMIUM", "PRIOR", "SPECIAL_FIXED", "CLASS_OVERRIDES",
+    for table_name in ("RF_PREMIUM", "PRIOR", "SPECIAL_FIXED",
                        "BOND_PRIOR_FORMULA", "CONSERVATIVE_CI"):
         table = getattr(AC, table_name)
         unknown = set(table) - set(AC.ASSET_CLASS)

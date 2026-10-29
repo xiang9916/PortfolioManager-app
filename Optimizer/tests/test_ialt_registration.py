@@ -87,9 +87,9 @@ def test_ci_bounds_math():
 
 
 def test_no_manual_history_weight_override():
-    """短样本抑制走统计口径，不再加人工 mu_hist_weight 覆盖。"""
-    assert KEY not in AC.CLASS_OVERRIDES, AC.CLASS_OVERRIDES.get(KEY)
+    """短样本抑制走统计口径，不加人工 mu_hist_weight 覆盖，也没有单标的截断线特例。"""
     assert AC.class_rule(KEY)["mu_hist_weight"] == AC.CLASS_RULES["strategy"]["mu_hist_weight"]
+    assert set(AC.class_rule(KEY)) == {"label", "mu_hist_weight", "window_years", "class"}
 
 
 # ---------------------------------------------------------------- 校准数据

@@ -556,18 +556,18 @@ private struct NewTickerTestInputView: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...3)
 
-            // 类别参数：决定 μ 怎么估、历史窗口多长、是否套人工波动率下限
+            // 类别参数：只决定 μ 怎么估与历史窗口；μ/σ 的数值护栏对所有类别相同
             VStack(alignment: .leading, spacing: 4) {
                 Picker("标的类别", selection: $testClass) {
-                    Text("个股 / 主动基金　100% 历史年化，截断 −10%~40%，窗口 10 年，不套波动率下限")
+                    Text("个股 / 主动基金　100% 历史年化，窗口 10 年")
                         .tag("active")
-                    Text("策略指数（smart beta）　67% 历史 + 33% 先验，截断 −5%~30%，窗口 20 年")
+                    Text("策略指数（smart beta）　67% 历史 + 33% 先验，窗口 20 年")
                         .tag("strategy")
-                    Text("宽基 / 大类（含债券、黄金、商品）　50% 历史 + 50% 先验，截断 0%~20%，窗口全历史")
+                    Text("宽基 / 大类（含债券、黄金、商品）　50% 历史 + 50% 先验，窗口全历史")
                         .tag("broad")
                 }
                 .pickerStyle(.radioGroup)
-                Text("类别决定两件事：① 预期收益怎么估（先验占比不同）；② 历史窗口多长。σ 一律取历史年化波动（没有人工下限）。\n个股 / 主动类还额外受「单个标的组合权重 ≤ 10%」约束（触顶会在结果里提示）。")
+                Text("类别决定两件事：① 预期收益怎么估（先验占比不同）；② 历史窗口多长。\n数值护栏对所有类别相同：μ 截断 −10%~30%、σ 套 1%~60%（历史波动 >60% 截断到 60%，>150% 按数据毛刺丢弃）。\n个股 / 主动类还额外受「单个标的组合权重 ≤ 10%」约束（触顶会在结果里提示）。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

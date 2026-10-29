@@ -29,6 +29,29 @@ def test_no_vol_floor_table():
         assert "use_vol_floor" not in rule, cls
 
 
+def test_uniform_bounds_across_classes():
+    """ADR 0012：护栏是全局的 —— 类别/标的都不再有各自的截断线。"""
+    assert AC.MU_BOUNDS == (-0.10, 0.30)
+    assert AC.SIGMA_BOUNDS == (0.01, 0.60)
+    assert AC.BOUNDS_VERSION == 2
+    assert AC.bounds_payload() == {
+        "version": 2, "mu_lo": -0.10, "mu_hi": 0.30,
+        "sigma_lo": 0.01, "sigma_hi": 0.60,
+    }
+    assert not hasattr(AC, "CLASS_OVERRIDES"), "不应再有单标的截断线覆盖表"
+    for cls, rule in AC.CLASS_RULES.items():
+        assert set(rule) == {"label", "mu_hist_weight", "window_years"}, (cls, rule)
+    # 三类给同一个越界输入 → 同一组护栏
+    for key in ("D_HSBC_SP500", "SPMO", "NVDA", "O_BTC"):
+        mu, _ = AC.build_mu(key, 0.99)
+        assert abs(mu - 0.30) < 1e-12, (key, mu)
+        vol, _ = AC.build_vol(key, 0.99)
+        assert abs(vol - 0.60) < 1e-12, (key, vol)
+    # 截断的唯一实现
+    assert abs(AC.clamp_mu(0.99) - 0.30) < 1e-12
+    assert abs(AC.clamp_sigma(0.005) - 0.01) < 1e-12
+
+
 def test_active_has_no_prior():
     for key, cls in AC.ASSET_CLASS.items():
         if cls == "active":
@@ -47,38 +70,39 @@ def test_broad_blend_and_clamp():
     # D_HSBC_SP500: 0.5×20% + 0.5×9% = 14.5%
     mu, note = AC.build_mu("D_HSBC_SP500", 0.20)
     assert abs(mu - 0.145) < 1e-9 and note is None
-    # 上限 20%：0.5×60% + 0.5×9% = 34.5% → 20%
+    # 统一上限 30%：0.5×60% + 0.5×9% = 34.5% → 30%
     mu, _ = AC.build_mu("D_HSBC_SP500", 0.60)
-    assert abs(mu - 0.20) < 1e-9
-    # 下限 0%：0.5×(−30%) + 0.5×9% = −10.5% → 0%
+    assert abs(mu - 0.30) < 1e-9
+    # 统一下限 −10%：0.5×(−30%) + 0.5×9% = −10.5% → −10%
     mu, _ = AC.build_mu("D_HSBC_SP500", -0.30)
-    assert abs(mu - 0.0) < 1e-9
+    assert abs(mu + 0.10) < 1e-9
 
 
-def test_btc_has_wider_clamp():
-    mu, _ = AC.build_mu("O_BTC", 1.20)   # 0.5×120% + 0.5×15% = 67.5% → 60%
-    assert abs(mu - 0.60) < 1e-9, mu
-    mu, _ = AC.build_mu("O_BTC", -1.00)  # 0.5×(−100%) + 0.5×15% = −42.5% → −20%
-    assert abs(mu + 0.20) < 1e-9, mu
+def test_btc_uses_uniform_bounds():
+    """比特币不再有放宽的截断线（ADR 0012：护栏对所有类别/标的都同一组）。"""
+    mu, _ = AC.build_mu("O_BTC", 1.20)   # 0.5×120% + 0.5×15% = 67.5% → 30%
+    assert abs(mu - 0.30) < 1e-9, mu
+    mu, _ = AC.build_mu("O_BTC", -1.00)  # 0.5×(−100%) + 0.5×15% = −42.5% → −10%
+    assert abs(mu + 0.10) < 1e-9, mu
 
 
 def test_strategy_blend_and_clamp():
     # SPMO: 2/3×20% + 1/3×9.5% = 16.5%
     mu, note = AC.build_mu("SPMO", 0.20)
     assert abs(mu - (2 / 3 * 0.20 + 1 / 3 * 0.095)) < 1e-9 and note is None
-    mu, _ = AC.build_mu("SPMO", 1.00)    # 上限 30%
+    mu, _ = AC.build_mu("SPMO", 1.00)    # 统一上限 30%
     assert abs(mu - 0.30) < 1e-9
-    mu, _ = AC.build_mu("SPMO", -0.60)   # 下限 −5%
-    assert abs(mu + 0.05) < 1e-9
+    mu, _ = AC.build_mu("SPMO", -0.60)   # 统一下限 −10%
+    assert abs(mu + 0.10) < 1e-9
 
 
 def test_active_is_pure_history_no_prior():
     mu, note = AC.build_mu("NVDA", 0.55)
-    assert abs(mu - 0.40) < 1e-9 and note is None      # 上限 40%
+    assert abs(mu - 0.30) < 1e-9 and note is None      # 统一上限 30%
     mu, note = AC.build_mu("NVDA", 0.123)
     assert abs(mu - 0.123) < 1e-9 and note is None      # 不被先验稀释
     mu, note = AC.build_mu("NVDA", -0.45)
-    assert abs(mu + 0.10) < 1e-9                        # 下限 −10%
+    assert abs(mu + 0.10) < 1e-9                        # 统一下限 −10%
 
 
 def test_missing_history_fallback_matrix():
@@ -118,10 +142,14 @@ def test_vol_is_pure_history_for_every_class():
     assert abs(vol - 0.0135) < 1e-9 and note is None
 
 
-def test_no_sigma_upper_cap():
-    # 用户要求去掉 0.6 上限：历史 80% 就保留 80%
+def test_sigma_uniform_bounds():
+    """σ 统一护栏 [1%, 60%]：带内原样、>60% 截断到 60%、<1% 抬到 1%（ADR 0012）。"""
     vol, note = AC.build_vol("D_CN_QDII_COMMODITY", 0.80)
-    assert abs(vol - 0.80) < 1e-9 and note is None
+    assert abs(vol - 0.60) < 1e-9 and note is None
+    vol, note = AC.build_vol("D_CN_QDII_COMMODITY", 0.60)
+    assert abs(vol - 0.60) < 1e-9 and note is None
+    vol, note = AC.build_vol("D_HSBC_CDB", 0.005)
+    assert abs(vol - 0.01) < 1e-9 and note is None
 
 
 def test_low_vol_asset_keeps_its_own_sigma():

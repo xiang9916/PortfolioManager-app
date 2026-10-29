@@ -828,25 +828,38 @@ def build_open_pool_from_status(hsbc_funds, availability, live_anchors=None):
 # ---------------------------------------------------------------------------
 # 参数来源：校准文件（历史数据）+ 类别兜底（asset_classes.py 的人工先验/写死值）
 # ---------------------------------------------------------------------------
-# 规则本身（混合比例、截断线、历史窗口、兜底矩阵）见 asset_classes.py，
+# 规则本身（混合比例、统一数值护栏、历史窗口、兜底矩阵）见 asset_classes.py，
 # 本模块不再保存任何"静态 μ/σ"——它们已全部退役：
 #   有校准值 → 用校准值；没有 → 只对"有写死值"的标的兜底（货币基金）；
-#   其余（无行情且无写死值）→ 该标的缺失并报警（σ 没有人工下限，不编造）。
+#   其余（无行情且无写死值）→ 该标的缺失并报警（σ 有统一护栏，但无行情就不编造）。
 # 行业口径变化记录：
 #   - 2026-10-13 之前：所有标的都是 0.5×历史 + 0.5×先验、截断 [0,15%]，σ 上限 0.6。
 #   - 2026-10-13 起：按 broad/strategy/active 三类分别处理（见 asset_classes.py）。
+#   - 2026-10-29 起：μ/σ 截断线统一为 [−10%, 30%] / [1%, 60%]（ADR 0012）；校准文件带
+#     bounds.version，旧版本文件在运行时被防御式重截断并告警（下方 _reclamp）。
 CALIBRATION_PATH = _resolve_data_file("calibrated_params.json")
 CALIBRATION_LOADED = False
 CALIBRATION_SUMMARY = None
 CALIBRATION_WARNINGS = []      # 校准阶段的提示（缺数据、σ 毛刺、人工兜底…）
 CALIBRATION_PROVENANCE = {}    # key → {class, mu_hist, note, vol_note, ...} 每个数的来历
 PARAM_SOURCE = {}              # key → "calibrated" | "written_fallback" | "missing"
+_BOUNDS_RECLAMPED = []         # 运行时按当前护栏改写的 (key, field, before, after)
+
+
+def _reclamp(key, field, value, clamp):
+    """按当前统一护栏防御式截断一个校准值；发生改写时记入 _BOUNDS_RECLAMPED。"""
+    if value is None:
+        return value
+    out = clamp(value)
+    if abs(float(out) - float(value)) > 1e-12:
+        _BOUNDS_RECLAMPED.append((key, field, float(value), float(out)))
+    return out
 
 
 def _class_fallback(key):
     """没有校准值时的兜底：只对"有写死值"的标的成立（SPECIAL_FIXED，如货币基金）。
 
-    σ 已无人工下限（2026-10-14），因此没有行情的普通标的构造不出 σ → 返回 (None, None)。
+    σ 走统一护栏 [1%, 60%]（ADR 0012），但没有行情的普通标的仍构造不出 σ → 返回 (None, None)。
     """
     mu, _ = _AC.build_mu(key, None)
     vol, _ = _AC.build_vol(key, None)
@@ -857,8 +870,9 @@ def _assign(entry, key, cal_assets):
     """给一条标的写 μ/σ：优先校准值，其次类别兜底；都拿不到就记 missing。"""
     src = cal_assets.get(key)
     if src is not None:
-        entry["mu"] = src["mu"]
-        entry["vol"] = src["vol"]
+        # 防御式截断：校准文件可能来自旧护栏（或手改过），运行时按当前护栏再截一次
+        entry["mu"] = _reclamp(key, "mu", src["mu"], _AC.clamp_mu)
+        entry["vol"] = _reclamp(key, "vol", src["vol"], _AC.clamp_sigma)
         PARAM_SOURCE[key] = "calibrated"
         return True
     mu, vol = _class_fallback(key)
@@ -893,6 +907,8 @@ def _apply_calibration():
             f"其余标的都会因缺 μ/σ 而缺席本次优化")
 
     cal_assets = cal.get("assets", {})
+    cal_bounds = cal.get("bounds") or {}
+    _BOUNDS_RECLAMPED.clear()
     # 动态先验（债券公式）：校准文件里带着解析结果，离线也能复现；缺了就用静态兜底表
     _cal_priors = cal.get("priors") or {}
     if cal.get("prior_rf"):
@@ -957,6 +973,18 @@ def _apply_calibration():
         CALIBRATION_WARNINGS.append(
             "以下标的没有行情数据，已用人工兜底值: " + "、".join(fallback))
 
+    # 6) 护栏版本校验：旧校准文件（或任何越过当前带的值）在运行时重截断并告警
+    bounds_version = cal_bounds.get("version")
+    if bounds_version != _AC.BOUNDS_VERSION or _BOUNDS_RECLAMPED:
+        clamped_keys = sorted({k for k, _field, _before, _after in _BOUNDS_RECLAMPED})
+        detail = (f"已按当前护栏重新截断 {len(clamped_keys)} 个标的"
+                  f"（{'、'.join(clamped_keys)}）；" if clamped_keys else "本次没有值被改写；")
+        CALIBRATION_WARNINGS.append(
+            f"校准文件来自旧参数护栏（记录版本 {bounds_version}，当前 {_AC.BOUNDS_VERSION}："
+            f"μ {_AC.MU_BOUNDS[0]:+.0%}~{_AC.MU_BOUNDS[1]:.0%}、"
+            f"σ {_AC.SIGMA_BOUNDS[0]:.0%}~{_AC.SIGMA_BOUNDS[1]:.0%}），"
+            f"{detail}建议重新校准")
+
     CALIBRATION_SUMMARY = {
         "loaded": CALIBRATION_LOADED,
         "path": str(CALIBRATION_PATH),
@@ -964,6 +992,8 @@ def _apply_calibration():
         "corr_pairs": len(cal_corr),
         "generated_at": cal.get("generated_at"),
         "written_fallback": fallback,
+        "bounds": _AC.bounds_payload(),
+        "bounds_reclamped": sorted({k for k, _field, _before, _after in _BOUNDS_RECLAMPED}),
     }
 
 

@@ -3,29 +3,32 @@
 
 2026-10-13 定稿（用户拍板），起因是当时所有标的都用同一套
 `0.5×历史年化 + 0.5×先验`（截断 [0%, 15%]），对个股/主动基金过重地注入了人工判断，
-对策略指数又不够尊重历史。
+对策略指数又不够尊重历史。2026-10-29 再改：**μ/σ 的截断线不再按类别区分**，
+改为全类别统一护栏（ADR 0012）—— 类别只决定 μ 的估计方法与历史窗口。
 
-三个类别
---------
+三个类别（只决定 μ 的估计方法与历史窗口）
+--------------------------------------
 - **broad 宽基/大类**：宽基被动指数、债券、货币、黄金、商品、大中华 INDEX 桶…
-    μ = clamp(0.5×历史年化 + 0.5×先验, 0%, 20%)；σ = 历史年化波动（**无下限、无上限**）
-    历史窗口 = **全历史**
+    μ = 0.5×历史年化 + 0.5×先验；历史窗口 = **全历史**
 - **strategy 策略指数**：smart beta / 因子 / 主题：红利低波、价值、动量、高股息、恒生科技、
     REIT、缓冲期权…
-    μ = clamp(0.67×历史年化 + 0.33×先验, −5%, 30%)；σ = 历史年化波动（无下限、无上限）
-    历史窗口 = **20 年**（取不到那么长就用可得全历史）
+    μ = 0.67×历史年化 + 0.33×先验；历史窗口 = **20 年**（取不到那么长就用可得全历史）
 - **active 个股/主动基金**：单只股票、主动管理基金
-    μ = clamp(1.00×历史年化, −10%, 40%)，**不使用先验**；σ = 历史年化波动
-    历史窗口 = **10 年**（取不到那么长就用可得全历史）
+    μ = 1.00×历史年化（**不使用先验**）；历史窗口 = **10 年**（取不到那么长就用可得全历史）
 
-σ **没有人工下限**（2026-10-14 用户定稿，此前 broad/strategy 有一张人工下限表）：
-历史波动多低就是多低——人工下限会系统性地把「真实低波资产」抬成「中等波资产」，
-并让过短的样本看起来比实际更温和。样本不足的问题改用「长历史代理」解决（见 PROXY_MAP）。
+统一数值护栏（2026-10-29 定稿，**所有类别共用同一组**）
+----------------------------------------------------
+μ ∈ [−10%, +30%]、σ ∈ [1%, 60%]。类别**不再决定截断线** —— 过去三套区间
+（0~20% / −5~30% / −10~40%）会让同一个"预期收益"在不同类别间横向不可比，
+这是把"参数可信区间"错挂在了"资产身份"上。护栏只防模型输入失真，不是经济假设。
+σ 的处理顺序：历史年化波动 → 套 [1%, 60%]；60%~150% 截断到 60% 并报警；
+> 150% 仍按数据毛刺**丢弃**（不参与优化）。μ/σ 的截断动作唯一实现在
+clamp_mu()/clamp_sigma()，校准（calibrate_params.py）与运行时（params.py）共用，
+并用 BOUNDS_VERSION 版本化。
 
 特例
 ----
-- `O_BTC`：μ 截断放宽到 **−20% ~ 60%**（其余同 broad）
-- `D_HSBC_MMF`：货币基金完全写死 μ=2%、σ=1%（净值本身不反映货币收益）
+- `D_HSBC_MMF`：货币基金完全写死 μ=2%、σ=1%（净值本身不反映货币收益；σ 恰在统一下限）
 
 兜底矩阵（数据缺失时）
 ----------------------
@@ -38,41 +41,50 @@
 
 其它约定
 --------
-- σ > `SIGMA_SANITY_MAX`（150%）视为数据毛刺 → **丢弃该标的并报警**
+- σ > `SIGMA_SANITY_MAX`（150%）视为数据毛刺 → **丢弃该标的并报警**（60%~150% 只截断、不丢弃）
 - `active` 类单个标的组合权重上限 `ACTIVE_CAP`（10%），触顶时合并成一条报警
 - `O_US_CORE` 是聚合项（由美股内部标的动态合成），不参与本表的类别判定
 """
 
 # ---------------------------------------------------------------- 类别规则
 
+# 类别只决定 μ 的估计方法（历史占比）与历史窗口；**不含截断线**。
 CLASS_RULES = {
     "broad": {
         "label": "宽基/大类",
         "mu_hist_weight": 0.50,
-        "mu_lo": 0.00,
-        "mu_hi": 0.20,
         "window_years": None,          # None = 全历史
     },
     "strategy": {
         "label": "策略指数",
         "mu_hist_weight": 2.0 / 3.0,   # 0.67×历史 + 0.33×先验
-        "mu_lo": -0.05,
-        "mu_hi": 0.30,
         "window_years": 20,
     },
     "active": {
         "label": "个股/主动",
         "mu_hist_weight": 1.00,        # 100% 历史，不用先验
-        "mu_lo": -0.10,
-        "mu_hi": 0.40,
         "window_years": 10,
     }
 }
 
-# 单标的覆盖：比特币的截断线放宽到 −20% ~ 60%
-CLASS_OVERRIDES = {
-    "O_BTC": {"mu_lo": -0.20, "mu_hi": 0.60}
-}
+# ---------------------------------------------------------------- 统一数值护栏
+# 所有类别共用同一组护栏（ADR 0012，2026-10-29 定稿）。类别不再决定截断线：
+# 过去的 0~20% / −5~30% / −10~40% 会让同一个"预期收益"在不同类别间横向不可比。
+# 护栏的作用只是防止模型输入失真，不是对资产的经济假设。
+MU_BOUNDS = (-0.10, 0.30)
+SIGMA_BOUNDS = (0.01, 0.60)
+BOUNDS_VERSION = 2      # 改护栏必须同时 +1：params.py 据此判断校准文件是否过期
+
+
+def bounds_payload():
+    """护栏的可序列化快照（写进校准文件顶层 bounds，供运行时校验）。"""
+    return {
+        "version": BOUNDS_VERSION,
+        "mu_lo": MU_BOUNDS[0],
+        "mu_hi": MU_BOUNDS[1],
+        "sigma_lo": SIGMA_BOUNDS[0],
+        "sigma_hi": SIGMA_BOUNDS[1],
+    }
 
 # 完全写死的标的（货币基金：净值不反映货币收益）
 SPECIAL_FIXED = {
@@ -86,8 +98,9 @@ SIGMA_SANITY_MAX = 1.50    # σ 超过这个值按数据毛刺处理（丢弃 + 
 CLASS_PARAM_HELP = (
     "标的类别：broad=宽基/大类（预期收益 50% 历史 + 50% 人工先验）、"
     "strategy=策略指数（67% 历史 + 33% 人工先验）、active=个股/主动基金（100% 历史，不用先验）。"
-    "类别同时决定历史窗口（全历史 / 20 年 / 10 年）与 μ 截断线（0~20% / −5~30% / −10~40%）；"
-    "σ 一律取历史年化波动，没有人工下限。默认 active。"
+    "类别只决定 μ 的估计方法与历史窗口（全历史 / 20 年 / 10 年），**不决定截断线**："
+    "所有类别共用同一组数值护栏 μ ∈ [−10%, 30%]、σ ∈ [1%, 60%]"
+    "（历史波动 >60% 截断到 60% 并报警，>150% 按数据毛刺丢弃）。默认 active。"
     "\n"
     "债券大类（国开债、长久期美债）的预期收益不用写死值，而是动态公式："
     "先验 =（5 年远期收益回归 μ + 当期同久期国债收益率）/2；回归自变量固定为 10 年期国债收益率，"
@@ -387,9 +400,10 @@ def ci_bounds(mu_hist, vol_hist, n, level=0.95):
             "chi2": round(chi2_q, 6), "se_mu": round(se_mu, 6)}
     return mu_low, vol_high, info
 
-# 波动率：**没有人工下限表**（2026-10-14 用户定稿）。σ = 窗口内历史年化波动，
-# 只在超过 SIGMA_SANITY_MAX 时按数据毛刺丢弃。样本太短的问题靠长历史代理解决
-# （见 market_data.PROXY_MAP），不再靠"抬到某个下限"掩盖。
+# 波动率：σ = 窗口内历史年化波动，套统一护栏 [1%, 60%]（2026-10-29，ADR 0012）。
+# 没有人工下限表（2026-10-14 定稿：下限会把真实低波资产抬成中等波资产）；
+# 样本太短的问题靠长历史代理解决（见 market_data.PROXY_MAP）。超过 SIGMA_SANITY_MAX
+# （150%）仍按数据毛刺丢弃，60%~150% 只截断并报警。
 
 # ---------------------------------------------------------------- 规则函数
 
@@ -399,21 +413,19 @@ def asset_class(key):
     return ASSET_CLASS.get(key)
 
 
-def rule_for_class(cls, key=None):
-    """按类别取规则（key 用于套用单标的覆盖，如比特币的截断线）。"""
+def rule_for_class(cls):
+    """按类别取规则（只含 {label, mu_hist_weight, window_years}；护栏是全局的）。"""
     base = CLASS_RULES.get(cls)
     if base is None:
         return None
     rule = dict(base)
     rule["class"] = cls
-    if key:
-        rule.update(CLASS_OVERRIDES.get(key, {}))
     return rule
 
 
 def class_rule(key):
-    """返回该标的适用的规则（含单标的覆盖），未登记返回 None。"""
-    return rule_for_class(asset_class(key), key)
+    """返回该标的适用的类别规则，未登记返回 None。"""
+    return rule_for_class(asset_class(key))
 
 
 def window_years(key):
@@ -443,6 +455,27 @@ def _timedelta_days(days):
     return datetime.timedelta(days=days)
 
 
+def blend_mu(cls, mu_hist, prior=None):
+    """按类别混合 μ，但**不截断**；返回 (mu_blend, note)。
+
+    单独拆出来是为了让校准文件能记录"截断前"的值（provenance.mu_blend）；
+    截断动作只在 mu_for_class() 里做一次。note 语义与 mu_for_class 一致。
+    """
+    rule = CLASS_RULES.get(cls)
+    if rule is None:
+        return None, "unregistered"
+    w = rule["mu_hist_weight"]
+    if mu_hist is None:
+        if prior is None:
+            return None, "no_data"
+        return float(prior), "prior_fallback"
+    if w >= 1.0:
+        return float(mu_hist), None
+    if prior is None:
+        return float(mu_hist), "history_only"
+    return w * mu_hist + (1.0 - w) * prior, None
+
+
 def build_mu(key, mu_hist):
     """按标的类别构造 μ，返回 (mu, note)。见 mu_for_class 的 note 说明。
 
@@ -450,57 +483,56 @@ def build_mu(key, mu_hist):
     """
     if key in SPECIAL_FIXED:
         return SPECIAL_FIXED[key]["mu"], "fixed"
-    return mu_for_class(asset_class(key), mu_hist, prior_for(key), key)
+    return mu_for_class(asset_class(key), mu_hist, prior_for(key))
 
 
-def mu_for_class(cls, mu_hist, prior=None, key=None):
-    """按类别构造 μ，返回 (mu, note)。
+def mu_for_class(cls, mu_hist, prior=None):
+    """按类别构造 μ（混合后套统一护栏），返回 (mu, note)。
 
     note 取值：None（正常混合）/ "prior_fallback"（无行情，用先验）/
     "history_only"（无先验，用纯历史）/ "no_data"（两者皆无 → 丢弃）/
     "unregistered"（没登记类别）。
     """
-    rule = rule_for_class(cls, key)
-    if rule is None:
-        return None, "unregistered"
-    w = rule["mu_hist_weight"]
-    if mu_hist is None:
-        if prior is None:
-            return None, "no_data"
-        return _clamp(prior, rule["mu_lo"], rule["mu_hi"]), "prior_fallback"
-    if w >= 1.0:
-        return _clamp(mu_hist, rule["mu_lo"], rule["mu_hi"]), None
-    if prior is None:
-        return _clamp(mu_hist, rule["mu_lo"], rule["mu_hi"]), "history_only"
-    mu = w * mu_hist + (1.0 - w) * prior
-    return _clamp(mu, rule["mu_lo"], rule["mu_hi"]), None
+    mu_blend, note = blend_mu(cls, mu_hist, prior)
+    if mu_blend is None:
+        return None, note
+    return clamp_mu(mu_blend), note
 
 
 def build_vol(key, vol_hist):
     """按标的类别构造 σ，返回 (vol, note)。见 vol_for_class 的 note 说明。"""
     if key in SPECIAL_FIXED:
         return SPECIAL_FIXED[key]["vol"], "fixed"
-    return vol_for_class(asset_class(key), vol_hist, key)
+    return vol_for_class(asset_class(key), vol_hist)
 
 
-def vol_for_class(cls, vol_hist, key=None):
-    """按类别构造 σ = 窗口内历史年化波动（**没有人工下限**），返回 (vol, note)。
+def vol_for_class(cls, vol_hist):
+    """构造 σ = 窗口内历史年化波动，套统一护栏 [1%, 60%]，返回 (vol, note)。
 
-    note: None（历史值直接用）/ "no_data"（没有行情，构造不出 σ → 调用方丢弃）/
+    note: None（历史值直接用或已被截断）/ "no_data"（没有行情，构造不出 σ → 调用方丢弃）/
     "sigma_glitch"（历史波动超过 SIGMA_SANITY_MAX，按数据毛刺丢弃）/ "unregistered"。
     """
-    rule = rule_for_class(cls, key)
-    if rule is None:
+    if CLASS_RULES.get(cls) is None:
         return None, "unregistered"
     if vol_hist is None:
         return None, "no_data"
     if vol_hist > SIGMA_SANITY_MAX:
         return None, "sigma_glitch"
-    return vol_hist, None
+    return clamp_sigma(vol_hist), None
 
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def clamp_mu(v):
+    """μ 的统一护栏（唯一实现；校准与运行时共用）。"""
+    return _clamp(float(v), *MU_BOUNDS)
+
+
+def clamp_sigma(v):
+    """σ 的统一护栏（唯一实现；60%~150% 截断，>150% 由 vol_for_class 丢弃）。"""
+    return _clamp(float(v), *SIGMA_BOUNDS)
 
 
 def describe_class(cls):
@@ -514,8 +546,9 @@ def describe_class(cls):
         blend = "100% 历史年化（不用先验）"
     else:
         blend = f"{w:.0%} 历史年化 + {1 - w:.0%} 人工先验"
-    return (f"{r['label']}：μ = {blend}，截断 {r['mu_lo']:+.0%}~{r['mu_hi']:.0%}，"
-            f"历史窗口 {win}；σ = 历史年化波动（无人工下限、无上限）")
+    return (f"{r['label']}：μ = {blend}，历史窗口 {win}；"
+            f"所有类别共用护栏 μ ∈ [{MU_BOUNDS[0]:+.0%}, {MU_BOUNDS[1]:.0%}]、"
+            f"σ ∈ [{SIGMA_BOUNDS[0]:.0%}, {SIGMA_BOUNDS[1]:.0%}]（>150% 按毛刺丢弃）")
 
 
 def audit_table():
@@ -533,6 +566,16 @@ def audit_table():
     for key in PRIOR:
         if key not in ASSET_CLASS:
             errors.append(f"{key}: 先验表里的 key 未登记类别")
+    # 统一护栏不变量：截断线不属于任何类别，且 payload 与常量一致（ADR 0012）
+    for cls, rule in CLASS_RULES.items():
+        for k in ("mu_lo", "mu_hi", "sigma_lo", "sigma_hi"):
+            if k in rule:
+                errors.append(f"{cls}: 类别规则不应含截断线 {k}（护栏已统一）")
+    payload = bounds_payload()
+    expected = {"version": BOUNDS_VERSION, "mu_lo": MU_BOUNDS[0], "mu_hi": MU_BOUNDS[1],
+                "sigma_lo": SIGMA_BOUNDS[0], "sigma_hi": SIGMA_BOUNDS[1]}
+    if payload != expected:
+        errors.append(f"bounds_payload() 与常量不一致: {payload} != {expected}")
     counts = {}
     for cls in ASSET_CLASS.values():
         counts[cls] = counts.get(cls, 0) + 1
@@ -544,7 +587,8 @@ if __name__ == "__main__":
     errs, stats = audit_table()
     print(f"标的 {stats['assets']} 个：",
           "、".join(f"{CLASS_RULES[c]['label']} {n}" for c, n in sorted(stats['by_class'].items())))
-    print(f"先验 {stats['prior']} 条（σ 无人工下限表）")
+    print(f"先验 {stats['prior']} 条；统一护栏 μ [{MU_BOUNDS[0]:+.0%}, {MU_BOUNDS[1]:.0%}]、"
+          f"σ [{SIGMA_BOUNDS[0]:.0%}, {SIGMA_BOUNDS[1]:.0%}]（v{BOUNDS_VERSION}）")
     for cls in ("broad", "strategy", "active"):
         print(" -", describe_class(cls))
     print("\n自检:", "通过" if not errs else f"{len(errs)} 个问题")

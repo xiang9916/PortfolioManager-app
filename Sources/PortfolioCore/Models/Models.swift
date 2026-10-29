@@ -258,7 +258,7 @@ public struct TestAssetEstimate: Codable, Hashable {
     public let windowYears: Int?
     /// μ 的口径备注：history_only（无先验，退化为纯历史）/ prior_fallback / fixed。
     public let muNote: String?
-    /// σ 的口径备注：history（历史年化波动；σ 已无人工下限）。
+    /// σ 的口径备注：history（历史年化波动，已套统一护栏 1%~60%）。
     public let volNote: String?
     public let muHist: Double?
     public let volHist: Double?
@@ -276,7 +276,7 @@ public struct HeldAssetEstimate: Codable, Hashable {
     public let name: String?
     /// 预期收益 μ（what-if 口径：active 类 = 纯历史年化）。
     public let mu: Double?
-    /// 历史年化波动 σ（无人工下限）。
+    /// 历史年化波动 σ（已套统一护栏 1%~60%）。
     public let vol: Double?
     /// 历史样本天数。
     public let nDays: Int?

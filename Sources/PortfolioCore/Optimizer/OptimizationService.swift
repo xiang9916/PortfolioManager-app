@@ -113,8 +113,9 @@ public final class OptimizationService {
         if let t = totalAssets { args += ["--total-assets", String(t)] }
         if let tt = testTickers, !tt.isEmpty {
             args += ["--test-tickers", tt.joined(separator: ",")]
-            // 标的类别决定 μ 怎么估（宽基=半历史半先验 / 策略=2/3 历史 / 个股=纯历史），
-            // 也决定是否套用波动率下限与 10% 单标的上限。缺省 active。
+            // 标的类别只决定 μ 怎么估（宽基=半历史半先验 / 策略=2/3 历史 / 个股=纯历史）
+            // 与历史窗口；μ/σ 的数值护栏对所有类别相同（μ −10%~30%、σ 1%~60%），
+            // 另有 10% 单标的上限。缺省 active。
             args += ["--test-class", testClass]
         }
 

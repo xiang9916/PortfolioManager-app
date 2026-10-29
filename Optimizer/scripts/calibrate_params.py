@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Calibrate portfolio-optimizer parameters from market data.
 
-规则（混合比例、截断线、历史窗口、兜底矩阵）全部定义在
+规则（混合比例、统一数值护栏、历史窗口、兜底矩阵）全部定义在
 `asset_classes.py` —— 本文件只负责取数、算历史年化收益/波动、按规则组装。
 
 Data sources:
@@ -12,17 +12,19 @@ Method:
 - 序列口径：Yahoo 一律取复权收盘价（adjclose，含分红/派息；缺失回落 close 并报警），
   中国基金走累计净值 —— 统一为总回报（ADR 0005）。
 - 历史窗口按类别：宽基/大类 = 全历史；策略指数 = 20 年；个股/主动 = 10 年（不足则用可得全历史）。
-- σ = 日收益标准差 × √252（窗口内），**无人工下限**（2026-10-14 取消）。
+- σ = 日收益标准差 × √252（窗口内），套统一护栏 [1%, 60%]（>150% 按数据毛刺丢弃）。
 - 相关性 = 窗口内日收益的皮尔逊相关（共同日期 ≥180 天），不足填 0.30。
-- 见 asset_classes.py 的 docstring：三个类别各自的 μ 构造与兜底矩阵。
+- 见 asset_classes.py 的 docstring：三个类别各自的 μ 构造与兜底矩阵、统一数值护栏（ADR 0012）。
 
 Output:
 - $DSH_FINANCE_DIR/calibrated_params.json (默认 ~/Finance/tmp/)，或 --out 指定
 
 JSON 里额外写入：
-- `provenance[key]`: {class, window_years, n_days, mu_hist, mu, vol, note, vol_note, source}
-  —— 说明每个数的来历（历史 / 人工先验 / 人工下限 / 写死），供 App 与审计追溯。
-- `warnings`: 需要人看的提示（丢弃、σ 毛刺、缺少先验用纯历史、无行情用先验…）。
+- `bounds`: 本次使用的统一数值护栏快照（version / mu_lo / mu_hi / sigma_lo / sigma_hi）。
+- `provenance[key]`: {class, window_years, n_days, mu_hist, mu_blend, mu, vol, vol_before_clip,
+  note, vol_note, source, mu_clipped?, vol_clipped?} —— 说明每个数的来历（历史 / 人工先验 /
+  统一护栏截断 / 写死），供 App 与审计追溯。
+- `warnings`: 需要人看的提示（丢弃、σ 毛刺、护栏截断、缺少先验用纯历史、无行情用先验…）。
 """
 
 import json
@@ -276,6 +278,10 @@ for key, (typ, sym) in sources.items():
                     f"{_label(key)}: 动态先验不可用（μSPY={spy_mu}、Rf={rf_usd}），"
                     f"回落到静态先验 {AC.prior_for(key):.2%}")
 
+        # 统一护栏在 AC 内部截断；这里先记"截断前"的混合值，供 provenance/告警用
+        mu_blend = None
+        if key not in AC.SPECIAL_FIXED:
+            mu_blend, _ = AC.blend_mu(cls, mu_input, AC.prior_for(key))
         mu, note = AC.build_mu(key, mu_input)
         RESOLVED_MU[key] = mu
         vol, vol_note = AC.build_vol(key, vol_input)
@@ -297,6 +303,21 @@ for key, (typ, sym) in sources.items():
         if note == "fixed":
             WARNINGS.append(f"{_label(key)}: 货币基金按写死值 μ=2%、σ=1%")
 
+        # 统一护栏（ADR 0012）：记录截断前的值与是否被截断
+        mu_clipped = (mu_blend is not None and mu is not None
+                      and abs(mu - mu_blend) > 1e-12)
+        vol_clipped = (vol is not None and vol_note is None
+                       and abs(vol - vol_input) > 1e-12)
+        if mu_clipped:
+            WARNINGS.append(
+                f"{_label(key)}: μ 混合值 {mu_blend:.2%} 超出统一护栏 "
+                f"{AC.MU_BOUNDS[0]:+.0%}~{AC.MU_BOUNDS[1]:.0%} → 截断到 {mu:.2%}")
+        if vol_clipped:
+            WARNINGS.append(
+                f"{_label(key)}: σ 历史值 {vol_input:.2%} 超出统一护栏 "
+                f"{AC.SIGMA_BOUNDS[0]:.0%}~{AC.SIGMA_BOUNDS[1]:.0%} → 截断到 {vol:.2%}"
+                f"（>150% 才按毛刺丢弃）")
+
         meta[key] = {"symbol": best_sym, "ret": ann_ret, "vol": ann_vol, "n": n}
         PROVENANCE[key] = {
             "class": cls, "window_years": years, "n_days": n, "source": best_sym,
@@ -309,6 +330,13 @@ for key, (typ, sym) in sources.items():
             "prior": AC.prior_for(key),
             "prior_formula": BOND_DETAIL.get(key) or PRIOR_DETAIL.get(key),
         }
+        if mu_blend is not None:
+            PROVENANCE[key]["mu_blend"] = round(mu_blend, 6)
+        if mu_clipped:
+            PROVENANCE[key]["mu_clipped"] = True
+        PROVENANCE[key]["vol_before_clip"] = round(vol_input, 6)
+        if vol_clipped:
+            PROVENANCE[key]["vol_clipped"] = True
         if key in CI_DETAIL:
             PROVENANCE[key].update({"mu_input": round(mu_input, 6),
                                     "vol_input": round(vol_input, 6),
@@ -342,7 +370,9 @@ if "SPY" not in series and "O_US_CORE" in series:
 
 calib = {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    "rules": "asset_classes.py（2026-10-13 定稿：按类别混合/截断/窗口 + 兜底矩阵；ADR 0005 起统一总回报序列）",
+    "rules": ("2026-10-29 定稿：类别只决定 μ 估计方法与历史窗口；统一数值护栏 "
+              "μ -10%~30% / σ 1%~60%（>150% 丢弃）；ADR 0012；ADR 0005 起统一总回报序列"),
+    "bounds": AC.bounds_payload(),
     "series_basis": "total_return",
     "assets": {},
     "us_internal": {},

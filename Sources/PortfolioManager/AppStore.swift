@@ -660,7 +660,7 @@ public final class AppStore {
     /// 不影响 lastOptimization 与资产总览数据; 仅 optimization_runs 留痕
     /// (paramsDesc 带 test=...)。与普通优化互斥（共用同一个 runner）。
     /// testClass: 标的类别 broad / strategy / active（见 asset_classes.py 的口径说明），
-    /// 决定 μ 的构造方式与历史窗口（σ 一律取历史年化波动，无人工下限）；缺省 active。
+    /// 决定 μ 的构造方式与历史窗口（μ 套 −10%~30%、σ 套 1%~60% 统一护栏）；缺省 active。
     public func runTestOptimization(tickers: [String], testClass: String = "active") {
         guard !isOptimizing, !isTestOptimizing, !tickers.isEmpty else { return }
         let extract = liveExtractURL() ?? env.extractURL
