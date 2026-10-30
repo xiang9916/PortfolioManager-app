@@ -184,39 +184,22 @@ struct FocusView: View {
         return parts.joined(separator: "　")
     }
 
-    /// 前 12 行逐条列出，其余合并成一行合计（避免长列表把页面撑长）。
+    /// 全部参与标的逐行列出（不折叠）；口径见 ADR 0013。
     @ViewBuilder
     private func contributionList(_ attribution: FocusAttribution) -> some View {
-        let visible = Array(attribution.contributions.prefix(12))
-        let rest = attribution.contributions.dropFirst(12)
         let maxAbs = attribution.contributions.map { abs($0.contribution) }.max() ?? 0
         VStack(spacing: 5) {
             HStack(spacing: 8) {
-                Text("标的").frame(width: 185, alignment: .leading)
+                Text("标的（共 \(attribution.contributions.count) 只）")
+                    .frame(width: 185, alignment: .leading).lineLimit(1)
                 Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
                 Text("权重").frame(width: 52, alignment: .trailing)
                 Text("自身涨跌").frame(width: 66, alignment: .trailing)
                 Text("贡献").frame(width: 70, alignment: .trailing)
             }
             .font(.caption2).foregroundStyle(.secondary)
-            ForEach(visible) { item in
+            ForEach(attribution.contributions) { item in
                 contributionRow(item, maxAbs: maxAbs)
-            }
-            if !rest.isEmpty {
-                let weight = rest.reduce(0.0) { $0 + $1.weight }
-                let contribution = rest.reduce(0.0) { $0 + $1.contribution }
-                HStack(spacing: 8) {
-                    Text("其余 \(rest.count) 只")
-                        .frame(width: 185, alignment: .leading).lineLimit(1)
-                    divergingBar(contribution, maxAbs: maxAbs)
-                        .frame(maxWidth: .infinity)
-                    Text(DisplayFormat.pct(weight, decimals: 1))
-                        .frame(width: 52, alignment: .trailing).monospacedDigit()
-                    Text("—").frame(width: 66, alignment: .trailing)
-                    Text(ppText(contribution))
-                        .frame(width: 70, alignment: .trailing).monospacedDigit()
-                }
-                .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
